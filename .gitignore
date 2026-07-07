@@ -1,0 +1,32 @@
+# Binaries
+/geode
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Build output
+/bin/
+/dist/
+
+# Test binaries and coverage
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# Go workspace / module cache artifacts
+/vendor/
+go.work
+go.work.sum
+
+# Env files
+.env
+.env.local
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
