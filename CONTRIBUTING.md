@@ -16,8 +16,8 @@ npm run dev
 
 ## Testing locally
 
-Never point this at your real vault. Run `make dev-vault` instead, it creates `dev-vault/` inside
-this repo and symlinks the repo itself in as the plugin folder
+Never point this at your real vault. Run `make create-dev-vault` instead, it creates `dev-vault/`
+inside this repo and symlinks the repo itself in as the plugin folder
 (`dev-vault/.obsidian/plugins/geode`). Safe to re-run any time.
 
 With `npm run dev` running:
