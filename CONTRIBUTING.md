@@ -12,7 +12,13 @@ npm install
 npm run dev
 ```
 
-`npm run dev` watches `main.ts` and rebuilds `main.js` on every save.
+`npm run dev` watches `src/main.ts` and rebuilds `main.js` on every save.
+
+## CI
+
+Every push and PR runs three checks: `npm run lint` (Biome), `npm run build` (type-check + bundle),
+and `npm run check-versions` (`package.json` and `manifest.json` versions must match). Run all
+three locally before pushing, they're fast. `npm run format` applies Biome's auto-fixes.
 
 ## Testing locally
 
@@ -26,7 +32,7 @@ With `npm run dev` running:
 2. Settings → Community plugins → turn off Restricted mode, then enable Geode.
 3. Open the developer console (Cmd-Option-I on macOS) to watch the `geode: ...` log lines from
    `onload`, `active-leaf-change`, `file-open`, and `layout-ready`.
-4. After changing `main.ts`, reload Obsidian to pick up the new `main.js` (Cmd-P → "Reload app
+4. After changing `src/main.ts`, reload Obsidian to pick up the new `main.js` (Cmd-P → "Reload app
    without saving"). Installing the community Hot-Reload plugin removes the need for this step.
 
 ## License

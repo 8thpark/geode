@@ -12,6 +12,6 @@
 		"inlineSourceMap": true,
 		"inlineSources": true
 	},
-	"include": ["**/*.ts"],
-	"exclude": ["node_modules", "build"]
+	"include": ["src/**/*.ts"],
+	"exclude": ["node_modules"]
 }
