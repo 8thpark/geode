@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./assets/logo-circle.png" alt="Logo for the Geode project">
+  <img src="./assets/logo-circle.png" alt="Logo for the Geode project" width="100px" height="100px">
 </p>
 
 # Geode
