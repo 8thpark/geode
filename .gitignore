@@ -1,7 +1,7 @@
 # Build output
 main.js
 
-# Dev vault (created by `make dev-vault`)
+# Dev vault (created by `make create-dev-vault`)
 /dev-vault/
 
 # Node
