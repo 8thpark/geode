@@ -10,11 +10,11 @@
     "format": "biome check --write .",
     "check-versions": "node scripts/check-version-sync.mjs"
   },
-  "license": "SEE LICENSE IN LICENSE",
+  "license": "Elastic-2.0",
   "devDependencies": {
     "@biomejs/biome": "2.5.2",
-    "esbuild": "^0.28.1",
-    "obsidian": "^1.5.7",
-    "typescript": "^6.0.3"
+    "esbuild": "0.x.x",
+    "obsidian": "1.x.x",
+    "typescript": "6.x.x"
   }
 }
