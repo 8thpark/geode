@@ -1,25 +1,11 @@
-# Binaries
-/geode
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
-
 # Build output
-/bin/
-/dist/
+main.js
 
-# Test binaries and coverage
-*.test
-*.out
-coverage.txt
-coverage.html
+# Dev vault (created by `make dev-vault`)
+/dev-vault/
 
-# Go workspace / module cache artifacts
-/vendor/
-go.work
-go.work.sum
+# Node
+/node_modules/
 
 # Env files
 .env

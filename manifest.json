@@ -1,0 +1,9 @@
+{
+	"id": "geode",
+	"name": "Geode",
+	"version": "0.0.1",
+	"minAppVersion": "1.5.0",
+	"description": "Remote sync, MCP, and an API for your Obsidian vault.",
+	"author": "8thpark",
+	"isDesktopOnly": false
+}

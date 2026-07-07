@@ -1,0 +1,16 @@
+{
+	"name": "geode",
+	"version": "0.0.1",
+	"description": "Remote sync, MCP, and an API for your Obsidian vault.",
+	"private": true,
+	"scripts": {
+		"dev": "node esbuild.config.mjs",
+		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production"
+	},
+	"license": "SEE LICENSE IN LICENSE",
+	"devDependencies": {
+		"esbuild": "^0.20.0",
+		"obsidian": "^1.5.7",
+		"typescript": "^5.4.0"
+	}
+}
