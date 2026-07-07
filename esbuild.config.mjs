@@ -13,6 +13,7 @@ const context = await esbuild.context({
 	sourcemap: production ? false : "inline",
 	minify: production,
 	outfile: "main.js",
+	logLevel: "info",
 });
 
 if (production) {
@@ -20,4 +21,5 @@ if (production) {
 	process.exit(0);
 } else {
 	await context.watch();
+	console.log("watching for changes...");
 }

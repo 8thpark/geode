@@ -9,7 +9,7 @@
 	},
 	"license": "SEE LICENSE IN LICENSE",
 	"devDependencies": {
-		"esbuild": "^0.20.0",
+		"esbuild": "^0.28.1",
 		"obsidian": "^1.5.7",
 		"typescript": "^5.4.0"
 	}

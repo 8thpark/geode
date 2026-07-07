@@ -1,4 +1,4 @@
-import { Plugin, TFile } from "obsidian";
+import { Plugin, type TFile } from "obsidian";
 
 export default class GeodePlugin extends Plugin {
 	async onload() {
