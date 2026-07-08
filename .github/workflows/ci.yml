@@ -50,4 +50,4 @@ jobs:
         with:
           node-version-file: ".nvmrc"
           cache: "npm"
-      - run: npm audit --audit-level=high
+      - run: npm audit
