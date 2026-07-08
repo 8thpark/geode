@@ -15,6 +15,6 @@
     "@biomejs/biome": "2.5.2",
     "esbuild": "0.x.x",
     "obsidian": "1.x.x",
-    "typescript": "6.x.x"
+    "typescript": "7.x.x"
   }
 }
