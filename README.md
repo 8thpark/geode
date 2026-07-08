@@ -4,10 +4,12 @@
 
 # Geode
 
-[![GitHub Branch Check Runs](https://img.shields.io/github/check-runs/8thpark/geode/main?style=for-the-badge)](https://github.com/8thpark/geode/actions/workflows/ci.yml?query=branch%3Amain)
-[![OSSF Scorecard Score](https://img.shields.io/ossf-scorecard/github.com/8thpark/geode?style=for-the-badge&label=OSSF)](https://scorecard.dev/viewer/?uri=github.com/8thpark/geode)
+**[Obsidian](https://obsidian.md) plugin** for remote sync, MCP, and an API for your vault.
 
-[Obsidian](https://obsidian.md) plugin for remote sync, MCP, and an API for your vault.
+[![GitHub Branch Check Runs](https://img.shields.io/github/check-runs/8thpark/geode/main?style=flat-square)](https://github.com/8thpark/geode/actions/workflows/ci.yml?query=branch%3Amain)
+[![OSSF Scorecard Score](https://img.shields.io/ossf-scorecard/github.com/8thpark/geode?style=flat-square&label=OSSF)](https://scorecard.dev/viewer/?uri=github.com/8thpark/geode)
+
+
 
 ## Why
 
