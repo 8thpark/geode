@@ -12,6 +12,14 @@ Geode syncs your vault across your devices through storage you own, encrypted be
 leaves your hands. Your agents read and write the same vault over MCP and an API, laptop asleep or
 not. Your notes, your storage, your keys. Built for agents.
 
+## Security
+
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/8thpark/geode/badge)](https://scorecard.dev/viewer/?uri=github.com/8thpark/geode)
+
+Every change is scanned by CodeQL, dependencies are audited in CI and kept current by Dependabot,
+all workflow actions are pinned by hash, and the OpenSSF Scorecard runs weekly; the badge above is
+the live score. Think you've found a vulnerability? See [SECURITY.md](./SECURITY.md).
+
 ## License
 
 Geode is available under the [Elastic License 2.0](./LICENSE): free to use, modify, and self-host.
