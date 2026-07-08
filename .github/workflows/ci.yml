@@ -40,3 +40,14 @@ jobs:
           node-version-file: ".nvmrc"
           cache: "npm"
       - run: npm run check-versions
+
+  audit:
+    name: NPM Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: ".nvmrc"
+          cache: "npm"
+      - run: npm audit --audit-level=high
