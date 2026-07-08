@@ -38,4 +38,5 @@ With `npm run dev` running:
 ## License
 
 By contributing, you agree your contribution is licensed under this repository's
-[LICENSE](./LICENSE).
+[LICENSE](./LICENSE) and that the project may relicense it as Geode evolves. This keeps future
+licensing changes possible without tracking down every past contributor.
