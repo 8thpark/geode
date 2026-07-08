@@ -6,10 +6,10 @@
 
 **[Obsidian](https://obsidian.md) plugin** for remote sync, MCP, and an API for your vault.
 
-[![GitHub Branch Check Runs](https://img.shields.io/github/check-runs/8thpark/geode/main?style=flat-square)](https://github.com/8thpark/geode/actions/workflows/ci.yml?query=branch%3Amain)
+[![GitHub Branch Check Runs](https://img.shields.io/github/check-runs/8thpark/geode/main?style=flat-square&label=ci)](https://github.com/8thpark/geode/actions/workflows/ci.yml?query=branch%3Amain)
 [![OSSF Scorecard Score](https://img.shields.io/ossf-scorecard/github.com/8thpark/geode?style=flat-square&label=OSSF)](https://scorecard.dev/viewer/?uri=github.com/8thpark/geode)
-
-
+![Plugin Version](https://img.shields.io/github/package-json/version/8thpark/geode?style=flat-square)
+![GitHub Repo stars](https://img.shields.io/github/stars/8thpark/geode?style=flat-square&color=62748e)
 
 ## Why
 
