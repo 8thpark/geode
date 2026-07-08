@@ -57,6 +57,36 @@ Risk is out of 5. Activity last checked 2026-07.
 
 - Line length is set to 100 characters for all project files
 
+## Code Style
+
+Write TypeScript as if it were Go: simple, explicit, boring. When unsure, ask what the dullest Go
+programmer would do.
+
+- The formatter is law; Biome decides and nobody debates the output
+- Pure functions first; classes only where the Obsidian API demands them (`Plugin`,
+  `PluginSettingTab`), and those classes are shells: methods delegate immediately to module level
+  functions, no logic lives on the class
+- Named exports only, except the plugin class Obsidian requires as a default export
+- String literal unions over enums; `erasableSyntaxOnly` in tsconfig enforces strippable syntax
+- `type` over `interface`: data shapes are structs, not contracts, and `type` can't be reopened
+  by declaration merging; `interface` only if implementing a framework contract demands it
+- Errors are values: domain logic returns results rather than throwing; exceptions stay at the
+  framework boundary
+- Explicit zero values: every type has a complete default (see `DEFAULT_SETTINGS`), never
+  undefined shaped holes
+- Guard clauses and early returns; flat beats nested; no `else` after a `return`
+- No ternary expressions; Go doesn't have one and neither do we, write the `if` (file local
+  helpers like `stringOr(v, fallback)` cover the defaulting cases)
+- Every exported symbol gets a one sentence `//` doc comment above it, Go style
+  ("normalizeSettings returns..."); no JSDoc `/** */` blocks
+- Table driven tests with `node:test` and `node:assert/strict`; no test framework dependencies
+- Small files with one concern; no barrel files, no `utils.ts` dumping ground
+- File names are kebab-case (`settings-tab.ts`); tests sit beside the code they test as
+  `name.test.ts`, Go's `_test.go` pattern; graduate to package folders (`settings/tab.ts`) only
+  when a concern outgrows single files
+- Framework code stays thin glue; logic lives in pure modules that never import `obsidian`
+- No clever generics, no decorators, no magic
+
 ## Priorities
 
 - When stuck, the blocker is usually priorities, not missing information → Decide and move
