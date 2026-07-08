@@ -8,9 +8,9 @@
 
 ## Why
 
-Geode syncs your vault across your devices through storage you own, encrypted before anything
-leaves your hands. Your agents read and write the same vault over MCP and an API, laptop asleep or
-not. Your notes, your storage, your keys. Built for agents.
+**Geode** syncs your vault across your devices through storage you own, encrypted before anything
+leaves your hands. Your agents read/write to the same vault via MCP or an API, laptop asleep or not.
+Your notes, your storage, your keys. Built for agents.
 
 ## Security
 
@@ -22,5 +22,5 @@ the live score. Think you've found a vulnerability? See [SECURITY.md](./SECURITY
 
 ## License
 
-Geode is available under the [Elastic License 2.0](./LICENSE): free to use, modify, and self-host.
+Geode is available under the [Elastic License 2.0](./LICENSE); free to use, modify, and self-host.
 The one thing you can't do is offer Geode itself to others as a hosted or managed service.
