@@ -14,7 +14,7 @@ Your notes, your storage, your keys. Built for agents.
 
 ## Security
 
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/8thpark/geode/badge)](https://scorecard.dev/viewer/?uri=github.com/8thpark/geode)
+[![OSSF-Scorecard Score](https://img.shields.io/ossf-scorecard/github.com/8thpark/geode?style=flat-square)](https://scorecard.dev/viewer/?uri=github.com/8thpark/geode)
 
 Every change is scanned by CodeQL, dependencies are audited in CI and kept current by Dependabot,
 all workflow actions are pinned by hash, and the OpenSSF Scorecard runs weekly; the badge above is
