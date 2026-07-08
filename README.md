@@ -4,6 +4,9 @@
 
 # Geode
 
+[![GitHub Branch Check Runs](https://img.shields.io/github/check-runs/8thpark/geode/main?style=for-the-badge)](https://github.com/8thpark/geode/actions/workflows/ci.yml?query=branch%3Amain)
+[![OSSF Scorecard Score](https://img.shields.io/ossf-scorecard/github.com/8thpark/geode?style=for-the-badge&label=OSSF)](https://scorecard.dev/viewer/?uri=github.com/8thpark/geode)
+
 [Obsidian](https://obsidian.md) plugin for remote sync, MCP, and an API for your vault.
 
 ## Why
@@ -14,11 +17,12 @@ Your notes, your storage, your keys. Built for agents.
 
 ## Security
 
-[![OSSF-Scorecard Score](https://img.shields.io/ossf-scorecard/github.com/8thpark/geode?style=flat-square&label=OSSF)](https://scorecard.dev/viewer/?uri=github.com/8thpark/geode)
+
 
 Every change is scanned by CodeQL, dependencies are audited in CI and kept current by Dependabot,
-all workflow actions are pinned by hash, and the OpenSSF Scorecard runs weekly; the badge above is
-the live score. Think you've found a vulnerability? See [SECURITY.md](./SECURITY.md).
+all workflow actions are pinned by hash, and the OpenSSF Scorecard runs weekly; the badge at the top
+of the README is the latest score. Think you've found a vulnerability? See
+[SECURITY.md](./SECURITY.md).
 
 ## License
 
