@@ -6,10 +6,7 @@
     "lib": ["DOM", "ES2020"],
     "strict": true,
     "noImplicitAny": true,
-    "importHelpers": true,
-    "isolatedModules": true,
-    "inlineSourceMap": true,
-    "inlineSources": true
+    "isolatedModules": true
   },
   "include": ["src/**/*.ts"],
   "exclude": ["node_modules"]
