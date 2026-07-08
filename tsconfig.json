@@ -6,7 +6,10 @@
     "lib": ["DOM", "ES2020"],
     "strict": true,
     "noImplicitAny": true,
-    "isolatedModules": true
+    "isolatedModules": true,
+    "erasableSyntaxOnly": true,
+    "allowImportingTsExtensions": true,
+    "types": ["node"]
   },
   "include": ["src/**/*.ts"],
   "exclude": ["node_modules"]
