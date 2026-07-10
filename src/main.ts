@@ -9,6 +9,7 @@ export default class GeodePlugin extends Plugin {
   async onload() {
     await this.loadSettings();
     this.addSettingTab(new GeodeSettingTab(this.app, this));
+    console.log(`geode: loaded (provider=${this.settings.provider})`);
   }
 
   async loadSettings() {
@@ -17,5 +18,6 @@ export default class GeodePlugin extends Plugin {
 
   async saveSettings() {
     await this.saveData(this.settings);
+    console.log("geode: settings saved");
   }
 }

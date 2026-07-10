@@ -4,7 +4,10 @@ import {
   DEFAULT_SETTINGS,
   endpointFor,
   type GeodeSettings,
+  hasConnectionConfig,
   normalizeSettings,
+  regionFor,
+  settingsEqual,
 } from "./settings.ts";
 
 const normalizeCases: { name: string; input: unknown; want: GeodeSettings }[] = [
@@ -75,8 +78,8 @@ const normalizeCases: { name: string; input: unknown; want: GeodeSettings }[] = 
   },
   {
     name: "secretId valid string passes through",
-    input: { secretId: "geode-my-r2-key" },
-    want: { ...DEFAULT_SETTINGS, secretId: "geode-my-r2-key" },
+    input: { secretId: "foo" },
+    want: { ...DEFAULT_SETTINGS, secretId: "foo" },
   },
 ];
 
@@ -107,5 +110,112 @@ const endpointCases: { name: string; input: GeodeSettings; want: string }[] = [
 for (const { name, input, want } of endpointCases) {
   test(`endpointFor: ${name}`, () => {
     assert.strictEqual(endpointFor(input), want);
+  });
+}
+
+const regionCases: { name: string; input: GeodeSettings; want: string }[] = [
+  {
+    name: "r2 always signs as auto",
+    input: { ...DEFAULT_SETTINGS, region: "us-east-1" },
+    want: "auto",
+  },
+  {
+    name: "custom uses the configured region",
+    input: { ...DEFAULT_SETTINGS, provider: "custom", region: "eu-west-2" },
+    want: "eu-west-2",
+  },
+];
+
+for (const { name, input, want } of regionCases) {
+  test(`regionFor: ${name}`, () => {
+    assert.strictEqual(regionFor(input), want);
+  });
+}
+
+const settingsEqualCases: { name: string; a: GeodeSettings; b: GeodeSettings; want: boolean }[] = [
+  {
+    name: "identical values are equal",
+    a: DEFAULT_SETTINGS,
+    b: { ...DEFAULT_SETTINGS },
+    want: true,
+  },
+  {
+    name: "different bucket is not equal",
+    a: DEFAULT_SETTINGS,
+    b: { ...DEFAULT_SETTINGS, bucket: "my-bucket" },
+    want: false,
+  },
+  {
+    name: "different provider is not equal",
+    a: DEFAULT_SETTINGS,
+    b: { ...DEFAULT_SETTINGS, provider: "custom" },
+    want: false,
+  },
+  {
+    name: "reverting a change back to the original value is equal again",
+    a: DEFAULT_SETTINGS,
+    b: { ...{ ...DEFAULT_SETTINGS, provider: "custom" }, provider: "r2" },
+    want: true,
+  },
+];
+
+for (const { name, a, b, want } of settingsEqualCases) {
+  test(`settingsEqual: ${name}`, () => {
+    assert.strictEqual(settingsEqual(a, b), want);
+  });
+}
+
+const hasConnectionConfigCases: { name: string; input: GeodeSettings; want: boolean }[] = [
+  {
+    name: "empty settings are incomplete",
+    input: DEFAULT_SETTINGS,
+    want: false,
+  },
+  {
+    name: "r2 missing account ID is incomplete",
+    input: { ...DEFAULT_SETTINGS, bucket: "b", accessKeyId: "a", secretId: "s" },
+    want: false,
+  },
+  {
+    name: "r2 with all fields is complete",
+    input: {
+      ...DEFAULT_SETTINGS,
+      accountId: "acc",
+      bucket: "b",
+      accessKeyId: "a",
+      secretId: "s",
+    },
+    want: true,
+  },
+  {
+    name: "custom missing region is incomplete",
+    input: {
+      ...DEFAULT_SETTINGS,
+      provider: "custom",
+      endpoint: "https://s3.example.com",
+      bucket: "b",
+      accessKeyId: "a",
+      secretId: "s",
+    },
+    want: false,
+  },
+  {
+    name: "custom with all fields is complete",
+    input: {
+      ...DEFAULT_SETTINGS,
+      provider: "custom",
+      endpoint: "https://s3.example.com",
+      region: "us-east-1",
+      bucket: "b",
+      accessKeyId: "a",
+      secretId: "s",
+    },
+    want: true,
+  },
+];
+
+for (const { name, input, want } of hasConnectionConfigCases) {
+  test(`hasConnectionConfig: ${name}`, () => {
+    assert.strictEqual(hasConnectionConfig(input), want);
   });
 }

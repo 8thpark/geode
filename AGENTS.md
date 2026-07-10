@@ -77,6 +77,8 @@ programmer would do.
 - Guard clauses and early returns; flat beats nested; no `else` after a `return`
 - No ternary expressions; Go doesn't have one and neither do we, write the `if` (file local
   helpers like `stringOr(v, fallback)` cover the defaulting cases)
+- Braces on every `if`, even a one line body; Go's formatter won't let you drop them and neither
+  do we
 - Every exported symbol gets a one sentence `//` doc comment above it, Go style
   ("normalizeSettings returns..."); no JSDoc `/** */` blocks
 - Table driven tests with `node:test` and `node:assert/strict`; no test framework dependencies
@@ -86,6 +88,9 @@ programmer would do.
   when a concern outgrows single files
 - Framework code stays thin glue; logic lives in pure modules that never import `obsidian`
 - No clever generics, no decorators, no magic
+- A small, focused dependency beats hand rolling something fiddly to get right (request signing,
+  a mock server); it loses to hand rolling the moment it drags in a framework or an SDK we don't
+  need
 
 ## Priorities
 

@@ -12,13 +12,19 @@ npm install
 npm run dev
 ```
 
-`npm run dev` watches `src/main.ts` and rebuilds `main.js` on every save.
+`npm run dev` runs two things side by side, via `concurrently`: an esbuild watcher that rebuilds
+`main.js` on every save to `src/`, and a local mock S3 server (`s3rver`) on `localhost:4568` for
+testing storage settings without touching a real bucket. Run `npm run dev:s3` on its own if you
+only need the mock server.
 
 ## CI
 
-Every push and PR runs three checks: `npm run lint` (Biome), `npm run build` (type-check + bundle),
-and `npm run check-versions` (`package.json` and `manifest.json` versions must match). Run all
-three locally before pushing, they're fast. `npm run format` applies Biome's auto-fixes.
+Every push and PR runs: `npm run lint` (Biome), `npm run build` (type-check + bundle), `npm test`
+(`node:test`), `npm run check-versions` (`package.json` and `manifest.json` versions must match),
+and `npm run audit` (production dependencies only; dev tooling like the mock S3 server never
+ships, so its advisories don't gate CI). Run these locally before pushing, they're fast. Plain
+`npm audit` also works but includes that dev-only noise; `npm run audit` is the one that matches
+CI. `npm run format` applies Biome's auto-fixes.
 
 ## Testing locally
 
@@ -30,10 +36,15 @@ With `npm run dev` running:
 
 1. Open `dev-vault/` as a vault in Obsidian (Open another vault → Open folder as vault).
 2. Settings → Community plugins → turn off Restricted mode, then enable Geode.
-3. Open the developer console (Cmd-Option-I on macOS) to watch the `geode: ...` log lines from
-   `onload`, `active-leaf-change`, `file-open`, and `layout-ready`.
-4. After changing `src/main.ts`, reload Obsidian to pick up the new `main.js` (Cmd-P → "Reload app
+3. Settings → Geode, set Provider to Custom and fill in the mock server: Endpoint
+   `http://localhost:4568`, Region `us-east-1`, Bucket `geode-dev`, Access key ID `S3RVER`, and
+   add a secret with value `S3RVER` (s3rver's fixed dev credentials). Click Test Connection.
+4. After changing source files, reload Obsidian to pick up the new `main.js` (Cmd-P → "Reload app
    without saving"). Installing the community Hot-Reload plugin removes the need for this step.
+
+The mock server's data directory (`.s3rver-data/`) and Obsidian's plugin data file (`data.json`,
+which lands at the repo root because the dev vault symlinks the whole repo in as the plugin
+folder) are both gitignored; neither should ever be committed.
 
 ## License
 

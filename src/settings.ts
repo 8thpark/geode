@@ -7,6 +7,10 @@ export type GeodeSettings = {
   region: string;
   bucket: string;
   accessKeyId: string;
+  // secretId is a SecretStorage reference name, not the secret value itself. Obsidian's
+  // SecretComponent picker lets a user pick or create a secret under any name of their choosing;
+  // it does not support forcing new entries onto a fixed ID, so we have to remember whichever
+  // one they picked.
   secretId: string;
 };
 
@@ -24,13 +28,17 @@ export const DEFAULT_SETTINGS: GeodeSettings = {
 
 // stringOr returns v if it is a string, otherwise fallback.
 function stringOr(v: unknown, fallback: string): string {
-  if (typeof v === "string") return v;
+  if (typeof v === "string") {
+    return v;
+  }
   return fallback;
 }
 
 // providerOr returns "custom" if v is "custom", otherwise "r2".
-function providerOr(v: unknown): "r2" | "custom" {
-  if (v === "custom") return "custom";
+export function providerOr(v: unknown): "r2" | "custom" {
+  if (v === "custom") {
+    return "custom";
+  }
   return "r2";
 }
 
@@ -60,5 +68,42 @@ export function endpointFor(settings: GeodeSettings): string {
   if (settings.provider === "r2") {
     return `https://${settings.accountId}.r2.cloudflarestorage.com`;
   }
+
   return settings.endpoint;
+}
+
+// regionFor returns the signing region to use for the given settings. R2 always signs with
+// "auto" regardless of what a user might type, so custom is the only provider that needs one.
+export function regionFor(settings: GeodeSettings): string {
+  if (settings.provider === "r2") {
+    return "auto";
+  }
+
+  return settings.region;
+}
+
+// settingsEqual reports whether two settings values are identical field for field. Used to
+// derive whether a draft has unsaved changes by comparing it to the last saved settings, rather
+// than tracking a dirty flag that can't self-correct when an edit is reverted by hand.
+export function settingsEqual(a: GeodeSettings, b: GeodeSettings): boolean {
+  return (
+    a.provider === b.provider &&
+    a.accountId === b.accountId &&
+    a.endpoint === b.endpoint &&
+    a.region === b.region &&
+    a.bucket === b.bucket &&
+    a.accessKeyId === b.accessKeyId &&
+    a.secretId === b.secretId
+  );
+}
+
+// hasConnectionConfig reports whether settings have enough filled in to attempt a connection.
+export function hasConnectionConfig(settings: GeodeSettings): boolean {
+  if (settings.bucket === "" || settings.accessKeyId === "" || settings.secretId === "") {
+    return false;
+  }
+  if (settings.provider === "r2") {
+    return settings.accountId !== "";
+  }
+  return settings.endpoint !== "" && settings.region !== "";
 }

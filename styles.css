@@ -1,0 +1,104 @@
+.geode-settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.75em;
+}
+
+.geode-title {
+  margin: 0;
+  padding: 0;
+  font-size: 1.75em;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.geode-settings-header .setting-item-description {
+  margin-top: 0.25em;
+}
+
+.geode-settings-links {
+  display: flex;
+  gap: 0.5em;
+}
+
+.geode-settings-header button,
+.geode-card button {
+  cursor: pointer;
+}
+
+/* Obsidian boxes every .setting-item by default; group related rows into one card instead of
+   one box per row, matching the flowing layout of Obsidian's own core settings pages. */
+.geode-card {
+  background: var(--background-secondary);
+  border-radius: var(--radius-m, 8px);
+  overflow: hidden;
+}
+
+.geode-card .setting-item {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  border-bottom: 1px solid var(--background-modifier-border);
+  margin: 0;
+  padding-left: 1em;
+  padding-right: 1em;
+}
+
+.geode-card .setting-item:last-child {
+  border-bottom: none;
+}
+
+.geode-support-anchor {
+  margin-top: 1.5em;
+}
+
+.geode-status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 8px;
+  margin-bottom: 4px;
+  vertical-align: middle;
+  background: var(--text-faint);
+}
+
+.geode-status-dot.is-checking {
+  background: var(--text-warning);
+}
+
+.geode-status-dot.is-ok {
+  background: var(--text-success);
+}
+
+.geode-status-dot.is-error {
+  background: var(--text-error);
+}
+
+.geode-status-separator {
+  color: var(--text-faint);
+}
+
+.geode-connection-message.is-error {
+  color: var(--text-error);
+}
+
+.geode-connection-message.is-ok {
+  color: var(--text-success);
+}
+
+.geode-dirty-text {
+  color: var(--text-warning);
+}
+
+.geode-debug-box {
+  font-family: var(--font-monospace);
+  font-size: 0.85em;
+  white-space: pre-wrap;
+  background: var(--background-primary);
+  border-radius: var(--radius-s, 4px);
+  padding: 1em;
+  margin: 1em 1em 1em 1em;
+  overflow-x: auto;
+}
