@@ -12,9 +12,6 @@
 ![Plugin Version](https://img.shields.io/github/package-json/version/8thpark/geode?style=flat-square)
 ![GitHub Repo stars](https://img.shields.io/github/stars/8thpark/geode?style=social)
 
-<!-- omit in toc -->
-## Links
-
 - [Why](#why)
 - [Security](#security)
 - [License](#license)
