@@ -19,6 +19,12 @@
 - The test for every decision: would we point it at our own vault, and would we hand the keys to
   no one
 
+## Documentation
+
+Ensure that documentation is added to, and updated, as the project progresses; as well as continue
+to update the private [Working Document](fa8682d6-0677-4d6c-a32d-c91e51411d8f) artifact as we make
+decisions together about the project, and to track progress.
+
 ## Competitors
 
 Risk is out of 5. Activity last checked 2026-07.

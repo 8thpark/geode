@@ -4,7 +4,6 @@ main.js
 # Dev vault (created by `make create-dev-vault`)
 /dev-vault/
 /data.json
-/.s3rver-data/
 
 # Node
 /node_modules/
