@@ -1,7 +1,8 @@
-<p align="center">
-  <img src="./assets/logo-circle.png" alt="Logo for the Geode project" width="100px" height="100px">
+<p align="left">
+  <img src="./assets/logo_circle.png" alt="Logo for the Geode project" width="100px" height="100px">
 </p>
 
+<!-- omit in toc -->
 # Geode
 
 **[Obsidian](https://obsidian.md) plugin** for remote sync, MCP, and an API for your vault.
@@ -11,22 +12,32 @@
 ![Plugin Version](https://img.shields.io/github/package-json/version/8thpark/geode?style=flat-square)
 ![GitHub Repo stars](https://img.shields.io/github/stars/8thpark/geode?style=social)
 
+<!-- omit in toc -->
+## Links
+
+- [Why](#why)
+- [Security](#security)
+- [License](#license)
+
 ## Why
 
 **Geode** syncs your vault across your devices through storage you own, encrypted before anything
-leaves your hands. Your agents read/write to the same vault via MCP or an API, laptop asleep or not.
-Your notes, your storage, your keys. Built for agents.
+leaves your hands. Your agents (like Claude and Codex) can read/write to the same vault via the MCP
+and API, whilst your laptop is asleep or not. Your notes, your storage, your keys. Built for agents.
 
 ## Security
 
-
-
-Every change is scanned by CodeQL, dependencies are audited in CI and kept current by Dependabot,
-all workflow actions are pinned by hash, and the OpenSSF Scorecard runs weekly; the badge at the top
-of the README is the latest score. Think you've found a vulnerability? See
-[SECURITY.md](./SECURITY.md).
+Security is top concern for the project; every change is scanned by
+[GitHub's CodeQL](https://codeql.github.com), the low number of dependencies we use are audited by
+[Dependabot](https://github.com/dependabot) and
+[NPM Audit](https://docs.npmjs.com/auditing-package-dependencies-for-security-vulnerabilities), all,
+and our
+[OpenSSF Scorecard](https://scorecard.dev/viewer/?uri=github.com/8thpark/geode&sort_by=check-score&sort_direction=desc)
+updates on every change. Please see [SECURITY.md](./SECURITY.md) if you think you have found a
+vulnerability or have questions.
 
 ## License
 
-Geode is available under the [Elastic License 2.0](./LICENSE); free to use, modify, and self-host.
-The one thing you can't do is offer Geode itself to others as a hosted or managed service.
+**Geode** is available under the [Elastic License 2.0](./LICENSE), meaning it is free to use, modify,
+and self host. The one thing you can't do is offer **Geode** itself to others as a hosted or managed
+service.
