@@ -4,6 +4,7 @@ main.js
 # Dev vault (created by `make create-dev-vault`)
 /dev-vault/
 /data.json
+/state.json
 
 # Node
 /node_modules/
