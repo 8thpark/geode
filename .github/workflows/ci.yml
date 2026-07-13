@@ -81,4 +81,4 @@ jobs:
       # job doesn't duplicate that lifecycle here — same command as local, same source of truth.
       - run: npm run test:integration
       - if: always()
-        run: docker-compose down -v
+        run: docker compose down -v

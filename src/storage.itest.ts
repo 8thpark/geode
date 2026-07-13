@@ -1,6 +1,6 @@
-// Integration tests: exercise a real S3 compatible server (MinIO, via docker-compose) rather
+// Integration tests: exercise a real S3 compatible server (MinIO, via `docker compose`) rather
 // than mocking fetch or hand-rolling a fake — highest confidence that requests are actually well
-// formed. Requires `docker-compose up -d` (or `npm run dev:s3` in another terminal) running
+// formed. Requires `docker compose up -d` (or `npm run dev:s3` in another terminal) running
 // first; not part of `npm test`, run separately via `npm run test:integration`.
 import assert from "node:assert/strict";
 import { test } from "node:test";

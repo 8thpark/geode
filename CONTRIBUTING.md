@@ -26,9 +26,18 @@ brew install colima docker docker-compose
 colima start --vm-type=vz --mount-type=virtiofs
 ```
 
-(`docker-compose` is the standalone binary, not the `docker compose` plugin — avoids needing to
-register it under `~/.docker/cli-plugins` by hand.) Docker Desktop or OrbStack work too if you'd
-rather use those; both bundle all three pieces into one installer.
+Every command in this repo uses the `docker compose` (plugin) form — it's what GitHub's CI runners
+and Docker Desktop ship, so one command works everywhere. Colima setups need a one-time line in
+`~/.docker/config.json` to register Homebrew's `docker-compose` as that plugin:
+
+```json
+{
+  "cliPluginsExtraDirs": ["/opt/homebrew/lib/docker/cli-plugins"]
+}
+```
+
+Docker Desktop or OrbStack work too if you'd rather use those; both bundle everything into one
+installer and need no extra config.
 
 ## Testing
 
@@ -49,7 +58,7 @@ compatible server, not a second hand-rolled fake to keep in sync.
 ## CI
 
 Every push and PR runs: `npm run lint` (Biome), `npm run build` (type-check + bundle), `npm test`
-(unit), `npm run test:integration` (against MinIO via `docker-compose`, in its own job),
+(unit), `npm run test:integration` (against MinIO via `docker compose`, in its own job),
 `npm run check-versions` (`package.json` and `manifest.json` versions must match), and
 `npm run audit` (production dependencies only; dev tooling never ships, so its advisories don't
 gate CI). Run the unit/lint/build ones locally before pushing, they're fast; the integration job
