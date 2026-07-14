@@ -43,9 +43,21 @@ async function hashBytes(data: Uint8Array): Promise<string> {
   // Same TS/DOM lib generic mismatch as storage.ts's BodyInit cast: Uint8Array<ArrayBufferLike>
   // vs BufferSource's stricter ArrayBuffer expectation. Not a real runtime issue.
   const digest = await crypto.subtle.digest("SHA-256", data as BufferSource);
-  return Array.from(new Uint8Array(digest))
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
+  let hex = "";
+  for (const byte of new Uint8Array(digest)) {
+    hex += byte.toString(16).padStart(2, "0");
+  }
+  return hex;
+}
+
+// byPath builds a lookup from path to file state, for matching a live file against what the
+// previous snapshot last saw at that same path.
+function byPath(files: FileState[]): Map<string, FileState> {
+  const result = new Map<string, FileState>();
+  for (const file of files) {
+    result.set(file.path, file);
+  }
+  return result;
 }
 
 // takeSnapshot walks every file the reader currently sees and returns their content hashes. A
@@ -57,27 +69,35 @@ export async function takeSnapshot(
   reader: VaultReader,
   previous: VaultSnapshot,
 ): Promise<VaultSnapshot> {
-  const previousByPath = new Map(previous.files.map((file) => [file.path, file]));
+  const previousByPath = byPath(previous.files);
   const liveFiles = await reader.listFiles();
 
-  const files = await Promise.all(
-    liveFiles.map(async (file) => {
-      const known = previousByPath.get(file.path);
-      if (known !== undefined && known.size === file.size && known.mtime === file.mtime) {
-        return known;
-      }
-      const bytes = await reader.readFile(file.path);
-      return { path: file.path, size: file.size, mtime: file.mtime, hash: await hashBytes(bytes) };
-    }),
-  );
+  const pending: Promise<FileState>[] = [];
+  for (const file of liveFiles) {
+    pending.push(
+      (async () => {
+        const known = previousByPath.get(file.path);
+        if (known !== undefined && known.size === file.size && known.mtime === file.mtime) {
+          return known;
+        }
+        const bytes = await reader.readFile(file.path);
+        return {
+          path: file.path,
+          size: file.size,
+          mtime: file.mtime,
+          hash: await hashBytes(bytes),
+        };
+      })(),
+    );
+  }
 
-  return { files };
+  return { files: await Promise.all(pending) };
 }
 
 // diffSnapshots compares two snapshots and reports every path whose content differs.
 export function diffSnapshots(previous: VaultSnapshot, current: VaultSnapshot): Change[] {
-  const previousByPath = new Map(previous.files.map((file) => [file.path, file]));
-  const currentByPath = new Map(current.files.map((file) => [file.path, file]));
+  const previousByPath = byPath(previous.files);
+  const currentByPath = byPath(current.files);
   const changes: Change[] = [];
 
   for (const file of current.files) {

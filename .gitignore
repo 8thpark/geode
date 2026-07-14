@@ -5,6 +5,7 @@ main.js
 /dev-vault/
 /data.json
 /state.json
+/geode.log
 
 # Node
 /node_modules/

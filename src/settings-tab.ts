@@ -313,9 +313,18 @@ function renderSupportSection(tab: GeodeSettingTab, containerEl: HTMLElement): v
           await navigator.clipboard.writeText("help@geodemd.com");
           flashButtonText(button, "Copy", "Copied");
         } catch (err) {
-          console.error("geode: could not copy support email:", err);
+          tab.plugin.logger.error(`could not copy support email: ${err}`);
           flashButtonText(button, "Copy", "Failed");
         }
+      }),
+    );
+
+  new Setting(card)
+    .setName("Logs")
+    .setDesc("What geode has done, most recent first.")
+    .addButton((button) =>
+      button.setButtonText("View").onClick(() => {
+        void tab.plugin.openLogView();
       }),
     );
 
@@ -331,7 +340,7 @@ function renderSupportSection(tab: GeodeSettingTab, containerEl: HTMLElement): v
         await navigator.clipboard.writeText(debugInfoText(tab));
         flashButtonText(button, "Copy", "Copied");
       } catch (err) {
-        console.error("geode: could not copy debugging info:", err);
+        tab.plugin.logger.error(`could not copy debugging info: ${err}`);
         flashButtonText(button, "Copy", "Failed");
       }
     });
@@ -423,15 +432,15 @@ export class GeodeSettingTab extends PluginSettingTab {
   }
 
   async save(): Promise<void> {
-    console.log(`geode: saving settings (provider=${this.draft.provider})`);
+    this.plugin.logger.info(`saving settings (provider=${this.draft.provider})`);
     this.plugin.settings = { ...this.draft };
     await this.plugin.saveSettings();
     this.refreshActionsUI();
   }
 
   async checkConnection(): Promise<void> {
-    console.log(
-      `geode: testing connection (provider=${this.draft.provider}, bucket=${this.draft.bucket})`,
+    this.plugin.logger.info(
+      `testing connection (provider=${this.draft.provider}, bucket=${this.draft.bucket})`,
     );
     this.connectionStatus = "checking";
     this.connectionMessage = "";
@@ -439,13 +448,13 @@ export class GeodeSettingTab extends PluginSettingTab {
 
     const secretAccessKey = this.app.secretStorage.getSecret(this.draft.secretId) ?? "";
     if (secretAccessKey === "") {
-      console.warn(`geode: no secret found for ID "${this.draft.secretId}"`);
+      this.plugin.logger.warn(`no secret found for ID "${this.draft.secretId}"`);
     }
 
     const result = await testConnection(this.draft, secretAccessKey);
 
     if (result.ok) {
-      console.log("geode: connection ok");
+      this.plugin.logger.info("connection ok");
       this.connectionStatus = "ok";
       this.refreshActionsUI();
       return;
@@ -453,7 +462,7 @@ export class GeodeSettingTab extends PluginSettingTab {
 
     this.connectionStatus = "error";
     this.connectionMessage = result.message;
-    console.error("geode: connection test failed:", result.message);
+    this.plugin.logger.error(`connection test failed: ${result.message}`);
     this.refreshActionsUI();
   }
 }
