@@ -67,8 +67,8 @@ noise; `npm run audit` is the one that matches CI. `npm run format` applies Biom
 
 ## Testing locally
 
-Never point this at your real vault. Run `make create-dev-vault` instead, it creates `dev-vault/`
-inside this repo and symlinks the repo itself in as the plugin folder
+Never point this at your real vault. Run `npm run create-dev-vault` instead, it creates
+`dev-vault/` inside this repo and links the repo itself in as the plugin folder
 (`dev-vault/.obsidian/plugins/geode`). Safe to re-run any time.
 
 With `npm run dev` running:
@@ -86,6 +86,28 @@ Obsidian's plugin data file (`data.json`), geode's own vault state file (`state.
 log file (`geode.log`), all of which land at the repo root because the dev vault symlinks the
 whole repo in as the plugin folder, are gitignored and should never be committed. The MinIO
 container's data lives in a Docker volume, not a repo folder — `npm run dev:s3:reset` clears it.
+
+## Windows
+
+Clone the repo onto the Windows filesystem (`C:\...`, not a WSL path) and everything above just
+works: `npm run create-dev-vault` detects Windows and creates the plugin folder as an NTFS
+junction rather than a symlink, which needs neither Administrator rights nor Developer Mode
+enabled. Install [Docker Desktop](https://www.docker.com/products/docker-desktop) for the storage
+server, everything else in "Building" above is unchanged.
+
+## WSL
+
+WSL (Windows Subsystem for Linux) runs a real Linux environment alongside Windows, and it's a
+reasonable place to clone the repo, but keep the repo and Obsidian on the same side of that
+boundary. If the repo lives inside WSL, run Obsidian's Linux build inside WSL too (via
+[WSLg](https://github.com/microsoft/wslg), built into Windows 11), pointed at the native
+`/home/.../dev-vault` path.
+
+Don't open that same vault from a Windows native install of Obsidian over the
+`\\wsl.localhost\...` network share. Windows' client for that share has long standing trouble
+following symlinks created inside WSL's filesystem, so a Windows native Obsidian fails to load the
+plugin with an `ENOENT` on `dev-vault\.obsidian\plugins\geode`, even though the link is perfectly
+valid from the Linux side.
 
 ## License
 
