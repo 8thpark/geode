@@ -60,7 +60,7 @@ function tooltipFor(status: SyncStatus, detail: string): string {
   if (status === "error") {
     return `Geode: ${detail}`;
   }
-  return "Geode: click to sync now";
+  return "Geode: click to sync";
 }
 
 // GeodePlugin is the Obsidian plugin entry point that owns settings load and save.
@@ -91,8 +91,8 @@ export default class GeodePlugin extends Plugin {
       callback: () => this.openSettingsTab(),
     });
     this.addCommand({
-      id: "sync-now",
-      name: "Sync now",
+      id: "sync",
+      name: "Sync",
       callback: () => void this.syncNow(),
     });
     this.register(() => this.app.workspace.detachLeavesOfType(LOG_VIEW_TYPE));
@@ -167,13 +167,13 @@ export default class GeodePlugin extends Plugin {
       return;
     }
     if (!hasConnectionConfig(this.settings)) {
-      this.logger.warn("sync now: storage isn't configured yet");
+      this.logger.warn("sync: storage isn't configured yet");
       this.setSyncStatus("error", "storage isn't configured yet");
       return;
     }
     const dir = this.manifest.dir;
     if (dir === undefined) {
-      this.logger.error("sync now: no plugin data directory available");
+      this.logger.error("sync: no plugin data directory available");
       this.setSyncStatus("error", "no plugin data directory available");
       return;
     }
@@ -201,7 +201,7 @@ export default class GeodePlugin extends Plugin {
 
     const remote = await readRemoteManifest(storage);
     if (!remote.ok) {
-      this.logger.error(`sync now: could not read the remote manifest: ${remote.message}`);
+      this.logger.error(`sync: could not read the remote manifest: ${remote.message}`);
       this.setSyncStatus("error", remote.message);
       return;
     }
@@ -209,7 +209,7 @@ export default class GeodePlugin extends Plugin {
     const actions = planSync(previous, local, remote.snapshot);
     const failures = await executeSyncPlan(actions, reader, localWriter, storage, Date.now());
     for (const failure of failures) {
-      this.logger.error(`sync now: ${failure.path}: ${failure.message}`);
+      this.logger.error(`sync: ${failure.path}: ${failure.message}`);
     }
     if (failures.length > 0) {
       this.setSyncStatus("error", `${failures.length} file(s) failed to sync`);
@@ -223,13 +223,13 @@ export default class GeodePlugin extends Plugin {
     const manifestBody = new TextEncoder().encode(JSON.stringify(final));
     const uploaded = await storage.putObject(MANIFEST_KEY, manifestBody);
     if (!uploaded.ok) {
-      this.logger.error(`sync now: could not upload the remote manifest: ${uploaded.message}`);
+      this.logger.error(`sync: could not upload the remote manifest: ${uploaded.message}`);
       this.setSyncStatus("error", uploaded.message);
       return;
     }
 
     await stateStore.write(final);
-    this.logger.info(`sync now: complete (${actions.length} change(s) applied)`);
+    this.logger.info(`sync: complete (${actions.length} change(s) applied)`);
     this.setSyncStatus("idle", "");
   }
 
