@@ -1,11 +1,22 @@
 import type { App } from "obsidian";
-import { Plugin } from "obsidian";
+import { Plugin, setIcon, setTooltip } from "obsidian";
 import { createLogger, type Logger, type LogSink } from "./log";
 import { createLogSink } from "./log-adapter";
 import { GeodeLogView, LOG_VIEW_TYPE } from "./log-view";
-import { DEFAULT_SETTINGS, type GeodeSettings, normalizeSettings } from "./settings";
+import {
+  DEFAULT_SETTINGS,
+  type GeodeSettings,
+  hasConnectionConfig,
+  normalizeSettings,
+} from "./settings";
 import { GeodeSettingTab } from "./settings-tab";
-import { createObsidianStateStore, createObsidianVaultReader } from "./vault-adapter";
+import { createS3Client } from "./storage";
+import { executeSyncPlan, MANIFEST_KEY, planSync, readRemoteManifest } from "./sync";
+import {
+  createObsidianLocalWriter,
+  createObsidianStateStore,
+  createObsidianVaultReader,
+} from "./vault-adapter";
 import { diffSnapshots, takeSnapshot } from "./vault-state";
 
 // VAULT_STATE_DEBOUNCE_MS delays a vault state refresh after the last file event, so a burst of
@@ -27,13 +38,40 @@ type AppWithSetting = App & {
   setting: { open: () => void; close: () => void; openTabById: (id: string) => void };
 };
 
+// SyncStatus is the state the status bar item reflects.
+type SyncStatus = "idle" | "syncing" | "error";
+
+// iconFor returns the status bar icon for status.
+function iconFor(status: SyncStatus): string {
+  if (status === "syncing") {
+    return "refresh-cw";
+  }
+  if (status === "error") {
+    return "cloud-alert";
+  }
+  return "cloud";
+}
+
+// tooltipFor returns the status bar hover text for status. detail is folded into the error case.
+function tooltipFor(status: SyncStatus, detail: string): string {
+  if (status === "syncing") {
+    return "Geode: syncing...";
+  }
+  if (status === "error") {
+    return `Geode: ${detail}`;
+  }
+  return "Geode: click to sync now";
+}
+
 // GeodePlugin is the Obsidian plugin entry point that owns settings load and save.
 export default class GeodePlugin extends Plugin {
   settings: GeodeSettings = DEFAULT_SETTINGS;
-  // Both are assigned in onload, which Obsidian always runs before any other plugin method.
+  // Assigned in onload, which Obsidian always runs before any other plugin method.
   logger!: Logger;
   private logSink!: LogSink;
+  private statusBarEl!: HTMLElement;
   private refreshTimer: number | undefined;
+  private syncing = false;
 
   async onload() {
     await this.loadSettings();
@@ -52,7 +90,17 @@ export default class GeodePlugin extends Plugin {
       name: "Settings",
       callback: () => this.openSettingsTab(),
     });
+    this.addCommand({
+      id: "sync-now",
+      name: "Sync now",
+      callback: () => void this.syncNow(),
+    });
     this.register(() => this.app.workspace.detachLeavesOfType(LOG_VIEW_TYPE));
+
+    this.statusBarEl = this.addStatusBarItem();
+    this.statusBarEl.addClass("geode-status-bar", "mod-clickable");
+    this.statusBarEl.addEventListener("click", () => void this.syncNow());
+    this.setSyncStatus("idle", "");
 
     this.addSettingTab(new GeodeSettingTab(this.app, this));
     this.logger.info(`loaded (provider=${this.settings.provider})`);
@@ -102,6 +150,89 @@ export default class GeodePlugin extends Plugin {
     app.setting.openTabById(this.manifest.id);
   }
 
+  // setSyncStatus updates the status bar icon and tooltip to reflect status.
+  private setSyncStatus(status: SyncStatus, detail: string): void {
+    this.statusBarEl.removeClass("is-idle", "is-syncing", "is-error");
+    this.statusBarEl.addClass(`is-${status}`);
+    setIcon(this.statusBarEl, iconFor(status));
+    setTooltip(this.statusBarEl, tooltipFor(status, detail));
+  }
+
+  // syncNow pushes every local change since the last sync to remote storage, pulls every remote
+  // change since then down locally, and renames the local side of anything that changed on both
+  // ends to a conflict copy rather than ever guessing which edit should win. Refuses to start a
+  // second sync while one is already running.
+  async syncNow(): Promise<void> {
+    if (this.syncing) {
+      return;
+    }
+    if (!hasConnectionConfig(this.settings)) {
+      this.logger.warn("sync now: storage isn't configured yet");
+      this.setSyncStatus("error", "storage isn't configured yet");
+      return;
+    }
+    const dir = this.manifest.dir;
+    if (dir === undefined) {
+      this.logger.error("sync now: no plugin data directory available");
+      this.setSyncStatus("error", "no plugin data directory available");
+      return;
+    }
+
+    this.syncing = true;
+    this.setSyncStatus("syncing", "");
+    try {
+      await this.runSync(dir);
+    } finally {
+      this.syncing = false;
+    }
+  }
+
+  // runSync does the actual work of syncNow, split out so syncNow can own the in flight guard
+  // and status bar bookkeeping around it without this getting lost in indentation.
+  private async runSync(dir: string): Promise<void> {
+    const secretAccessKey = this.app.secretStorage.getSecret(this.settings.secretId) ?? "";
+    const storage = createS3Client(this.settings, secretAccessKey);
+    const stateStore = createObsidianStateStore(this.app.vault.adapter, `${dir}/state.json`);
+    const reader = createObsidianVaultReader(this.app.vault);
+    const localWriter = createObsidianLocalWriter(this.app.vault.adapter);
+
+    const previous = await stateStore.read();
+    const local = await takeSnapshot(reader, previous);
+
+    const remote = await readRemoteManifest(storage);
+    if (!remote.ok) {
+      this.logger.error(`sync now: could not read the remote manifest: ${remote.message}`);
+      this.setSyncStatus("error", remote.message);
+      return;
+    }
+
+    const actions = planSync(previous, local, remote.snapshot);
+    const failures = await executeSyncPlan(actions, reader, localWriter, storage, Date.now());
+    for (const failure of failures) {
+      this.logger.error(`sync now: ${failure.path}: ${failure.message}`);
+    }
+    if (failures.length > 0) {
+      this.setSyncStatus("error", `${failures.length} file(s) failed to sync`);
+      return;
+    }
+
+    // Re-snapshot rather than hand merging local with the plan's outcome: this is the only way
+    // to be sure the manifest we upload matches what's really on disk after every pull, delete,
+    // and conflict rename just applied.
+    const final = await takeSnapshot(reader, local);
+    const manifestBody = new TextEncoder().encode(JSON.stringify(final));
+    const uploaded = await storage.putObject(MANIFEST_KEY, manifestBody);
+    if (!uploaded.ok) {
+      this.logger.error(`sync now: could not upload the remote manifest: ${uploaded.message}`);
+      this.setSyncStatus("error", uploaded.message);
+      return;
+    }
+
+    await stateStore.write(final);
+    this.logger.info(`sync now: complete (${actions.length} change(s) applied)`);
+    this.setSyncStatus("idle", "");
+  }
+
   async loadSettings() {
     this.settings = normalizeSettings(await this.loadData());
   }
@@ -124,7 +255,7 @@ export default class GeodePlugin extends Plugin {
   }
 
   // refreshVaultState snapshots the vault, compares it against what geode saw last time, and
-  // persists the result — the memory push/pull sync will read from and diff against remote.
+  // persists the result — the same state.json syncNow reads as its local starting point.
   async refreshVaultState() {
     const dir = this.manifest.dir;
     if (dir === undefined) {

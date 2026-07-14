@@ -51,8 +51,9 @@ async function hashBytes(data: Uint8Array): Promise<string> {
 }
 
 // byPath builds a lookup from path to file state, for matching a live file against what the
-// previous snapshot last saw at that same path.
-function byPath(files: FileState[]): Map<string, FileState> {
+// previous snapshot last saw at that same path. Exported for sync.ts, which needs the same
+// lookup to compare a local snapshot against a remote one.
+export function byPath(files: FileState[]): Map<string, FileState> {
   const result = new Map<string, FileState>();
   for (const file of files) {
     result.set(file.path, file);

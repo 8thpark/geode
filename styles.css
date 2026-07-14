@@ -159,3 +159,23 @@
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
+
+.geode-status-bar.is-error {
+  color: var(--text-error);
+}
+
+.geode-status-bar.is-syncing .svg-icon {
+  animation: geode-status-spin 1s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .geode-status-bar.is-syncing .svg-icon {
+    animation: none;
+  }
+}
+
+@keyframes geode-status-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
