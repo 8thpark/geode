@@ -64,7 +64,6 @@ export type StorageClient = {
   listObjects: (prefix?: string) => Promise<ListResult>;
 };
 
-
 // missingFieldFor returns the name of the first field testConnection needs but doesn't have, or
 // "" if everything required is present.
 function missingFieldFor(settings: GeodeSettings, secretAccessKey: string): string {
