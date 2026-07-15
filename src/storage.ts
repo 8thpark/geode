@@ -2,6 +2,7 @@ import { AwsClient } from "aws4fetch";
 import { endpointFor, type GeodeSettings, regionFor } from "./settings.ts";
 import { messageFor, statusForHttp } from "./utils/storage/errors.ts";
 import { parseListObjectsXml } from "./utils/storage/xml.ts";
+import {encodeKey} from "./utils/storage/encode.ts"
 
 // ResultStatus classifies the outcome of a storage operation so callers can distinguish absent
 // objects from transient failures without parsing the message string.
