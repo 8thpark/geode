@@ -22,7 +22,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.3",
-    "@types/node": "24.x.x",
+    "@types/node": "26.x.x",
     "concurrently": "10.x.x",
     "esbuild": "0.x.x",
     "obsidian": "1.x.x",
