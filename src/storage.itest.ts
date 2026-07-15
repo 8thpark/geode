@@ -84,3 +84,27 @@ test("listObjects with no prefix returns everything", async () => {
   }
   assert.ok(found);
 });
+
+test("putObject/getObject round-trips a key containing a space and ampersand", async () => {
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
+  const body = new TextEncoder().encode("special chars");
+
+  const putResult = await client.putObject("encode-test/Foo & Bar.md", body);
+  assert.equal(putResult.ok, true);
+
+  const getResult = await client.getObject("encode-test/Foo & Bar.md");
+  assert.equal(getResult.ok, true);
+  assert.deepEqual(getResult.body, body);
+});
+
+test("putObject/getObject round-trips a key containing a hash and percent", async () => {
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
+  const body = new TextEncoder().encode("edge cases");
+
+  const putResult = await client.putObject("encode-test/100% #special.md", body);
+  assert.equal(putResult.ok, true);
+
+  const getResult = await client.getObject("encode-test/100% #special.md");
+  assert.equal(getResult.ok, true);
+  assert.deepEqual(getResult.body, body);
+});
