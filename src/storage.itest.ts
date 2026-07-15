@@ -61,7 +61,11 @@ test("listObjects returns only keys under the given prefix", async () => {
 
   const result = await client.listObjects("list-test/");
   assert.equal(result.ok, true);
-  const keys = result.objects.map((object) => object.key).sort();
+  const keys: string[] = [];
+  for (const object of result.objects) {
+    keys.push(object.key);
+  }
+  keys.sort();
   assert.deepEqual(keys, ["list-test/a.md", "list-test/b.md"]);
 });
 
@@ -71,5 +75,12 @@ test("listObjects with no prefix returns everything", async () => {
 
   const result = await client.listObjects();
   assert.equal(result.ok, true);
-  assert.ok(result.objects.some((object) => object.key === "unprefixed.md"));
+  let found = false;
+  for (const object of result.objects) {
+    if (object.key === "unprefixed.md") {
+      found = true;
+      break;
+    }
+  }
+  assert.ok(found);
 });

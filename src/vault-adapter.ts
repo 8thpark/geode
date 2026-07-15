@@ -1,5 +1,5 @@
 import type { DataAdapter, Vault } from "obsidian";
-import type { StateStore, VaultReader, VaultSnapshot } from "./vault-state.ts";
+import type { StateStore, VaultFile, VaultReader, VaultSnapshot } from "./vault-state.ts";
 
 // createObsidianVaultReader returns a VaultReader backed by the real vault's file tree. Obsidian
 // already excludes .obsidian/** from Vault.getFiles(), so the plugin's own state file (which
@@ -7,11 +7,11 @@ import type { StateStore, VaultReader, VaultSnapshot } from "./vault-state.ts";
 export function createObsidianVaultReader(vault: Vault): VaultReader {
   return {
     listFiles: async () => {
-      return vault.getFiles().map((file) => ({
-        path: file.path,
-        size: file.stat.size,
-        mtime: file.stat.mtime,
-      }));
+      const files: VaultFile[] = [];
+      for (const file of vault.getFiles()) {
+        files.push({ path: file.path, size: file.stat.size, mtime: file.stat.mtime });
+      }
+      return files;
     },
     readFile: async (path) => {
       const file = vault.getFileByPath(path);

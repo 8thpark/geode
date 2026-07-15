@@ -22,8 +22,9 @@
 ## Documentation
 
 Ensure that documentation is added to, and updated, as the project progresses; as well as continue
-to update the private [Working Document](fa8682d6-0677-4d6c-a32d-c91e51411d8f) artifact as we make
-decisions together about the project, and to track progress.
+to update the private
+[Working Document](https://claude.ai/code/artifact/fa8682d6-0677-4d6c-a32d-c91e51411d8f) artifact as
+we make decisions together about the project, and to track progress.
 
 ## Competitors
 

@@ -102,3 +102,60 @@
   margin: 1em 1em 1em 1em;
   overflow-x: auto;
 }
+
+.geode-log-view {
+  padding: 1em;
+}
+
+.geode-log-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25em;
+  font-family: var(--font-monospace);
+  font-size: 0.85em;
+}
+
+.geode-log-row {
+  display: flex;
+  gap: 0.75em;
+  align-items: baseline;
+  padding: 0.35em 0.5em;
+  border-radius: var(--radius-s, 4px);
+}
+
+.geode-log-row:nth-child(odd) {
+  background: var(--background-secondary);
+}
+
+.geode-log-time {
+  flex-shrink: 0;
+  white-space: nowrap;
+  color: var(--text-faint);
+}
+
+.geode-log-level {
+  flex-shrink: 0;
+  width: 4em;
+  font-weight: 700;
+}
+
+.geode-log-row.is-debug .geode-log-level {
+  color: var(--text-faint);
+}
+
+.geode-log-row.is-info .geode-log-level {
+  color: var(--text-muted);
+}
+
+.geode-log-row.is-warn .geode-log-level {
+  color: var(--text-warning);
+}
+
+.geode-log-row.is-error .geode-log-level {
+  color: var(--text-error);
+}
+
+.geode-log-message {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
