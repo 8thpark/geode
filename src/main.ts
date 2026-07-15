@@ -68,7 +68,6 @@ export default class GeodePlugin extends Plugin {
       this.registerEvent(this.app.vault.on("rename", () => this.scheduleVaultStateRefresh()));
     });
 
-
     this.register(() => {
       if (this.refreshTimer !== undefined) {
         window.clearTimeout(this.refreshTimer);
