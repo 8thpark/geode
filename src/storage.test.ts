@@ -33,6 +33,7 @@ for (const { name, settings, secretAccessKey, want } of missingFieldCases) {
   test(`testConnection: ${name}`, async () => {
     const result = await testConnection(settings, secretAccessKey);
     assert.equal(result.ok, false);
+    assert.equal(result.status, "auth");
     assert.equal(result.message, want);
   });
 }

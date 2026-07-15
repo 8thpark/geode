@@ -1,22 +1,29 @@
 import { AwsClient } from "aws4fetch";
 import { endpointFor, type GeodeSettings, regionFor } from "./settings.ts";
 
+// ResultStatus classifies the outcome of a storage operation so callers can distinguish absent
+// objects from transient failures without parsing the message string.
+export type ResultStatus = "ok" | "not_found" | "auth" | "server" | "network";
+
 // ConnectionResult reports whether a storage provider accepted a test request. Message is the
 // empty string when ok is true.
 export type ConnectionResult = {
   ok: boolean;
+  status: ResultStatus;
   message: string;
 };
 
 // PutResult reports whether an object was written. Message is the empty string when ok is true.
 export type PutResult = {
   ok: boolean;
+  status: ResultStatus;
   message: string;
 };
 
 // GetResult reports whether an object was read. Body is null when ok is false.
 export type GetResult = {
   ok: boolean;
+  status: ResultStatus;
   message: string;
   body: Uint8Array | null;
 };
@@ -25,6 +32,7 @@ export type GetResult = {
 // true.
 export type DeleteResult = {
   ok: boolean;
+  status: ResultStatus;
   message: string;
 };
 
@@ -38,6 +46,7 @@ export type ObjectMeta = {
 // ListResult reports whether a bucket listing succeeded. Objects is empty when ok is false.
 export type ListResult = {
   ok: boolean;
+  status: ResultStatus;
   message: string;
   objects: ObjectMeta[];
 };
@@ -58,6 +67,20 @@ function messageFor(err: unknown): string {
     return err.message;
   }
   return "Network error";
+}
+
+// statusForHttp maps an HTTP status code to a ResultStatus.
+function statusForHttp(code: number): ResultStatus {
+  if (code === 404) {
+    return "not_found";
+  }
+  if (code === 403 || code === 401) {
+    return "auth";
+  }
+  if (code >= 500) {
+    return "server";
+  }
+  return "auth";
 }
 
 // missingFieldFor returns the name of the first field testConnection needs but doesn't have, or
@@ -83,7 +106,7 @@ export async function testConnection(
 ): Promise<ConnectionResult> {
   const missing = missingFieldFor(settings, secretAccessKey);
   if (missing !== "") {
-    return { ok: false, message: `Fill in ${missing} first` };
+    return { ok: false, status: "auth", message: `Fill in ${missing} first` };
   }
 
   const client = new AwsClient({
@@ -98,13 +121,17 @@ export async function testConnection(
   try {
     response = await client.fetch(url, { method: "HEAD" });
   } catch (err) {
-    return { ok: false, message: messageFor(err) };
+    return { ok: false, status: "network", message: messageFor(err) };
   }
 
   if (!response.ok) {
-    return { ok: false, message: `Storage rejected the request (${response.status})` };
+    return {
+      ok: false,
+      status: statusForHttp(response.status),
+      message: `Storage rejected the request (${response.status})`,
+    };
   }
-  return { ok: true, message: "" };
+  return { ok: true, status: "ok", message: "" };
 }
 
 // s3PutObject writes body to key, creating or overwriting it.
@@ -120,13 +147,17 @@ async function s3PutObject(
     // not a real runtime issue; every JS engine accepts a Uint8Array as a fetch body.
     response = await client.fetch(`${baseUrl}/${key}`, { method: "PUT", body: body as BodyInit });
   } catch (err) {
-    return { ok: false, message: messageFor(err) };
+    return { ok: false, status: "network", message: messageFor(err) };
   }
 
   if (!response.ok) {
-    return { ok: false, message: `Storage rejected the write (${response.status})` };
+    return {
+      ok: false,
+      status: statusForHttp(response.status),
+      message: `Storage rejected the write (${response.status})`,
+    };
   }
-  return { ok: true, message: "" };
+  return { ok: true, status: "ok", message: "" };
 }
 
 // s3GetObject reads the bytes stored at key.
@@ -135,14 +166,19 @@ async function s3GetObject(client: AwsClient, baseUrl: string, key: string): Pro
   try {
     response = await client.fetch(`${baseUrl}/${key}`, { method: "GET" });
   } catch (err) {
-    return { ok: false, message: messageFor(err), body: null };
+    return { ok: false, status: "network", message: messageFor(err), body: null };
   }
 
   if (!response.ok) {
-    return { ok: false, message: `Storage rejected the read (${response.status})`, body: null };
+    return {
+      ok: false,
+      status: statusForHttp(response.status),
+      message: `Storage rejected the read (${response.status})`,
+      body: null,
+    };
   }
   const buffer = await response.arrayBuffer();
-  return { ok: true, message: "", body: new Uint8Array(buffer) };
+  return { ok: true, status: "ok", message: "", body: new Uint8Array(buffer) };
 }
 
 // s3DeleteObject removes key from the bucket.
@@ -155,13 +191,17 @@ async function s3DeleteObject(
   try {
     response = await client.fetch(`${baseUrl}/${key}`, { method: "DELETE" });
   } catch (err) {
-    return { ok: false, message: messageFor(err) };
+    return { ok: false, status: "network", message: messageFor(err) };
   }
 
   if (!response.ok) {
-    return { ok: false, message: `Storage rejected the delete (${response.status})` };
+    return {
+      ok: false,
+      status: statusForHttp(response.status),
+      message: `Storage rejected the delete (${response.status})`,
+    };
   }
-  return { ok: true, message: "" };
+  return { ok: true, status: "ok", message: "" };
 }
 
 // fieldFrom returns the text content of the first <tag>...</tag> found in an XML fragment, or
@@ -250,14 +290,19 @@ async function s3ListObjects(
   try {
     response = await client.fetch(url, { method: "GET" });
   } catch (err) {
-    return { ok: false, message: messageFor(err), objects: [] };
+    return { ok: false, status: "network", message: messageFor(err), objects: [] };
   }
 
   if (!response.ok) {
-    return { ok: false, message: `Storage rejected the list (${response.status})`, objects: [] };
+    return {
+      ok: false,
+      status: statusForHttp(response.status),
+      message: `Storage rejected the list (${response.status})`,
+      objects: [],
+    };
   }
   const xml = await response.text();
-  return { ok: true, message: "", objects: parseListObjectsXml(xml) };
+  return { ok: true, status: "ok", message: "", objects: parseListObjectsXml(xml) };
 }
 
 // createS3Client returns a StorageClient backed by the S3 compatible endpoint in settings.
