@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DEFAULT_SETTINGS, type GeodeSettings } from "./settings.ts";
-import { parseListObjectsXml, testConnection } from "./storage.ts";
+import { testConnection } from "./storage.ts";
+import { parseListObjectsXml } from "./utils/storage/xml.ts";
 
 const missingFieldCases: {
   name: string;
