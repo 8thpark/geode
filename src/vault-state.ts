@@ -77,7 +77,10 @@ async function mapWithConcurrency<T, R>(
     }
   }
 
-  const workers = Array.from({ length: Math.min(limit, items.length) }, worker);
+  const workers: Promise<void>[] = [];
+  for (let i = 0; i < Math.min(limit, items.length); i++) {
+    workers.push(worker());
+  }
   await Promise.all(workers);
 
   return results;

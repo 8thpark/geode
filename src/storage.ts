@@ -64,9 +64,11 @@ function messageFor(err: unknown): string {
 // the separator so keys like "notes/Foo & Bar.md" become "notes/Foo%20%26%20Bar.md".
 function encodeKey(key: string): string {
   const segments = key.split("/");
-  const encodedSegments = segments.map((segment) => encodeURIComponent(segment));
-  const encodedKey = encodedSegments.join("/");
-  return encodedKey;
+  const encodedSegments: string[] = [];
+  for (const segment of segments) {
+    encodedSegments.push(encodeURIComponent(segment));
+  }
+  return encodedSegments.join("/");
 }
 
 // missingFieldFor returns the name of the first field testConnection needs but doesn't have, or
