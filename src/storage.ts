@@ -2,7 +2,7 @@ import { AwsClient } from "aws4fetch";
 import { endpointFor, type GeodeSettings, regionFor } from "./settings.ts";
 import { messageFor, statusForHttp } from "./utils/storage/errors.ts";
 import { parseListObjectsXml } from "./utils/storage/xml.ts";
-import {encodeKey} from "./utils/storage/encode.ts"
+import { encodeKey } from "./utils/storage/encode.ts"
 
 // ResultStatus classifies the outcome of a storage operation so callers can distinguish absent
 // objects from transient failures without parsing the message string.
@@ -64,26 +64,6 @@ export type StorageClient = {
   listObjects: (prefix?: string) => Promise<ListResult>;
 };
 
-<<<<<<< HEAD
-=======
-// messageFor converts a caught error into a plain message string.
-function messageFor(err: unknown): string {
-  if (err instanceof Error) {
-    return err.message;
-  }
-  return "Network error";
-}
-
-// encodeKey percent-encodes each path segment of an S3 object key individually, preserving "/" as
-// the separator so keys like "notes/Foo & Bar.md" become "notes/Foo%20%26%20Bar.md".
-function encodeKey(key: string): string {
-  const segments = key.split("/");
-  const encodedSegments = segments.map((segment) => encodeURIComponent(segment));
-  const encodedKey = encodedSegments.join("/");
-  return encodedKey;
-}
-
->>>>>>> 8966110 (fix: encode object keys  (#62))
 // missingFieldFor returns the name of the first field testConnection needs but doesn't have, or
 // "" if everything required is present.
 function missingFieldFor(settings: GeodeSettings, secretAccessKey: string): string {
