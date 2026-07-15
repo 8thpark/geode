@@ -63,6 +63,26 @@ export type StorageClient = {
   listObjects: (prefix?: string) => Promise<ListResult>;
 };
 
+<<<<<<< HEAD
+=======
+// messageFor converts a caught error into a plain message string.
+function messageFor(err: unknown): string {
+  if (err instanceof Error) {
+    return err.message;
+  }
+  return "Network error";
+}
+
+// encodeKey percent-encodes each path segment of an S3 object key individually, preserving "/" as
+// the separator so keys like "notes/Foo & Bar.md" become "notes/Foo%20%26%20Bar.md".
+function encodeKey(key: string): string {
+  const segments = key.split("/");
+  const encodedSegments = segments.map((segment) => encodeURIComponent(segment));
+  const encodedKey = encodedSegments.join("/");
+  return encodedKey;
+}
+
+>>>>>>> 8966110 (fix: encode object keys  (#62))
 // missingFieldFor returns the name of the first field testConnection needs but doesn't have, or
 // "" if everything required is present.
 function missingFieldFor(settings: GeodeSettings, secretAccessKey: string): string {
@@ -125,7 +145,10 @@ async function s3PutObject(
   try {
     // Uint8Array<ArrayBufferLike> vs DOM's ArrayBufferView<ArrayBuffer> is a TS lib mismatch,
     // not a real runtime issue; every JS engine accepts a Uint8Array as a fetch body.
-    response = await client.fetch(`${baseUrl}/${key}`, { method: "PUT", body: body as BodyInit });
+    response = await client.fetch(`${baseUrl}/${encodeKey(key)}`, {
+      method: "PUT",
+      body: body as BodyInit,
+    });
   } catch (err) {
     return { ok: false, status: "network", message: messageFor(err) };
   }
@@ -144,7 +167,7 @@ async function s3PutObject(
 async function s3GetObject(client: AwsClient, baseUrl: string, key: string): Promise<GetResult> {
   let response: Response;
   try {
-    response = await client.fetch(`${baseUrl}/${key}`, { method: "GET" });
+    response = await client.fetch(`${baseUrl}/${encodeKey(key)}`, { method: "GET" });
   } catch (err) {
     return { ok: false, status: "network", message: messageFor(err), body: null };
   }
@@ -169,7 +192,7 @@ async function s3DeleteObject(
 ): Promise<DeleteResult> {
   let response: Response;
   try {
-    response = await client.fetch(`${baseUrl}/${key}`, { method: "DELETE" });
+    response = await client.fetch(`${baseUrl}/${encodeKey(key)}`, { method: "DELETE" });
   } catch (err) {
     return { ok: false, status: "network", message: messageFor(err) };
   }
