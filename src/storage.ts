@@ -64,6 +64,14 @@ export type StorageClient = {
   listObjects: (prefix?: string) => Promise<ListResult>;
 };
 
+// messageFor converts a caught error into a plain message string.
+function messageFor(err: unknown): string {
+  if (err instanceof Error) {
+    return err.message;
+  }
+  return "Network error";
+}
+
 // missingFieldFor returns the name of the first field testConnection needs but doesn't have, or
 // "" if everything required is present.
 function missingFieldFor(settings: GeodeSettings, secretAccessKey: string): string {
