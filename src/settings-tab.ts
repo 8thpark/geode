@@ -367,6 +367,9 @@ export class GeodeSettingTab extends PluginSettingTab {
   draft: GeodeSettings;
   connectionStatus: ConnectionStatus = "unknown";
   connectionMessage = "";
+  // checkId is incremented on every checkConnection call so a stale response
+  // that resolves after a newer one has already started can be discarded.
+  checkId = 0;
   saveButtonEl: ButtonComponent | null = null;
   statusDotEl: HTMLElement | null = null;
   connectionMessageEl: HTMLElement | null = null;
@@ -455,6 +458,9 @@ export class GeodeSettingTab extends PluginSettingTab {
   }
 
   async checkConnection(): Promise<void> {
+    this.checkId += 1;
+    const id = this.checkId;
+
     this.plugin.logger.info(
       `testing connection (provider=${this.draft.provider}, bucket=${this.draft.bucket})`,
     );
@@ -468,6 +474,10 @@ export class GeodeSettingTab extends PluginSettingTab {
     }
 
     const result = await testConnection(this.draft, secretAccessKey);
+
+    if (id !== this.checkId) {
+      return;
+    }
 
     if (result.ok) {
       this.plugin.logger.info("connection ok");
