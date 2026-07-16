@@ -16,7 +16,7 @@
     "test": "node --test \"src/**/*.test.ts\"",
     "test:integration": "docker compose up -d minio && docker compose up create-bucket && node --test \"src/**/*.itest.ts\""
   },
-  "license": "Elastic-2.0",
+  "license": "GPL-3.0-only",
   "dependencies": {
     "aws4fetch": "1.x.x"
   },
