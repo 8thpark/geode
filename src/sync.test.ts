@@ -242,11 +242,11 @@ test("executeSyncPlan: pullDelete removes the local file", async () => {
   assert.equal(files.has("a.md"), false);
 });
 
-test("executeSyncPlan: a conflict renames the local copy and pulls the remote version clean", async () => {
-  const reader = fakeReader({});
+test("executeSyncPlan: a conflict renames the local copy, pushes it to storage, and pulls the remote version clean", async () => {
+  const reader = fakeReader({ "a.md": "local edit" });
   const { writer, files } = fakeLocalWriter();
   files.set("a.md", "local edit");
-  const { storage } = fakeStorage({ "a.md": "remote edit" });
+  const { storage, objects } = fakeStorage({ "a.md": "remote edit" });
   const now = Date.parse("2026-07-14T10:00:00.000Z");
 
   const failures = await executeSyncPlan(
@@ -260,6 +260,10 @@ test("executeSyncPlan: a conflict renames the local copy and pulls the remote ve
   assert.deepEqual(failures, []);
   assert.equal(files.get("a.md"), "remote edit");
   assert.equal(files.get(conflictCopyPath("a.md", now)), "local edit");
+  // The conflict copy must also reach storage: otherwise the manifest uploaded after this sync
+  // claims a remote object that doesn't exist, and every other device fails forever trying to
+  // pull it.
+  assert.equal(objects.get(conflictCopyPath("a.md", now)), "local edit");
 });
 
 test("executeSyncPlan: a failed push is reported and doesn't stop the rest of the plan", async () => {

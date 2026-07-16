@@ -81,7 +81,7 @@ With `npm run dev` running:
    `docker-compose.yml`). Click Test Connection.
 4. After changing source files, reload Obsidian to pick up the new `main.js` (Cmd-P → "Reload app
    without saving"). Installing the community Hot-Reload plugin removes the need for this step.
-5. Run `Geode: Sync` from the command palette, or click the status bar icon bottom left, to
+5. Run `Geode: Sync` from the command palette, or click the status bar icon bottom right, to
    push and pull against the storage server. Check the result either in the `Geode: Logs` pane or
    directly in the bucket:
    ```bash

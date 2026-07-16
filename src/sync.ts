@@ -172,9 +172,17 @@ export async function executeSyncPlan(
       continue;
     }
 
-    // conflict: preserve the local edit under a new name, then let the remote version claim
-    // the original path, so neither side's edit is ever silently discarded.
-    await localWriter.renameFile(action.path, conflictCopyPath(action.path, now));
+    // conflict: preserve the local edit under a new name and push that copy to storage too, so
+    // the diverged edit lands on every device and the manifest we later upload isn't claiming a
+    // remote object that doesn't exist; then let the remote version claim the original path.
+    // Neither side's edit is ever silently discarded.
+    const copyPath = conflictCopyPath(action.path, now);
+    const localBytes = await reader.readFile(action.path);
+    await localWriter.renameFile(action.path, copyPath);
+    const pushed = await storage.putObject(copyPath, localBytes);
+    if (!pushed.ok) {
+      failures.push({ path: copyPath, message: pushed.message });
+    }
     const result = await storage.getObject(action.path);
     if (!result.ok || result.body === null) {
       failures.push({ path: action.path, message: result.message });
