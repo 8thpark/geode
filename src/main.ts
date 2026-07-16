@@ -109,12 +109,12 @@ export default class GeodePlugin extends Plugin {
     // onload time, and a snapshot taken too early would see an incomplete file list.
     this.app.workspace.onLayoutReady(() => {
       void this.refreshVaultState();
-    });
 
-    this.registerEvent(this.app.vault.on("create", () => this.scheduleVaultStateRefresh()));
-    this.registerEvent(this.app.vault.on("modify", () => this.scheduleVaultStateRefresh()));
-    this.registerEvent(this.app.vault.on("delete", () => this.scheduleVaultStateRefresh()));
-    this.registerEvent(this.app.vault.on("rename", () => this.scheduleVaultStateRefresh()));
+      this.registerEvent(this.app.vault.on("create", () => this.scheduleVaultStateRefresh()));
+      this.registerEvent(this.app.vault.on("modify", () => this.scheduleVaultStateRefresh()));
+      this.registerEvent(this.app.vault.on("delete", () => this.scheduleVaultStateRefresh()));
+      this.registerEvent(this.app.vault.on("rename", () => this.scheduleVaultStateRefresh()));
+    });
 
     this.register(() => {
       if (this.refreshTimer !== undefined) {

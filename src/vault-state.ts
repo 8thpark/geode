@@ -61,38 +61,61 @@ export function byPath(files: FileState[]): Map<string, FileState> {
   return result;
 }
 
+// mapWithConcurrency runs fn over each item with at most limit concurrent invocations, preserving
+// input order in the returned results.
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let nextIndex = 0;
+
+  async function worker(): Promise<void> {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex++;
+      results[currentIndex] = await fn(items[currentIndex]);
+    }
+  }
+
+  const workers: Promise<void>[] = [];
+  for (let i = 0; i < Math.min(limit, items.length); i++) {
+    workers.push(worker());
+  }
+  await Promise.all(workers);
+
+  return results;
+}
+
 // takeSnapshot walks every file the reader currently sees and returns their content hashes. A
 // file whose size and mtime both match the previous snapshot reuses that hash instead of
 // rereading content — the same stat gated hashing rsync, git, and Syncthing all use, since mtime
 // and size alone aren't reliable enough to trust as identity, but are cheap enough to skip a
-// rehash when neither has moved.
+// rehash when neither has moved. Concurrency is bounded by limit to avoid unbounded memory
+// pressure on large vaults.
 export async function takeSnapshot(
   reader: VaultReader,
   previous: VaultSnapshot,
+  concurrency = 8,
 ): Promise<VaultSnapshot> {
   const previousByPath = byPath(previous.files);
   const liveFiles = await reader.listFiles();
 
-  const pending: Promise<FileState>[] = [];
-  for (const file of liveFiles) {
-    pending.push(
-      (async () => {
-        const known = previousByPath.get(file.path);
-        if (known !== undefined && known.size === file.size && known.mtime === file.mtime) {
-          return known;
-        }
-        const bytes = await reader.readFile(file.path);
-        return {
-          path: file.path,
-          size: file.size,
-          mtime: file.mtime,
-          hash: await hashBytes(bytes),
-        };
-      })(),
-    );
-  }
+  const files = await mapWithConcurrency(liveFiles, concurrency, async (file) => {
+    const known = previousByPath.get(file.path);
+    if (known !== undefined && known.size === file.size && known.mtime === file.mtime) {
+      return known;
+    }
+    const bytes = await reader.readFile(file.path);
+    return {
+      path: file.path,
+      size: file.size,
+      mtime: file.mtime,
+      hash: await hashBytes(bytes),
+    };
+  });
 
-  return { files: await Promise.all(pending) };
+  return { files };
 }
 
 // diffSnapshots compares two snapshots and reports every path whose content differs.
