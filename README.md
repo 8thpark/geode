@@ -35,6 +35,6 @@ vulnerability or have questions.
 
 ## License
 
-**Geode** is available under the [Elastic License 2.0](./LICENSE), meaning it is free to use, modify,
-and self host. The one thing you can't do is offer **Geode** itself to others as a hosted or managed
-service.
+**Geode** is available under the [GNU General Public License v3.0](./LICENSE). You are free to use,
+modify, and distribute it, provided any derivative work you distribute is also released under the
+GPL-3.0.
