@@ -19,3 +19,8 @@ main.js
 .idea/
 .vscode/
 *.swp
+
+# Agent skills
+.agents/
+plans/
+skills-lock.json
