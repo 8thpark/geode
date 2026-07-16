@@ -12,6 +12,7 @@
     "lint": "biome check .",
     "format": "biome check --write .",
     "check-versions": "node scripts/check-version-sync.mjs",
+    "create-dev-vault": "node scripts/create-dev-vault.mjs",
     "test": "node --test \"src/**/*.test.ts\"",
     "test:integration": "docker compose up -d minio && docker compose up create-bucket && node --test \"src/**/*.itest.ts\""
   },

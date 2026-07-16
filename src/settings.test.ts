@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   DEFAULT_SETTINGS,
+  draftForDisplay,
   endpointFor,
   type GeodeSettings,
   hasConnectionConfig,
@@ -219,3 +220,61 @@ for (const { name, input, want } of hasConnectionConfigCases) {
     assert.strictEqual(hasConnectionConfig(input), want);
   });
 }
+
+const draftForDisplayCases: {
+  name: string;
+  auto: boolean;
+  currentDraft: GeodeSettings;
+  savedSettings: GeodeSettings;
+  want: GeodeSettings;
+}[] = [
+  {
+    name: "auto open re-seeds from saved settings after external update",
+    auto: true,
+    currentDraft: { ...DEFAULT_SETTINGS, bucket: "stale-bucket" },
+    savedSettings: { ...DEFAULT_SETTINGS, bucket: "synced-bucket" },
+    want: { ...DEFAULT_SETTINGS, bucket: "synced-bucket" },
+  },
+  {
+    name: "auto open clears a phantom dirty draft against newer saved settings",
+    auto: true,
+    currentDraft: { ...DEFAULT_SETTINGS, accessKeyId: "OLD" },
+    savedSettings: { ...DEFAULT_SETTINGS, accessKeyId: "NEW" },
+    want: { ...DEFAULT_SETTINGS, accessKeyId: "NEW" },
+  },
+  {
+    name: "internal re-render keeps the in-progress draft",
+    auto: false,
+    currentDraft: { ...DEFAULT_SETTINGS, provider: "custom", endpoint: "https://s3.example.com" },
+    savedSettings: DEFAULT_SETTINGS,
+    want: { ...DEFAULT_SETTINGS, provider: "custom", endpoint: "https://s3.example.com" },
+  },
+  {
+    name: "auto open returns a shallow copy, not the saved settings object itself",
+    auto: true,
+    currentDraft: DEFAULT_SETTINGS,
+    savedSettings: { ...DEFAULT_SETTINGS, bucket: "b" },
+    want: { ...DEFAULT_SETTINGS, bucket: "b" },
+  },
+];
+
+for (const { name, auto, currentDraft, savedSettings, want } of draftForDisplayCases) {
+  test(`draftForDisplay: ${name}`, () => {
+    const got = draftForDisplay(auto, currentDraft, savedSettings);
+    assert.deepStrictEqual(got, want);
+  });
+}
+
+test("draftForDisplay: auto open returns a new object so later draft edits do not mutate saved settings", () => {
+  const saved = { ...DEFAULT_SETTINGS, bucket: "saved" };
+  const got = draftForDisplay(true, DEFAULT_SETTINGS, saved);
+  assert.notStrictEqual(got, saved);
+  got.bucket = "edited";
+  assert.strictEqual(saved.bucket, "saved");
+});
+
+test("draftForDisplay: internal re-render returns the same draft reference", () => {
+  const draft = { ...DEFAULT_SETTINGS, bucket: "in-progress" };
+  const got = draftForDisplay(false, draft, DEFAULT_SETTINGS);
+  assert.strictEqual(got, draft);
+});

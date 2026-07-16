@@ -87,3 +87,41 @@ test("diffSnapshots: a file missing from the current listing is reported as dele
 
   assert.deepEqual(changes, [{ path: "note.md", kind: "deleted" }]);
 });
+
+test("takeSnapshot: concurrency is bounded by the limit", async () => {
+  const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+  const files: Record<string, { content: string; mtime: number }> = {};
+  for (let i = 0; i < 10; i++) {
+    files[`${i}.md`] = { content: `body ${i}`, mtime: 1 };
+  }
+
+  let inflight = 0;
+  let peakInflight = 0;
+  const reader: VaultReader = {
+    listFiles: async () => {
+      const list: VaultFile[] = [];
+      for (const [path, file] of Object.entries(files)) {
+        list.push({ path, size: file.content.length, mtime: file.mtime });
+      }
+      return list;
+    },
+    readFile: async (path) => {
+      inflight += 1;
+      if (inflight > peakInflight) {
+        peakInflight = inflight;
+      }
+      await delay(10);
+      inflight -= 1;
+      const file = files[path];
+      if (file === undefined) {
+        throw new Error(`no such file: ${path}`);
+      }
+      return new TextEncoder().encode(file.content);
+    },
+  };
+
+  const snapshot = await takeSnapshot(reader, empty, 2);
+
+  assert.equal(snapshot.files.length, 10);
+  assert.ok(peakInflight <= 2, `expected at most 2 concurrent reads, got ${peakInflight}`);
+});
