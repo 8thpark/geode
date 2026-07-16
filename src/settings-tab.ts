@@ -8,7 +8,13 @@ import {
   Setting,
 } from "obsidian";
 import type GeodePlugin from "./main";
-import { type GeodeSettings, hasConnectionConfig, providerOr, settingsEqual } from "./settings";
+import {
+  draftForDisplay,
+  type GeodeSettings,
+  hasConnectionConfig,
+  providerOr,
+  settingsEqual,
+} from "./settings";
 import { testConnection } from "./storage";
 
 // ConnectionStatus is the last known state of a Test Connection check. It lives only in memory;
@@ -361,6 +367,9 @@ export class GeodeSettingTab extends PluginSettingTab {
   draft: GeodeSettings;
   connectionStatus: ConnectionStatus = "unknown";
   connectionMessage = "";
+  // checkId is incremented on every checkConnection call so a stale response
+  // that resolves after a newer one has already started can be discarded.
+  checkId = 0;
   saveButtonEl: ButtonComponent | null = null;
   statusDotEl: HTMLElement | null = null;
   connectionMessageEl: HTMLElement | null = null;
@@ -381,9 +390,19 @@ export class GeodeSettingTab extends PluginSettingTab {
   }
 
   // display renders the tab. When auto is true (every time Obsidian opens this tab, including
-  // the first time) it also fires an automatic connection test if the draft looks complete;
-  // internal re-renders (a provider switch) pass false so they don't retrigger it.
+  // the first time) it re-seeds the draft from live plugin settings, then fires an automatic
+  // connection test if the draft looks complete. Internal re-renders (a provider switch) pass
+  // false so they keep the in-progress draft and don't retrigger the connection test.
   display(auto = true): void {
+    // Constructor only runs once for the life of this tab instance. Without re-seeding here,
+    // a reopened tab keeps a stale draft after settings change elsewhere (e.g. data.json via
+    // sync) and can show phantom "Unsaved changes" against the newer saved settings.
+    this.draft = draftForDisplay(auto, this.draft, this.plugin.settings);
+    if (auto) {
+      this.connectionStatus = "unknown";
+      this.connectionMessage = "";
+    }
+
     this.containerEl.empty();
     renderSettingsTab(this, this.containerEl);
 
@@ -439,6 +458,9 @@ export class GeodeSettingTab extends PluginSettingTab {
   }
 
   async checkConnection(): Promise<void> {
+    this.checkId += 1;
+    const id = this.checkId;
+
     this.plugin.logger.info(
       `testing connection (provider=${this.draft.provider}, bucket=${this.draft.bucket})`,
     );
@@ -452,6 +474,10 @@ export class GeodeSettingTab extends PluginSettingTab {
     }
 
     const result = await testConnection(this.draft, secretAccessKey);
+
+    if (id !== this.checkId) {
+      return;
+    }
 
     if (result.ok) {
       this.plugin.logger.info("connection ok");

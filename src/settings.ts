@@ -107,3 +107,19 @@ export function hasConnectionConfig(settings: GeodeSettings): boolean {
   }
   return settings.endpoint !== "" && settings.region !== "";
 }
+
+// draftForDisplay returns the draft a settings tab should show for a given render.
+// When auto is true (Obsidian is opening the tab), the draft is re-seeded from saved
+// settings so an external data.json update cannot leave a stale draft and phantom
+// "Unsaved changes". When auto is false (an internal re-render such as a provider
+// switch), the in-progress draft is kept.
+export function draftForDisplay(
+  auto: boolean,
+  currentDraft: GeodeSettings,
+  savedSettings: GeodeSettings,
+): GeodeSettings {
+  if (auto) {
+    return { ...savedSettings };
+  }
+  return currentDraft;
+}
