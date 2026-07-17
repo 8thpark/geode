@@ -289,7 +289,10 @@ export async function syncOnce(
   // older build on every file event rather than only on completed syncs, would diff against the
   // empty remote as "every file deleted remotely" and pullDelete the whole vault. Dropping the
   // ancestor on a first sync reduces it to a clean push of whatever is local, with nothing to lose.
-  const ancestor: VaultSnapshot = remote.firstSync ? { files: [] } : previous;
+  let ancestor = previous;
+  if (remote.firstSync) {
+    ancestor = { files: [] };
+  }
 
   const local = await takeSnapshot(reader, ancestor);
 
