@@ -11,7 +11,7 @@ import {
 } from "./settings";
 import { GeodeSettingTab } from "./settings-tab";
 import { createS3Client } from "./storage";
-import { executeSyncPlan, MANIFEST_KEY, planSync, readRemoteManifest } from "./sync";
+import { syncOnce } from "./sync";
 import {
   createObsidianLocalWriter,
   createObsidianStateStore,
@@ -197,39 +197,18 @@ export default class GeodePlugin extends Plugin {
     const localWriter = createObsidianLocalWriter(this.app.vault.adapter);
 
     const previous = await stateStore.read();
-    const local = await takeSnapshot(reader, previous);
-
-    const remote = await readRemoteManifest(storage);
-    if (!remote.ok) {
-      this.logger.error(`sync: could not read the remote manifest: ${remote.message}`);
-      this.setSyncStatus("error", remote.message);
+    const outcome = await syncOnce(previous, reader, localWriter, storage, Date.now());
+    if (!outcome.ok) {
+      for (const failure of outcome.failures) {
+        this.logger.error(`sync: ${failure.path}: ${failure.message}`);
+      }
+      this.logger.error(`sync: ${outcome.message}`);
+      this.setSyncStatus("error", outcome.message);
       return;
     }
 
-    const actions = planSync(previous, local, remote.snapshot);
-    const failures = await executeSyncPlan(actions, reader, localWriter, storage, Date.now());
-    for (const failure of failures) {
-      this.logger.error(`sync: ${failure.path}: ${failure.message}`);
-    }
-    if (failures.length > 0) {
-      this.setSyncStatus("error", `${failures.length} file(s) failed to sync`);
-      return;
-    }
-
-    // Re-snapshot rather than hand merging local with the plan's outcome: this is the only way
-    // to be sure the manifest we upload matches what's really on disk after every pull, delete,
-    // and conflict rename just applied.
-    const final = await takeSnapshot(reader, local);
-    const manifestBody = new TextEncoder().encode(JSON.stringify(final));
-    const uploaded = await storage.putObject(MANIFEST_KEY, manifestBody);
-    if (!uploaded.ok) {
-      this.logger.error(`sync: could not upload the remote manifest: ${uploaded.message}`);
-      this.setSyncStatus("error", uploaded.message);
-      return;
-    }
-
-    await stateStore.write(final);
-    this.logger.info(`sync: complete (${actions.length} change(s) applied)`);
+    await stateStore.write(outcome.snapshot);
+    this.logger.info(`sync: complete (${outcome.changeCount} change(s) applied)`);
     this.setSyncStatus("idle", "");
   }
 
@@ -254,8 +233,11 @@ export default class GeodePlugin extends Plugin {
     }, VAULT_STATE_DEBOUNCE_MS);
   }
 
-  // refreshVaultState snapshots the vault, compares it against what geode saw last time, and
-  // persists the result — the same state.json syncNow reads as its local starting point.
+  // refreshVaultState logs how many local changes have accumulated since the last successful
+  // sync. It deliberately does NOT persist anything: state.json is the last synced snapshot, the
+  // common ancestor sync diffs both sides against, and only a completed sync may write it. Writing
+  // the live vault here would poison that ancestor, so a brand new local file would look like a
+  // remote deletion on the next sync and get wiped.
   async refreshVaultState() {
     const dir = this.manifest.dir;
     if (dir === undefined) {
@@ -269,7 +251,6 @@ export default class GeodePlugin extends Plugin {
     const current = await takeSnapshot(reader, previous);
     const changes = diffSnapshots(previous, current);
 
-    this.logger.info(`vault state refreshed (${changes.length} change(s) since last run)`);
-    await store.write(current);
+    this.logger.info(`vault state refreshed (${changes.length} change(s) since last sync)`);
   }
 }
