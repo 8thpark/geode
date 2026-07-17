@@ -72,10 +72,7 @@ export function normalizeSettings(raw: unknown): GeodeSettings {
     bucket: stringOr(source.bucket, DEFAULT_SETTINGS.bucket),
     accessKeyId: stringOr(source.accessKeyId, DEFAULT_SETTINGS.accessKeyId),
     secretId: stringOr(source.secretId, DEFAULT_SETTINGS.secretId),
-    ignorePatterns: stringArrayOr(
-      source.ignorePatterns,
-      DEFAULT_SETTINGS.ignorePatterns,
-    ),
+    ignorePatterns: stringArrayOr(source.ignorePatterns, DEFAULT_SETTINGS.ignorePatterns),
   };
 }
 
@@ -129,11 +126,7 @@ export function settingsEqual(a: GeodeSettings, b: GeodeSettings): boolean {
 
 // hasConnectionConfig reports whether settings have enough filled in to attempt a connection.
 export function hasConnectionConfig(settings: GeodeSettings): boolean {
-  if (
-    settings.bucket === "" ||
-    settings.accessKeyId === "" ||
-    settings.secretId === ""
-  ) {
+  if (settings.bucket === "" || settings.accessKeyId === "" || settings.secretId === "") {
     return false;
   }
   if (settings.provider === "r2") {

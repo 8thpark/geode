@@ -38,9 +38,7 @@ function renderHeader(containerEl: HTMLElement): void {
     window.open("https://github.com/8thpark/geode", "_blank");
   });
   new ButtonComponent(links).setButtonText("Support").onClick(() => {
-    const target = containerEl.querySelector<HTMLElement>(
-      ".geode-support-anchor",
-    );
+    const target = containerEl.querySelector<HTMLElement>(".geode-support-anchor");
     if (target !== null) {
       target.scrollIntoView({ behavior: "smooth", block: "start" });
     }
@@ -63,10 +61,7 @@ function onFieldChanged(tab: GeodeSettingTab): void {
 }
 
 // renderProviderFields draws the fields specific to the selected provider.
-function renderProviderFields(
-  tab: GeodeSettingTab,
-  containerEl: HTMLElement,
-): void {
+function renderProviderFields(tab: GeodeSettingTab, containerEl: HTMLElement): void {
   if (tab.draft.provider === "r2") {
     new Setting(containerEl)
       .setName("Account ID")
@@ -117,9 +112,7 @@ function renderProviderFields(
 function renderSecretRow(tab: GeodeSettingTab, containerEl: HTMLElement): void {
   new Setting(containerEl)
     .setName("Secret access key")
-    .setDesc(
-      "Stored in Obsidian's built in secret manager, never in plugin data or synced files.",
-    )
+    .setDesc("Stored in Obsidian's built in secret manager, never in plugin data or synced files.")
     .addComponent((el) => {
       const component = new SecretComponent(tab.app, el)
         .setValue(tab.draft.secretId)
@@ -197,10 +190,7 @@ function renderActions(tab: GeodeSettingTab, containerEl: HTMLElement): void {
 }
 
 // renderStorageSection draws the card of storage related settings.
-function renderStorageSection(
-  tab: GeodeSettingTab,
-  containerEl: HTMLElement,
-): void {
+function renderStorageSection(tab: GeodeSettingTab, containerEl: HTMLElement): void {
   const card = containerEl.createDiv({ cls: "geode-card" });
 
   new Setting(card)
@@ -252,10 +242,7 @@ function renderStorageSection(
 
 // renderSyncSection draws the sync exclusion settings: a textarea for user glob patterns and
 // a note about the built-in local_ prefix convention.
-function renderSyncSection(
-  tab: GeodeSettingTab,
-  containerEl: HTMLElement,
-): void {
+function renderSyncSection(tab: GeodeSettingTab, containerEl: HTMLElement): void {
   const heading = new Setting(containerEl).setName("Sync").setHeading();
   heading.settingEl.addClass("geode-sync-anchor");
   const card = containerEl.createDiv({ cls: "geode-card" });
@@ -334,20 +321,13 @@ function debugInfoText(tab: GeodeSettingTab): string {
 }
 
 // flashButtonText sets a button's text to feedback, then reverts it to original after a delay.
-function flashButtonText(
-  button: ButtonComponent,
-  original: string,
-  feedback: string,
-): void {
+function flashButtonText(button: ButtonComponent, original: string, feedback: string): void {
   button.setButtonText(feedback);
   window.setTimeout(() => button.setButtonText(original), 1500);
 }
 
 // renderSupportSection draws the Support heading and its card of docs, email, and debug info.
-function renderSupportSection(
-  tab: GeodeSettingTab,
-  containerEl: HTMLElement,
-): void {
+function renderSupportSection(tab: GeodeSettingTab, containerEl: HTMLElement): void {
   const heading = new Setting(containerEl).setName("Support").setHeading();
   heading.settingEl.addClass("geode-support-anchor");
   const card = containerEl.createDiv({ cls: "geode-card" });
@@ -408,10 +388,7 @@ function renderSupportSection(
 }
 
 // renderSettingsTab draws every section into containerEl from the tab's current draft state.
-export function renderSettingsTab(
-  tab: GeodeSettingTab,
-  containerEl: HTMLElement,
-): void {
+export function renderSettingsTab(tab: GeodeSettingTab, containerEl: HTMLElement): void {
   renderHeader(containerEl);
   renderStorageSection(tab, containerEl);
   renderSyncSection(tab, containerEl);
@@ -509,9 +486,7 @@ export class GeodeSettingTab extends PluginSettingTab {
   }
 
   async save(): Promise<void> {
-    this.plugin.logger.info(
-      `saving settings (provider=${this.draft.provider})`,
-    );
+    this.plugin.logger.info(`saving settings (provider=${this.draft.provider})`);
     this.plugin.settings = { ...this.draft };
     await this.plugin.saveSettings();
     this.refreshActionsUI();
@@ -528,12 +503,9 @@ export class GeodeSettingTab extends PluginSettingTab {
     this.connectionMessage = "";
     this.refreshActionsUI();
 
-    const secretAccessKey =
-      this.app.secretStorage.getSecret(this.draft.secretId) ?? "";
+    const secretAccessKey = this.app.secretStorage.getSecret(this.draft.secretId) ?? "";
     if (secretAccessKey === "") {
-      this.plugin.logger.warn(
-        `no secret found for ID "${this.draft.secretId}"`,
-      );
+      this.plugin.logger.warn(`no secret found for ID "${this.draft.secretId}"`);
     }
 
     const result = await testConnection(this.draft, secretAccessKey);
