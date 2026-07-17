@@ -23,7 +23,7 @@ import {
   createObsidianStateStore,
   createObsidianVaultReader,
 } from "./vault-adapter.ts";
-import type { StateStore, VaultReader } from "./vault-state.ts";
+import { type StateStore, takeSnapshot, type VaultReader } from "./vault-state.ts";
 
 const SECRET = "geodedev";
 
@@ -268,6 +268,48 @@ test("sync: a file deleted on one device and edited on another restores the edit
     assert.equal(await readLocal(b, "five/note.md"), "B kept editing");
   } finally {
     cleanup(a, b);
+  }
+});
+
+test("sync: a stale state.json from an older build never deletes the vault on the first sync", async () => {
+  await resetRemote("seven/");
+  const a = newDevice();
+  try {
+    // Reproduce an upgrader's poisoned ancestor. The older build wrote state.json on every file
+    // event, not only on completed syncs, so a developer who ran it against their own vault has a
+    // state.json describing every file despite nothing ever reaching the (still empty) bucket:
+    // files on disk, a state.json claiming them, and a remote that has never been written.
+    await writeLocal(a, "seven/one.md", "first note");
+    await writeLocal(a, "seven/two.md", "second note");
+    await a.stateStore.write(await takeSnapshot(a.reader, { files: [] }));
+
+    // Before the fix, syncOnce diffed that ancestor against the empty remote, read every file as
+    // remotely deleted, and pullDeleted the whole vault. It must instead treat a first sync (no
+    // remote manifest) as having no ancestor and push everything.
+    const outcome = await sync(a);
+    assert.equal(outcome.ok, true);
+
+    assert.equal(await readLocal(a, "seven/one.md"), "first note");
+    assert.equal(await readLocal(a, "seven/two.md"), "second note");
+
+    // Both files reached the bucket rather than being wiped from it.
+    const one = await storage.getObject("seven/one.md");
+    const two = await storage.getObject("seven/two.md");
+    assert.equal(new TextDecoder().decode(one.body ?? new Uint8Array()), "first note");
+    assert.equal(new TextDecoder().decode(two.body ?? new Uint8Array()), "second note");
+
+    // A second device now syncs clean and converges, proving the manifest the first sync uploaded
+    // is real and the ancestor reset was a one time first sync affordance, not a lasting behaviour.
+    const b = newDevice();
+    try {
+      assert.equal((await sync(b)).ok, true);
+      assert.equal(await readLocal(b, "seven/one.md"), "first note");
+      assert.equal(await readLocal(b, "seven/two.md"), "second note");
+    } finally {
+      cleanup(b);
+    }
+  } finally {
+    cleanup(a);
   }
 });
 

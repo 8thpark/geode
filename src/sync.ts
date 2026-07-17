@@ -233,18 +233,25 @@ export async function executeSyncPlan(
 
 // readRemoteManifest fetches and parses the remote manifest. A confirmed 404 means no manifest
 // has ever been written, the safe assumption for a first sync against an empty bucket, so that's
-// treated as an empty snapshot. Any other failure (network, auth, a real 5xx) is reported as an
-// error rather than ever guessed at as "remote is empty" — getting that guess wrong would look
-// exactly like every previously known remote file had just been deleted.
+// treated as an empty snapshot flagged firstSync. Any other failure (network, auth, a real 5xx)
+// is reported as an error rather than ever guessed at as "remote is empty" — getting that guess
+// wrong would look exactly like every previously known remote file had just been deleted.
+//
+// firstSync distinguishes "no manifest has ever been written" from "a manifest exists and is
+// genuinely empty": syncOnce must ignore the local ancestor in the former (nothing has ever been
+// synced, so state.json cannot be a valid common ancestor) but trust it in the latter (an empty
+// remote that a prior sync really produced, where a local file absent from it was deleted).
 export async function readRemoteManifest(
   storage: StorageClient,
-): Promise<{ ok: true; snapshot: VaultSnapshot } | { ok: false; message: string }> {
+): Promise<
+  { ok: true; snapshot: VaultSnapshot; firstSync: boolean } | { ok: false; message: string }
+> {
   const fetched = await storage.getObject(MANIFEST_KEY);
 
   if (fetched.ok && fetched.body !== null) {
     try {
       const snapshot = JSON.parse(new TextDecoder().decode(fetched.body)) as VaultSnapshot;
-      return { ok: true, snapshot };
+      return { ok: true, snapshot, firstSync: false };
     } catch {
       return { ok: false, message: "remote manifest is corrupt" };
     }
@@ -253,7 +260,7 @@ export async function readRemoteManifest(
   // TODO(#41): GetResult conflates 404 with every other failure; swap this for a real status
   // once that's fixed, rather than sniffing the message text for a status code.
   if (fetched.message.includes("(404)")) {
-    return { ok: true, snapshot: { files: [] } };
+    return { ok: true, snapshot: { files: [] }, firstSync: true };
   }
   return { ok: false, message: fetched.message };
 }
@@ -272,14 +279,21 @@ export async function syncOnce(
   storage: StorageClient,
   now: number,
 ): Promise<SyncOutcome> {
-  const local = await takeSnapshot(reader, previous);
-
   const remote = await readRemoteManifest(storage);
   if (!remote.ok) {
     return { ok: false, message: remote.message, failures: [] };
   }
 
-  const actions = planSync(previous, local, remote.snapshot);
+  // No remote manifest means no prior sync ever completed against this bucket, so previous (the
+  // local state.json) cannot be a valid common ancestor: an upgrader's stale state, written by an
+  // older build on every file event rather than only on completed syncs, would diff against the
+  // empty remote as "every file deleted remotely" and pullDelete the whole vault. Dropping the
+  // ancestor on a first sync reduces it to a clean push of whatever is local, with nothing to lose.
+  const ancestor: VaultSnapshot = remote.firstSync ? { files: [] } : previous;
+
+  const local = await takeSnapshot(reader, ancestor);
+
+  const actions = planSync(ancestor, local, remote.snapshot);
   const failures = await executeSyncPlan(actions, reader, localWriter, storage, now);
   if (failures.length > 0) {
     return { ok: false, message: `${failures.length} file(s) failed to sync`, failures };
