@@ -19,5 +19,5 @@ export function statusForHttp(code: number): ResultStatus {
   if (code >= 500) {
     return "server";
   }
-  return "auth";
+  return "server";
 }
