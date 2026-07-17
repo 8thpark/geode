@@ -256,7 +256,8 @@ function renderSyncSection(
   tab: GeodeSettingTab,
   containerEl: HTMLElement,
 ): void {
-  new Setting(containerEl).setName("Sync").setHeading();
+  const heading = new Setting(containerEl).setName("Sync").setHeading();
+  heading.settingEl.addClass("geode-sync-anchor");
   const card = containerEl.createDiv({ cls: "geode-card" });
 
   new Setting(card)
