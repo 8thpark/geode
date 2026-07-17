@@ -182,6 +182,13 @@ export default class GeodePlugin extends Plugin {
     this.setSyncStatus("syncing", "");
     try {
       await this.runSync(dir);
+    } catch (err) {
+      let message = "unexpected error";
+      if (err instanceof Error) {
+        message = err.message;
+      }
+      this.logger.error(`sync: ${message}`);
+      this.setSyncStatus("error", message);
     } finally {
       this.syncing = false;
     }

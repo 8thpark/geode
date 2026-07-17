@@ -86,6 +86,14 @@ test("planSync: modified locally but deleted remotely is a conflict", () => {
   assert.deepEqual(planSync(previous, local, remote), [{ kind: "conflict", path: "a.md" }]);
 });
 
+test("planSync: deleted independently on both sides needs no reconciliation", () => {
+  const previous = snapshot(file("a.md", "h1"));
+  const local = empty;
+  const remote = empty;
+
+  assert.deepEqual(planSync(previous, local, remote), []);
+});
+
 test("planSync: the manifest's own path is never turned into an action", () => {
   const previous = empty;
   const local = snapshot(file(MANIFEST_KEY, "h1"));

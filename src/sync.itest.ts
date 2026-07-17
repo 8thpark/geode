@@ -78,6 +78,12 @@ async function readLocal(d: Device, path: string): Promise<string | undefined> {
   }
 }
 
+// deleteLocal removes a file from a device's vault, the way a user deleting a note in Obsidian
+// would, so a following sync sees it as a local deletion.
+async function deleteLocal(d: Device, path: string): Promise<void> {
+  await d.writer.deleteFile(path);
+}
+
 // sync runs one pass for a device, mirroring the plugin's runSync spine: read previous state, run
 // syncOnce, persist the new snapshot on success.
 async function sync(d: Device, now = Date.now()): Promise<SyncOutcome> {
@@ -197,6 +203,40 @@ test("sync: a two device conflict pushes the copy so the other device pulls it c
     assert.equal(await readLocal(b, "three/note.md"), "A edit");
     assert.equal(await readLocal(a, copyPath), "B side edit");
     assert.equal(await readLocal(b, copyPath), "B side edit");
+  } finally {
+    cleanup(a, b);
+  }
+});
+
+test("sync: a file deleted independently on both devices converges without a conflict", async () => {
+  await resetRemote("four/");
+  const a = newDevice();
+  const b = newDevice();
+  try {
+    await writeLocal(a, "four/note.md", "shared text");
+    assert.equal((await sync(a)).ok, true);
+    assert.equal((await sync(b)).ok, true);
+    assert.equal(await readLocal(b, "four/note.md"), "shared text");
+
+    // Both devices delete the same file before either has synced the deletion to the other, the
+    // ordinary case of deleting a note on two machines without syncing in between.
+    await deleteLocal(a, "four/note.md");
+    await deleteLocal(b, "four/note.md");
+
+    assert.equal((await sync(a)).ok, true);
+
+    // B's sync sees the file deleted on both sides since the last sync. Before the fix, planSync
+    // misclassified this as a conflict, and executeSyncPlan then tried to read the local bytes of
+    // a file that no longer existed, throwing uncaught and leaving the sync stuck mid-flight.
+    const bOutcome = await sync(b);
+    assert.equal(bOutcome.ok, true);
+
+    assert.equal(await readLocal(a, "four/note.md"), undefined);
+    assert.equal(await readLocal(b, "four/note.md"), undefined);
+
+    // No conflict copy was invented for a deletion both sides already agreed on.
+    const listed = await storage.listObjects("four/");
+    assert.deepEqual(listed.objects, []);
   } finally {
     cleanup(a, b);
   }

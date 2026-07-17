@@ -109,6 +109,9 @@ export function planSync(
     // Changed on both sides since the last sync. A delete on either side, or content that
     // ended up different, is a genuine conflict; landing on identical content (both edited
     // to the same bytes, or both deleted it) needs no reconciliation.
+    if (change.kind === "deleted" && remoteChange.kind === "deleted") {
+      continue;
+    }
     if (change.kind === "deleted" || remoteChange.kind === "deleted") {
       actions.push({ kind: "conflict", path: change.path });
       continue;
