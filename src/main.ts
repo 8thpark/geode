@@ -3,9 +3,16 @@ import { Plugin } from "obsidian";
 import { createLogger, type Logger, type LogSink } from "./log";
 import { createLogSink } from "./log-adapter";
 import { GeodeLogView, LOG_VIEW_TYPE } from "./log-view";
-import { DEFAULT_SETTINGS, type GeodeSettings, normalizeSettings } from "./settings";
+import {
+  DEFAULT_SETTINGS,
+  type GeodeSettings,
+  normalizeSettings,
+} from "./settings";
 import { GeodeSettingTab } from "./settings-tab";
-import { createObsidianStateStore, createObsidianVaultReader } from "./vault-adapter";
+import {
+  createObsidianStateStore,
+  createObsidianVaultReader,
+} from "./vault-adapter";
 import { diffSnapshots, takeSnapshot } from "./vault-state";
 
 // VAULT_STATE_DEBOUNCE_MS delays a vault state refresh after the last file event, so a burst of
@@ -24,7 +31,11 @@ const LOG_MIN_LEVEL = "debug";
 // equivalent) so the Settings command can jump straight to Geode's tab, and opening the log view
 // can close the settings modal out from under itself.
 type AppWithSetting = App & {
-  setting: { open: () => void; close: () => void; openTabById: (id: string) => void };
+  setting: {
+    open: () => void;
+    close: () => void;
+    openTabById: (id: string) => void;
+  };
 };
 
 // GeodePlugin is the Obsidian plugin entry point that owns settings load and save.
@@ -38,10 +49,17 @@ export default class GeodePlugin extends Plugin {
   async onload() {
     await this.loadSettings();
 
-    this.logSink = createLogSink(this.app.vault.adapter, this.manifest.dir, MAX_LOG_LINES);
+    this.logSink = createLogSink(
+      this.app.vault.adapter,
+      this.manifest.dir,
+      MAX_LOG_LINES,
+    );
     this.logger = createLogger(this.logSink, LOG_MIN_LEVEL);
 
-    this.registerView(LOG_VIEW_TYPE, (leaf) => new GeodeLogView(leaf, this.logSink));
+    this.registerView(
+      LOG_VIEW_TYPE,
+      (leaf) => new GeodeLogView(leaf, this.logSink),
+    );
     this.addCommand({
       id: "logs",
       name: "Logs",
@@ -62,10 +80,18 @@ export default class GeodePlugin extends Plugin {
     this.app.workspace.onLayoutReady(() => {
       void this.refreshVaultState();
 
-      this.registerEvent(this.app.vault.on("create", () => this.scheduleVaultStateRefresh()));
-      this.registerEvent(this.app.vault.on("modify", () => this.scheduleVaultStateRefresh()));
-      this.registerEvent(this.app.vault.on("delete", () => this.scheduleVaultStateRefresh()));
-      this.registerEvent(this.app.vault.on("rename", () => this.scheduleVaultStateRefresh()));
+      this.registerEvent(
+        this.app.vault.on("create", () => this.scheduleVaultStateRefresh()),
+      );
+      this.registerEvent(
+        this.app.vault.on("modify", () => this.scheduleVaultStateRefresh()),
+      );
+      this.registerEvent(
+        this.app.vault.on("delete", () => this.scheduleVaultStateRefresh()),
+      );
+      this.registerEvent(
+        this.app.vault.on("rename", () => this.scheduleVaultStateRefresh()),
+      );
     });
 
     this.register(() => {
@@ -131,14 +157,22 @@ export default class GeodePlugin extends Plugin {
       return;
     }
 
-    const store = createObsidianStateStore(this.app.vault.adapter, `${dir}/state.json`);
-    const reader = createObsidianVaultReader(this.app.vault);
+    const store = createObsidianStateStore(
+      this.app.vault.adapter,
+      `${dir}/state.json`,
+    );
+    const reader = createObsidianVaultReader(
+      this.app.vault,
+      this.settings.ignorePatterns,
+    );
 
     const previous = await store.read();
     const current = await takeSnapshot(reader, previous);
     const changes = diffSnapshots(previous, current);
 
-    this.logger.info(`vault state refreshed (${changes.length} change(s) since last run)`);
+    this.logger.info(
+      `vault state refreshed (${changes.length} change(s) since last run)`,
+    );
     await store.write(current);
   }
 }
