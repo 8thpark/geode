@@ -21,13 +21,16 @@ export type LocalWriter = {
   renameFile: (path: string, newPath: string) => Promise<void>;
 };
 
-// SyncAction is one thing a sync needs to do to bring local and remote back in step.
+// SyncAction is one thing a sync needs to do to bring local and remote back in step. A conflict
+// carries deletedSide so executeSyncPlan never has to guess, from a failed read, whether a deleted
+// side is why there's nothing there: "local" means there's no local content to preserve, "remote"
+// means there's nothing remote to pull, "none" means both sides have real, differing content.
 export type SyncAction =
   | { kind: "push"; path: string }
   | { kind: "pushDelete"; path: string }
   | { kind: "pull"; path: string }
   | { kind: "pullDelete"; path: string }
-  | { kind: "conflict"; path: string };
+  | { kind: "conflict"; path: string; deletedSide: "local" | "remote" | "none" };
 
 // SyncFailure is one action that could not be carried out.
 export type SyncFailure = {
@@ -112,8 +115,12 @@ export function planSync(
     if (change.kind === "deleted" && remoteChange.kind === "deleted") {
       continue;
     }
-    if (change.kind === "deleted" || remoteChange.kind === "deleted") {
-      actions.push({ kind: "conflict", path: change.path });
+    if (change.kind === "deleted") {
+      actions.push({ kind: "conflict", path: change.path, deletedSide: "local" });
+      continue;
+    }
+    if (remoteChange.kind === "deleted") {
+      actions.push({ kind: "conflict", path: change.path, deletedSide: "remote" });
       continue;
     }
     const localFile = localByPath.get(change.path);
@@ -121,7 +128,7 @@ export function planSync(
     if (localFile !== undefined && remoteFile !== undefined && localFile.hash === remoteFile.hash) {
       continue;
     }
-    actions.push({ kind: "conflict", path: change.path });
+    actions.push({ kind: "conflict", path: change.path, deletedSide: "none" });
   }
 
   for (const change of remoteChanges) {
@@ -183,10 +190,22 @@ export async function executeSyncPlan(
       continue;
     }
 
-    // conflict: preserve the local edit under a new name and push that copy to storage too, so
-    // the diverged edit lands on every device and the manifest we later upload isn't claiming a
-    // remote object that doesn't exist; then let the remote version claim the original path.
-    // Neither side's edit is ever silently discarded.
+    // conflict, deletedSide "local": the user deleted their copy, so there is no local edit to
+    // preserve; the remote edit simply wins and is restored onto the local path.
+    if (action.deletedSide === "local") {
+      const result = await storage.getObject(action.path);
+      if (!result.ok || result.body === null) {
+        failures.push({ path: action.path, message: result.message });
+        continue;
+      }
+      await localWriter.writeFile(action.path, result.body);
+      continue;
+    }
+
+    // conflict, deletedSide "remote" or "none": preserve the local edit under a new name and
+    // push that copy to storage too, so the diverged edit lands on every device and the manifest
+    // we later upload isn't claiming a remote object that doesn't exist. Neither side's edit is
+    // ever silently discarded.
     const copyPath = conflictCopyPath(action.path, now);
     const localBytes = await reader.readFile(action.path);
     await localWriter.renameFile(action.path, copyPath);
@@ -194,6 +213,13 @@ export async function executeSyncPlan(
     if (!pushed.ok) {
       failures.push({ path: copyPath, message: pushed.message });
     }
+
+    // deletedSide "remote": there is nothing at this path remotely to pull, the rename above
+    // already vacated it locally, and that is the correct final state, not a failure to report.
+    if (action.deletedSide === "remote") {
+      continue;
+    }
+
     const result = await storage.getObject(action.path);
     if (!result.ok || result.body === null) {
       failures.push({ path: action.path, message: result.message });

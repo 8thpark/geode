@@ -241,3 +241,65 @@ test("sync: a file deleted independently on both devices converges without a con
     cleanup(a, b);
   }
 });
+
+test("sync: a file deleted on one device and edited on another restores the edit, no phantom read of the deleted file", async () => {
+  await resetRemote("five/");
+  const a = newDevice();
+  const b = newDevice();
+  try {
+    await writeLocal(a, "five/note.md", "original text");
+    assert.equal((await sync(a)).ok, true);
+    assert.equal((await sync(b)).ok, true);
+
+    // A deletes its copy; B, unaware of that, edits its own copy before either syncs again.
+    await deleteLocal(a, "five/note.md");
+    await writeLocal(b, "five/note.md", "B kept editing");
+    assert.equal((await sync(b)).ok, true);
+
+    // A's sync sees local deleted, remote modified since the last sync. Before the fix this was
+    // classified as a conflict and executeSyncPlan unconditionally tried to read the local bytes
+    // of a.md to preserve as a copy — but A has nothing there, so it threw uncaught and A was
+    // stuck retrying the same throw forever.
+    const aOutcome = await sync(a);
+    assert.equal(aOutcome.ok, true);
+
+    // There is nothing to preserve on A's side, so B's edit simply wins and reappears locally.
+    assert.equal(await readLocal(a, "five/note.md"), "B kept editing");
+    assert.equal(await readLocal(b, "five/note.md"), "B kept editing");
+  } finally {
+    cleanup(a, b);
+  }
+});
+
+test("sync: an edit on one device and a delete on another preserves the edit as a copy, no phantom pull failure", async () => {
+  await resetRemote("six/");
+  const a = newDevice();
+  const b = newDevice();
+  try {
+    await writeLocal(a, "six/note.md", "original text");
+    assert.equal((await sync(a)).ok, true);
+    assert.equal((await sync(b)).ok, true);
+
+    // A edits its copy; B, unaware of that, deletes its own copy before either syncs again.
+    await writeLocal(a, "six/note.md", "A kept editing");
+    await deleteLocal(b, "six/note.md");
+    assert.equal((await sync(b)).ok, true);
+
+    // A's sync sees local modified, remote deleted since the last sync. Before the fix this
+    // succeeded at preserving A's edit as a copy, then treated the expected empty read at the
+    // original path as a sync failure, blocking state.json from ever advancing and repeating on
+    // every subsequent sync.
+    const now = Date.parse("2026-07-14T10:00:00.000Z");
+    const aOutcome = await sync(a, now);
+    assert.equal(aOutcome.ok, true);
+
+    const copyPath = conflictCopyPath("six/note.md", now);
+    assert.equal(await readLocal(a, "six/note.md"), undefined);
+    assert.equal(await readLocal(a, copyPath), "A kept editing");
+
+    assert.equal((await sync(b)).ok, true);
+    assert.equal(await readLocal(b, copyPath), "A kept editing");
+  } finally {
+    cleanup(a, b);
+  }
+});

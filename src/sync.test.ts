@@ -67,23 +67,29 @@ test("planSync: both sides changed to different content is a conflict", () => {
   const local = snapshot(file("a.md", "h2"));
   const remote = snapshot(file("a.md", "h3"));
 
-  assert.deepEqual(planSync(previous, local, remote), [{ kind: "conflict", path: "a.md" }]);
+  assert.deepEqual(planSync(previous, local, remote), [
+    { kind: "conflict", path: "a.md", deletedSide: "none" },
+  ]);
 });
 
-test("planSync: deleted locally but modified remotely is a conflict", () => {
+test("planSync: deleted locally but modified remotely is a conflict with nothing local to preserve", () => {
   const previous = snapshot(file("a.md", "h1"));
   const local = empty;
   const remote = snapshot(file("a.md", "h2"));
 
-  assert.deepEqual(planSync(previous, local, remote), [{ kind: "conflict", path: "a.md" }]);
+  assert.deepEqual(planSync(previous, local, remote), [
+    { kind: "conflict", path: "a.md", deletedSide: "local" },
+  ]);
 });
 
-test("planSync: modified locally but deleted remotely is a conflict", () => {
+test("planSync: modified locally but deleted remotely is a conflict with nothing remote to pull", () => {
   const previous = snapshot(file("a.md", "h1"));
   const local = snapshot(file("a.md", "h2"));
   const remote = empty;
 
-  assert.deepEqual(planSync(previous, local, remote), [{ kind: "conflict", path: "a.md" }]);
+  assert.deepEqual(planSync(previous, local, remote), [
+    { kind: "conflict", path: "a.md", deletedSide: "remote" },
+  ]);
 });
 
 test("planSync: deleted independently on both sides needs no reconciliation", () => {
@@ -258,7 +264,7 @@ test("executeSyncPlan: a conflict renames the local copy, pushes it to storage, 
   const now = Date.parse("2026-07-14T10:00:00.000Z");
 
   const failures = await executeSyncPlan(
-    [{ kind: "conflict", path: "a.md" }],
+    [{ kind: "conflict", path: "a.md", deletedSide: "none" }],
     reader,
     writer,
     storage,
@@ -271,6 +277,46 @@ test("executeSyncPlan: a conflict renames the local copy, pushes it to storage, 
   // The conflict copy must also reach storage: otherwise the manifest uploaded after this sync
   // claims a remote object that doesn't exist, and every other device fails forever trying to
   // pull it.
+  assert.equal(objects.get(conflictCopyPath("a.md", now)), "local edit");
+});
+
+test("executeSyncPlan: a conflict with nothing local to preserve just pulls the remote version, never reading a deleted local file", async () => {
+  const reader = fakeReader({});
+  const { writer, files } = fakeLocalWriter();
+  const { storage } = fakeStorage({ "a.md": "remote edit" });
+  const now = Date.parse("2026-07-14T10:00:00.000Z");
+
+  const failures = await executeSyncPlan(
+    [{ kind: "conflict", path: "a.md", deletedSide: "local" }],
+    reader,
+    writer,
+    storage,
+    now,
+  );
+
+  assert.deepEqual(failures, []);
+  assert.equal(files.get("a.md"), "remote edit");
+  assert.equal(files.has(conflictCopyPath("a.md", now)), false);
+});
+
+test("executeSyncPlan: a conflict with nothing remote to pull preserves the local edit as a copy and reports no failure", async () => {
+  const reader = fakeReader({ "a.md": "local edit" });
+  const { writer, files } = fakeLocalWriter();
+  files.set("a.md", "local edit");
+  const { storage, objects } = fakeStorage();
+  const now = Date.parse("2026-07-14T10:00:00.000Z");
+
+  const failures = await executeSyncPlan(
+    [{ kind: "conflict", path: "a.md", deletedSide: "remote" }],
+    reader,
+    writer,
+    storage,
+    now,
+  );
+
+  assert.deepEqual(failures, []);
+  assert.equal(files.has("a.md"), false);
+  assert.equal(files.get(conflictCopyPath("a.md", now)), "local edit");
   assert.equal(objects.get(conflictCopyPath("a.md", now)), "local edit");
 });
 
