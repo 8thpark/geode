@@ -1,22 +1,32 @@
 import { AwsClient } from "aws4fetch";
 import { endpointFor, type GeodeSettings, regionFor } from "./settings.ts";
+import { encodeKey } from "./utils/storage/encode.ts";
+import { messageFor, statusForHttp } from "./utils/storage/errors.ts";
+import { parseListObjectsXml } from "./utils/storage/xml.ts";
+
+// ResultStatus classifies the outcome of a storage operation so callers can distinguish absent
+// objects from transient failures without parsing the message string.
+export type ResultStatus = "ok" | "not_found" | "auth" | "server" | "network";
 
 // ConnectionResult reports whether a storage provider accepted a test request. Message is the
 // empty string when ok is true.
 export type ConnectionResult = {
   ok: boolean;
+  status: ResultStatus;
   message: string;
 };
 
 // PutResult reports whether an object was written. Message is the empty string when ok is true.
 export type PutResult = {
   ok: boolean;
+  status: ResultStatus;
   message: string;
 };
 
 // GetResult reports whether an object was read. Body is null when ok is false.
 export type GetResult = {
   ok: boolean;
+  status: ResultStatus;
   message: string;
   body: Uint8Array | null;
 };
@@ -25,6 +35,7 @@ export type GetResult = {
 // true.
 export type DeleteResult = {
   ok: boolean;
+  status: ResultStatus;
   message: string;
 };
 
@@ -38,6 +49,7 @@ export type ObjectMeta = {
 // ListResult reports whether a bucket listing succeeded. Objects is empty when ok is false.
 export type ListResult = {
   ok: boolean;
+  status: ResultStatus;
   message: string;
   objects: ObjectMeta[];
 };
@@ -51,25 +63,6 @@ export type StorageClient = {
   deleteObject: (key: string) => Promise<DeleteResult>;
   listObjects: (prefix?: string) => Promise<ListResult>;
 };
-
-// messageFor converts a caught error into a plain message string.
-function messageFor(err: unknown): string {
-  if (err instanceof Error) {
-    return err.message;
-  }
-  return "Network error";
-}
-
-// encodeKey percent-encodes each path segment of an S3 object key individually, preserving "/" as
-// the separator so keys like "notes/Foo & Bar.md" become "notes/Foo%20%26%20Bar.md".
-function encodeKey(key: string): string {
-  const segments = key.split("/");
-  const encodedSegments: string[] = [];
-  for (const segment of segments) {
-    encodedSegments.push(encodeURIComponent(segment));
-  }
-  return encodedSegments.join("/");
-}
 
 // missingFieldFor returns the name of the first field testConnection needs but doesn't have, or
 // "" if everything required is present.
@@ -94,7 +87,7 @@ export async function testConnection(
 ): Promise<ConnectionResult> {
   const missing = missingFieldFor(settings, secretAccessKey);
   if (missing !== "") {
-    return { ok: false, message: `Fill in ${missing} first` };
+    return { ok: false, status: "auth", message: `Fill in ${missing} first` };
   }
 
   const client = new AwsClient({
@@ -109,13 +102,17 @@ export async function testConnection(
   try {
     response = await client.fetch(url, { method: "HEAD" });
   } catch (err) {
-    return { ok: false, message: messageFor(err) };
+    return { ok: false, status: "network", message: messageFor(err) };
   }
 
   if (!response.ok) {
-    return { ok: false, message: `Storage rejected the request (${response.status})` };
+    return {
+      ok: false,
+      status: statusForHttp(response.status),
+      message: `Storage rejected the request (${response.status})`,
+    };
   }
-  return { ok: true, message: "" };
+  return { ok: true, status: "ok", message: "" };
 }
 
 // s3PutObject writes body to key, creating or overwriting it.
@@ -134,13 +131,17 @@ async function s3PutObject(
       body: body as BodyInit,
     });
   } catch (err) {
-    return { ok: false, message: messageFor(err) };
+    return { ok: false, status: "network", message: messageFor(err) };
   }
 
   if (!response.ok) {
-    return { ok: false, message: `Storage rejected the write (${response.status})` };
+    return {
+      ok: false,
+      status: statusForHttp(response.status),
+      message: `Storage rejected the write (${response.status})`,
+    };
   }
-  return { ok: true, message: "" };
+  return { ok: true, status: "ok", message: "" };
 }
 
 // s3GetObject reads the bytes stored at key.
@@ -149,14 +150,19 @@ async function s3GetObject(client: AwsClient, baseUrl: string, key: string): Pro
   try {
     response = await client.fetch(`${baseUrl}/${encodeKey(key)}`, { method: "GET" });
   } catch (err) {
-    return { ok: false, message: messageFor(err), body: null };
+    return { ok: false, status: "network", message: messageFor(err), body: null };
   }
 
   if (!response.ok) {
-    return { ok: false, message: `Storage rejected the read (${response.status})`, body: null };
+    return {
+      ok: false,
+      status: statusForHttp(response.status),
+      message: `Storage rejected the read (${response.status})`,
+      body: null,
+    };
   }
   const buffer = await response.arrayBuffer();
-  return { ok: true, message: "", body: new Uint8Array(buffer) };
+  return { ok: true, status: "ok", message: "", body: new Uint8Array(buffer) };
 }
 
 // s3DeleteObject removes key from the bucket.
@@ -169,84 +175,17 @@ async function s3DeleteObject(
   try {
     response = await client.fetch(`${baseUrl}/${encodeKey(key)}`, { method: "DELETE" });
   } catch (err) {
-    return { ok: false, message: messageFor(err) };
+    return { ok: false, status: "network", message: messageFor(err) };
   }
 
   if (!response.ok) {
-    return { ok: false, message: `Storage rejected the delete (${response.status})` };
+    return {
+      ok: false,
+      status: statusForHttp(response.status),
+      message: `Storage rejected the delete (${response.status})`,
+    };
   }
-  return { ok: true, message: "" };
-}
-
-// fieldFrom returns the text content of the first <tag>...</tag> found in an XML fragment, or
-// "" if it isn't present.
-function fieldFrom(block: string, tag: string): string {
-  const pattern = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`);
-  const found = pattern.exec(block);
-  if (found === null) {
-    return "";
-  }
-  return found[1];
-}
-
-// decodeXmlText returns the plain text represented by XML character and entity references.
-function decodeXmlText(text: string): string {
-  return text.replace(
-    /&#(x[0-9a-fA-F]+|[0-9]+);|&(amp|lt|gt|quot|apos);/g,
-    (match, numeric, named) => {
-      if (numeric !== undefined) {
-        let codePoint = 0;
-        if (numeric.startsWith("x") || numeric.startsWith("X")) {
-          codePoint = Number.parseInt(numeric.slice(1), 16);
-        } else {
-          codePoint = Number.parseInt(numeric, 10);
-        }
-        if (Number.isNaN(codePoint)) {
-          return match;
-        }
-        return String.fromCodePoint(codePoint);
-      }
-
-      if (named === "amp") {
-        return "&";
-      }
-      if (named === "lt") {
-        return "<";
-      }
-      if (named === "gt") {
-        return ">";
-      }
-      if (named === "quot") {
-        return '"';
-      }
-      if (named === "apos") {
-        return "'";
-      }
-      return match;
-    },
-  );
-}
-
-// parseListObjectsXml extracts object keys, sizes, and last-modified timestamps from an S3
-// ListObjectsV2 XML response. Regex rather than a DOM parser: the schema is narrow and stable,
-// and DOMParser isn't available outside a browser-like runtime, which would make this untestable
-// under node:test.
-export function parseListObjectsXml(xml: string): ObjectMeta[] {
-  const objects: ObjectMeta[] = [];
-  const contentsPattern = /<Contents>([\s\S]*?)<\/Contents>/g;
-  let match = contentsPattern.exec(xml);
-
-  while (match !== null) {
-    const block = match[1];
-    objects.push({
-      key: decodeXmlText(fieldFrom(block, "Key")),
-      size: Number(fieldFrom(block, "Size")),
-      lastModified: fieldFrom(block, "LastModified"),
-    });
-    match = contentsPattern.exec(xml);
-  }
-
-  return objects;
+  return { ok: true, status: "ok", message: "" };
 }
 
 // s3ListObjects lists objects in the bucket, optionally restricted to a key prefix.
@@ -264,14 +203,19 @@ async function s3ListObjects(
   try {
     response = await client.fetch(url, { method: "GET" });
   } catch (err) {
-    return { ok: false, message: messageFor(err), objects: [] };
+    return { ok: false, status: "network", message: messageFor(err), objects: [] };
   }
 
   if (!response.ok) {
-    return { ok: false, message: `Storage rejected the list (${response.status})`, objects: [] };
+    return {
+      ok: false,
+      status: statusForHttp(response.status),
+      message: `Storage rejected the list (${response.status})`,
+      objects: [],
+    };
   }
   const xml = await response.text();
-  return { ok: true, message: "", objects: parseListObjectsXml(xml) };
+  return { ok: true, status: "ok", message: "", objects: parseListObjectsXml(xml) };
 }
 
 // createS3Client returns a StorageClient backed by the S3 compatible endpoint in settings.

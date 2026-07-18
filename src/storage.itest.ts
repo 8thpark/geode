@@ -21,6 +21,7 @@ const liveSettings: GeodeSettings = {
 test("testConnection: succeeds against a real bucket", async () => {
   const result = await testConnection(liveSettings, SECRET_ACCESS_KEY);
   assert.equal(result.ok, true);
+  assert.equal(result.status, "ok");
 });
 
 test("putObject then getObject round trips the same bytes", async () => {
@@ -29,9 +30,11 @@ test("putObject then getObject round trips the same bytes", async () => {
 
   const putResult = await client.putObject("notes/hello.md", body);
   assert.equal(putResult.ok, true);
+  assert.equal(putResult.status, "ok");
 
   const getResult = await client.getObject("notes/hello.md");
   assert.equal(getResult.ok, true);
+  assert.equal(getResult.status, "ok");
   assert.deepEqual(getResult.body, body);
 });
 
@@ -39,6 +42,7 @@ test("getObject on a missing key fails without a body", async () => {
   const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
   const result = await client.getObject("does/not/exist.md");
   assert.equal(result.ok, false);
+  assert.equal(result.status, "not_found");
   assert.equal(result.body, null);
 });
 
@@ -48,9 +52,11 @@ test("deleteObject removes an object", async () => {
 
   const deleteResult = await client.deleteObject("notes/to-delete.md");
   assert.equal(deleteResult.ok, true);
+  assert.equal(deleteResult.status, "ok");
 
   const getResult = await client.getObject("notes/to-delete.md");
   assert.equal(getResult.ok, false);
+  assert.equal(getResult.status, "not_found");
 });
 
 test("listObjects returns only keys under the given prefix", async () => {
@@ -61,6 +67,7 @@ test("listObjects returns only keys under the given prefix", async () => {
 
   const result = await client.listObjects("list-test/");
   assert.equal(result.ok, true);
+  assert.equal(result.status, "ok");
   const keys: string[] = [];
   for (const object of result.objects) {
     keys.push(object.key);
@@ -75,6 +82,7 @@ test("listObjects with no prefix returns everything", async () => {
 
   const result = await client.listObjects();
   assert.equal(result.ok, true);
+  assert.equal(result.status, "ok");
   let found = false;
   for (const object of result.objects) {
     if (object.key === "unprefixed.md") {

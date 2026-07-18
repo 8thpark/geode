@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DEFAULT_SETTINGS, type GeodeSettings } from "./settings.ts";
-import { parseListObjectsXml, testConnection } from "./storage.ts";
+import { testConnection } from "./storage.ts";
+import { parseListObjectsXml } from "./utils/storage/xml.ts";
 
 const missingFieldCases: {
   name: string;
@@ -33,6 +34,7 @@ for (const { name, settings, secretAccessKey, want } of missingFieldCases) {
   test(`testConnection: ${name}`, async () => {
     const result = await testConnection(settings, secretAccessKey);
     assert.equal(result.ok, false);
+    assert.equal(result.status, "auth");
     assert.equal(result.message, want);
   });
 }
