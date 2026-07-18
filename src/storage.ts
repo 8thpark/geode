@@ -188,34 +188,48 @@ async function s3DeleteObject(
   return { ok: true, status: "ok", message: "" };
 }
 
-// s3ListObjects lists objects in the bucket, optionally restricted to a key prefix.
+// s3ListObjects lists objects in the bucket, optionally restricted to a key prefix. S3 caps a
+// single response at 1,000 keys, so it follows NextContinuationToken until the listing is complete
+// and returns every key. Stopping early would make unlisted keys look like remote deletions.
 async function s3ListObjects(
   client: AwsClient,
   baseUrl: string,
   prefix: string | undefined,
 ): Promise<ListResult> {
-  let url = `${baseUrl}?list-type=2`;
-  if (prefix !== undefined && prefix !== "") {
-    url += `&prefix=${encodeURIComponent(prefix)}`;
-  }
+  const objects: ObjectMeta[] = [];
+  let continuationToken: string | undefined;
 
-  let response: Response;
-  try {
-    response = await client.fetch(url, { method: "GET" });
-  } catch (err) {
-    return { ok: false, status: "network", message: messageFor(err), objects: [] };
-  }
+  do {
+    let url = `${baseUrl}?list-type=2`;
+    if (prefix !== undefined && prefix !== "") {
+      url += `&prefix=${encodeURIComponent(prefix)}`;
+    }
+    if (continuationToken !== undefined) {
+      url += `&continuation-token=${encodeURIComponent(continuationToken)}`;
+    }
 
-  if (!response.ok) {
-    return {
-      ok: false,
-      status: statusForHttp(response.status),
-      message: `Storage rejected the list (${response.status})`,
-      objects: [],
-    };
-  }
-  const xml = await response.text();
-  return { ok: true, status: "ok", message: "", objects: parseListObjectsXml(xml) };
+    let response: Response;
+    try {
+      response = await client.fetch(url, { method: "GET" });
+    } catch (err) {
+      return { ok: false, status: "network", message: messageFor(err), objects: [] };
+    }
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: statusForHttp(response.status),
+        message: `Storage rejected the list (${response.status})`,
+        objects: [],
+      };
+    }
+
+    const page = parseListObjectsXml(await response.text());
+    objects.push(...page.objects);
+    continuationToken = page.nextContinuationToken;
+  } while (continuationToken !== undefined);
+
+  return { ok: true, status: "ok", message: "", objects };
 }
 
 // createS3Client returns a StorageClient backed by the S3 compatible endpoint in settings.

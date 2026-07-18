@@ -54,8 +54,42 @@ test("parseListObjectsXml decodes XML entities in object keys", () => {
   </Contents>
 </ListBucketResult>`;
 
-  assert.deepEqual(parseListObjectsXml(xml), [
-    { key: "notes/Foo & Bar (draft).md", size: 12, lastModified: "2026-07-13T00:00:00.000Z" },
-    { key: "notes/2 < 3 😀.md", size: 34, lastModified: "2026-07-13T00:01:00.000Z" },
-  ]);
+  assert.deepEqual(parseListObjectsXml(xml), {
+    objects: [
+      { key: "notes/Foo & Bar (draft).md", size: 12, lastModified: "2026-07-13T00:00:00.000Z" },
+      { key: "notes/2 < 3 😀.md", size: 34, lastModified: "2026-07-13T00:01:00.000Z" },
+    ],
+    nextContinuationToken: undefined,
+  });
+});
+
+test("parseListObjectsXml surfaces the continuation token when the listing is truncated", () => {
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult>
+  <Contents>
+    <Key>notes/a.md</Key>
+    <LastModified>2026-07-13T00:00:00.000Z</LastModified>
+    <Size>1</Size>
+  </Contents>
+  <IsTruncated>true</IsTruncated>
+  <NextContinuationToken>1ueGcxLPRx1Tr/XYExHnhbYLgveDs2J/wm36Hy4vbOwM=</NextContinuationToken>
+</ListBucketResult>`;
+
+  const page = parseListObjectsXml(xml);
+  assert.equal(page.nextContinuationToken, "1ueGcxLPRx1Tr/XYExHnhbYLgveDs2J/wm36Hy4vbOwM=");
+  assert.equal(page.objects.length, 1);
+});
+
+test("parseListObjectsXml ignores the token on the final page", () => {
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult>
+  <Contents>
+    <Key>notes/a.md</Key>
+    <LastModified>2026-07-13T00:00:00.000Z</LastModified>
+    <Size>1</Size>
+  </Contents>
+  <IsTruncated>false</IsTruncated>
+</ListBucketResult>`;
+
+  assert.equal(parseListObjectsXml(xml).nextContinuationToken, undefined);
 });
