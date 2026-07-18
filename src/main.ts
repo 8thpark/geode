@@ -134,11 +134,18 @@ export default class GeodePlugin extends Plugin {
     const store = createObsidianStateStore(this.app.vault.adapter, `${dir}/state.json`);
     const reader = createObsidianVaultReader(this.app.vault);
 
-    const previous = await store.read();
-    const current = await takeSnapshot(reader, previous);
-    const changes = diffSnapshots(previous, current);
+    // Both callers fire this and forget (void), so a rejection here would surface as an
+    // unhandled promise rejection. takeSnapshot can throw when a file vanishes mid-snapshot
+    // (a live vault race), so convert any failure to a logged result at this boundary.
+    try {
+      const previous = await store.read();
+      const current = await takeSnapshot(reader, previous);
+      const changes = diffSnapshots(previous, current);
 
-    this.logger.info(`vault state refreshed (${changes.length} change(s) since last run)`);
-    await store.write(current);
+      this.logger.info(`vault state refreshed (${changes.length} change(s) since last run)`);
+      await store.write(current);
+    } catch (err) {
+      this.logger.error(`vault state refresh failed: ${err}`);
+    }
   }
 }
