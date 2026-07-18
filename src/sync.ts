@@ -146,6 +146,18 @@ export function planSync(
   return actions;
 }
 
+// readFailureMessage turns whatever reader.readFile threw into a SyncFailure message. readFile
+// throws when a file vanishes between the snapshot and now (a user deleting it mid sync); routing
+// that through failures keeps executeSyncPlan's "errors are values" contract, so one disappeared
+// file is a per file failure like any storage error, not an exception that abandons the rest of
+// the pass.
+function readFailureMessage(err: unknown): string {
+  if (err instanceof Error) {
+    return err.message;
+  }
+  return "could not read local file";
+}
+
 // executeSyncPlan carries out every action against reader/localWriter (the local vault) and
 // storage (the remote bucket), and reports whatever couldn't be completed. now is passed in
 // rather than read internally so a conflict's copy name is deterministic under test.
@@ -160,7 +172,13 @@ export async function executeSyncPlan(
 
   for (const action of actions) {
     if (action.kind === "push") {
-      const bytes = await reader.readFile(action.path);
+      let bytes: Uint8Array;
+      try {
+        bytes = await reader.readFile(action.path);
+      } catch (err) {
+        failures.push({ path: action.path, message: readFailureMessage(err) });
+        continue;
+      }
       const result = await storage.putObject(action.path, bytes);
       if (!result.ok) {
         failures.push({ path: action.path, message: result.message });
@@ -208,7 +226,13 @@ export async function executeSyncPlan(
     // we later upload isn't claiming a remote object that doesn't exist. Neither side's edit is
     // ever silently discarded.
     const copyPath = conflictCopyPath(action.path, now);
-    const localBytes = await reader.readFile(action.path);
+    let localBytes: Uint8Array;
+    try {
+      localBytes = await reader.readFile(action.path);
+    } catch (err) {
+      failures.push({ path: action.path, message: readFailureMessage(err) });
+      continue;
+    }
     await localWriter.renameFile(action.path, copyPath);
     const pushed = await storage.putObject(copyPath, localBytes);
     if (!pushed.ok) {

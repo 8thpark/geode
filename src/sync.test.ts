@@ -321,6 +321,48 @@ test("executeSyncPlan: a conflict with nothing remote to pull preserves the loca
   assert.equal(objects.get(conflictCopyPath("a.md", now)), "local edit");
 });
 
+test("executeSyncPlan: a push whose local file vanished is reported and doesn't stop the rest of the plan", async () => {
+  // a.md is gone from the reader (a user deleted it between the snapshot and now), so readFile
+  // throws. Before the fix that exception escaped executeSyncPlan and abandoned b.md; it must
+  // instead be recorded as a per file failure and the loop must carry on.
+  const reader = fakeReader({ "b.md": "world" });
+  const { writer } = fakeLocalWriter();
+  const { storage, objects } = fakeStorage();
+
+  const actions: SyncAction[] = [
+    { kind: "push", path: "a.md" },
+    { kind: "push", path: "b.md" },
+  ];
+  const failures = await executeSyncPlan(actions, reader, writer, storage, 1);
+
+  assert.deepEqual(failures, [{ path: "a.md", message: "no such file: a.md" }]);
+  assert.equal(objects.get("b.md"), "world");
+  assert.equal(objects.has("a.md"), false);
+});
+
+test("executeSyncPlan: a conflict whose local file vanished is reported, nothing is renamed or pushed, and the plan continues", async () => {
+  // The conflict path also reads local bytes to preserve them. If that file vanished first, the
+  // read throws: it must be reported, the rename/push skipped so no partial state is left behind,
+  // and the following action still run.
+  const reader = fakeReader({ "b.md": "world" });
+  const { writer, files } = fakeLocalWriter();
+  const { storage, objects } = fakeStorage();
+  const now = Date.parse("2026-07-14T10:00:00.000Z");
+
+  const actions: SyncAction[] = [
+    { kind: "conflict", path: "a.md", deletedSide: "none" },
+    { kind: "push", path: "b.md" },
+  ];
+  const failures = await executeSyncPlan(actions, reader, writer, storage, now);
+
+  assert.deepEqual(failures, [{ path: "a.md", message: "no such file: a.md" }]);
+  // No conflict copy was created locally or remotely from a file that wasn't there to preserve.
+  assert.equal(files.has(conflictCopyPath("a.md", now)), false);
+  assert.equal(objects.has(conflictCopyPath("a.md", now)), false);
+  // The following action still ran.
+  assert.equal(objects.get("b.md"), "world");
+});
+
 test("executeSyncPlan: a failed push is reported and doesn't stop the rest of the plan", async () => {
   const reader = fakeReader({ "a.md": "hello", "b.md": "world" });
   const { writer, files } = fakeLocalWriter();
