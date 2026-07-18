@@ -58,7 +58,7 @@ we make decisions together about the project, and to track progress.
 ## Code Style
 
 It is critically important that you abide by all the rules set out in the `typescript-as-go` skill
-when writing Typescript, no exceptions.
+(`.agents/skills/typescript-as-go/SKILL.md`) when writing TypeScript, no exceptions.
 
 Additional rules for the project:
 
