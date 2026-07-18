@@ -20,13 +20,15 @@
 ## Why?
 
 **Geode** is a free [Obsidian](https://obsidian.md) plugin that syncs your vault across multiple
-devices (including iOS) through storage that you own, and encrypted locally on your device.
+devices (including iOS) through storage that you own, and encrypted before anything leaves your
+device.
 
-Our aim is to build the best remote sync plugin available for Obsidian users, whilst also offering
-an remote MCP server and API to your vault, so that any agent (like Claude or Codex) can read/write
-to the same vault, using it as memory.
+Our aim is to build the best remote sync plugin available for Obsidian users, whilst also offering a
+remote MCP server and API to your vault, so that any agent (like Claude or Codex) can read/write to
+the same vault, using it as memory.
 
-TL;DR → Remote sync, using storage you own, encrypted, with MCP/API for your agents.
+**TL;DR** → Remote sync, using storage you own, encrypted, with MCP/API for your agents, so they can
+use Obsidian as memory.
 
 ## Contributing
 
