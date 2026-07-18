@@ -93,6 +93,29 @@ test("listObjects with no prefix returns everything", async () => {
   assert.ok(found);
 });
 
+test("listObjects pages past the 1,000 key response cap", async () => {
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
+  const prefix = "paging-test/";
+  const total = 1001;
+
+  // One PUT per key would serialise 1,001 round trips; bound the fan-out instead so the setup
+  // stays quick without hammering MinIO with unlimited concurrent sockets.
+  const body = new TextEncoder().encode("p");
+  const limit = 32;
+  for (let start = 0; start < total; start += limit) {
+    const batch: Promise<unknown>[] = [];
+    for (let i = start; i < Math.min(start + limit, total); i++) {
+      batch.push(client.putObject(`${prefix}${String(i).padStart(4, "0")}.md`, body));
+    }
+    await Promise.all(batch);
+  }
+
+  const result = await client.listObjects(prefix);
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "ok");
+  assert.equal(result.objects.length, total);
+});
+
 test("putObject/getObject round-trips a key containing a space and ampersand", async () => {
   const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
   const body = new TextEncoder().encode("special chars");
