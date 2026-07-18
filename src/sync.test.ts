@@ -369,6 +369,19 @@ test("readRemoteManifest: corrupt JSON is reported as a failure, not an empty sn
   assert.deepEqual(result, { ok: false, message: "remote manifest is corrupt" });
 });
 
+test("readRemoteManifest: JSON of the wrong shape is corrupt, not a snapshot with an undefined files", async () => {
+  // Each of these parses cleanly but has no files array. Without the shape check they returned
+  // ok:true and later threw TypeError in planSync when byPath iterated remote.files; they must
+  // instead surface as the corrupt-manifest result the signature promises.
+  for (const body of ["{}", "[]", "null", "42", '"files"']) {
+    const { storage } = fakeStorage({ [MANIFEST_KEY]: body });
+
+    const result = await readRemoteManifest(storage);
+
+    assert.deepEqual(result, { ok: false, message: "remote manifest is corrupt" }, body);
+  }
+});
+
 test("syncOnce: a stale ancestor is ignored on a first sync, so a populated vault is pushed, not wiped", async () => {
   // An older build wrote state.json on every file event rather than only on completed syncs, so an
   // upgrader carries a `previous` snapshot describing their whole vault even though nothing ever

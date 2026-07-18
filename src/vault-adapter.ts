@@ -1,6 +1,12 @@
 import type { DataAdapter, Vault } from "obsidian";
 import type { LocalWriter } from "./sync.ts";
-import type { StateStore, VaultFile, VaultReader, VaultSnapshot } from "./vault-state.ts";
+import {
+  isVaultSnapshot,
+  type StateStore,
+  type VaultFile,
+  type VaultReader,
+  type VaultSnapshot,
+} from "./vault-state.ts";
 
 // ensureParentDir creates path's parent folder, and any folders above it, before a write that
 // might land somewhere the vault has never had a file before. mkdir is assumed to create
@@ -53,8 +59,11 @@ export function createObsidianStateStore(adapter: DataAdapter, statePath: string
         return empty;
       }
       try {
-        const raw = await adapter.read(statePath);
-        return JSON.parse(raw) as VaultSnapshot;
+        const parsed: unknown = JSON.parse(await adapter.read(statePath));
+        if (isVaultSnapshot(parsed)) {
+          return parsed;
+        }
+        return empty;
       } catch {
         return empty;
       }

@@ -3,6 +3,7 @@ import {
   byPath,
   type Change,
   diffSnapshots,
+  isVaultSnapshot,
   takeSnapshot,
   type VaultReader,
   type VaultSnapshot,
@@ -249,12 +250,16 @@ export async function readRemoteManifest(
   const fetched = await storage.getObject(MANIFEST_KEY);
 
   if (fetched.ok && fetched.body !== null) {
+    let parsed: unknown;
     try {
-      const snapshot = JSON.parse(new TextDecoder().decode(fetched.body)) as VaultSnapshot;
-      return { ok: true, snapshot, firstSync: false };
+      parsed = JSON.parse(new TextDecoder().decode(fetched.body));
     } catch {
       return { ok: false, message: "remote manifest is corrupt" };
     }
+    if (!isVaultSnapshot(parsed)) {
+      return { ok: false, message: "remote manifest is corrupt" };
+    }
+    return { ok: true, snapshot: parsed, firstSync: false };
   }
 
   // TODO(#41): GetResult conflates 404 with every other failure; swap this for a real status
