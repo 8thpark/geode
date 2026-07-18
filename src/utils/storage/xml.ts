@@ -80,8 +80,12 @@ export function parseListObjectsXml(xml: string): ListPage {
   // if a provider echoes a stale token on the final page.
   const truncated = fieldFrom(xml, "IsTruncated") === "true";
   const token = decodeXmlText(fieldFrom(xml, "NextContinuationToken"));
+  let nextContinuationToken: string | undefined;
+  if (truncated && token !== "") {
+    nextContinuationToken = token;
+  }
   return {
     objects,
-    nextContinuationToken: truncated && token !== "" ? token : undefined,
+    nextContinuationToken,
   };
 }

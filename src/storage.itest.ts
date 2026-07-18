@@ -114,6 +114,16 @@ test("listObjects pages past the 1,000 key response cap", async () => {
   assert.equal(result.ok, true);
   assert.equal(result.status, "ok");
   assert.equal(result.objects.length, total);
+
+  // Leave the bucket as we found it. Same bounded fan-out as the setup so cleanup does not open
+  // 1,001 concurrent sockets.
+  for (let start = 0; start < total; start += limit) {
+    const batch: Promise<unknown>[] = [];
+    for (let i = start; i < Math.min(start + limit, total); i++) {
+      batch.push(client.deleteObject(`${prefix}${String(i).padStart(4, "0")}.md`));
+    }
+    await Promise.all(batch);
+  }
 });
 
 test("putObject/getObject round-trips a key containing a space and ampersand", async () => {
