@@ -146,16 +146,29 @@ export function planSync(
   return actions;
 }
 
-// readFailureMessage turns whatever reader.readFile threw into a SyncFailure message. readFile
-// throws when a file vanishes between the snapshot and now (a user deleting it mid sync); routing
-// that through failures keeps executeSyncPlan's "errors are values" contract, so one disappeared
-// file is a per file failure like any storage error, not an exception that abandons the rest of
-// the pass.
-function readFailureMessage(err: unknown): string {
+// localFailureMessage turns whatever a local vault operation threw into a SyncFailure message.
+// readFile throws when a file vanishes between the snapshot and now (a user deleting it mid sync),
+// and writeFile/deleteFile/renameFile can throw on a disk full or permission error; routing all of
+// them through failures keeps executeSyncPlan's "errors are values" contract, so one bad local
+// operation is a per file failure like any storage error, not an exception that abandons the rest
+// of the pass.
+function localFailureMessage(err: unknown): string {
   if (err instanceof Error) {
     return err.message;
   }
-  return "could not read local file";
+  return "local file operation failed";
+}
+
+// applyLocalWrite runs one localWriter mutation, converting a thrown I/O error into a SyncFailure
+// so it lands in the same failures array every storage operation already uses. Returns null when
+// the write succeeded.
+async function applyLocalWrite(path: string, op: () => Promise<void>): Promise<SyncFailure | null> {
+  try {
+    await op();
+    return null;
+  } catch (err) {
+    return { path, message: localFailureMessage(err) };
+  }
 }
 
 // executeSyncPlan carries out every action against reader/localWriter (the local vault) and
@@ -176,7 +189,7 @@ export async function executeSyncPlan(
       try {
         bytes = await reader.readFile(action.path);
       } catch (err) {
-        failures.push({ path: action.path, message: readFailureMessage(err) });
+        failures.push({ path: action.path, message: localFailureMessage(err) });
         continue;
       }
       const result = await storage.putObject(action.path, bytes);
@@ -200,12 +213,21 @@ export async function executeSyncPlan(
         failures.push({ path: action.path, message: result.message });
         continue;
       }
-      await localWriter.writeFile(action.path, result.body);
+      const body = result.body;
+      const failure = await applyLocalWrite(action.path, () =>
+        localWriter.writeFile(action.path, body),
+      );
+      if (failure !== null) {
+        failures.push(failure);
+      }
       continue;
     }
 
     if (action.kind === "pullDelete") {
-      await localWriter.deleteFile(action.path);
+      const failure = await applyLocalWrite(action.path, () => localWriter.deleteFile(action.path));
+      if (failure !== null) {
+        failures.push(failure);
+      }
       continue;
     }
 
@@ -217,7 +239,13 @@ export async function executeSyncPlan(
         failures.push({ path: action.path, message: result.message });
         continue;
       }
-      await localWriter.writeFile(action.path, result.body);
+      const body = result.body;
+      const failure = await applyLocalWrite(action.path, () =>
+        localWriter.writeFile(action.path, body),
+      );
+      if (failure !== null) {
+        failures.push(failure);
+      }
       continue;
     }
 
@@ -230,10 +258,19 @@ export async function executeSyncPlan(
     try {
       localBytes = await reader.readFile(action.path);
     } catch (err) {
-      failures.push({ path: action.path, message: readFailureMessage(err) });
+      failures.push({ path: action.path, message: localFailureMessage(err) });
       continue;
     }
-    await localWriter.renameFile(action.path, copyPath);
+    // A failed rename means the local edit is still sitting at action.path untouched. Bail before
+    // the pull below would overwrite it, so a diverged edit is never silently discarded by an I/O
+    // error the way it would be if we pushed on to restore the remote version.
+    const renameFailure = await applyLocalWrite(action.path, () =>
+      localWriter.renameFile(action.path, copyPath),
+    );
+    if (renameFailure !== null) {
+      failures.push(renameFailure);
+      continue;
+    }
     const pushed = await storage.putObject(copyPath, localBytes);
     if (!pushed.ok) {
       failures.push({ path: copyPath, message: pushed.message });
@@ -250,7 +287,13 @@ export async function executeSyncPlan(
       failures.push({ path: action.path, message: result.message });
       continue;
     }
-    await localWriter.writeFile(action.path, result.body);
+    const body = result.body;
+    const writeFailure = await applyLocalWrite(action.path, () =>
+      localWriter.writeFile(action.path, body),
+    );
+    if (writeFailure !== null) {
+      failures.push(writeFailure);
+    }
   }
 
   return failures;

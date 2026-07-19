@@ -181,21 +181,26 @@ function fakeStorage(objects: Record<string, string> = {}): {
   const storage: StorageClient = {
     putObject: async (key, body): Promise<PutResult> => {
       store.set(key, new TextDecoder().decode(body));
-      return { ok: true, message: "" };
+      return { ok: true, status: "ok", message: "" };
     },
     getObject: async (key): Promise<GetResult> => {
       const content = store.get(key);
       if (content === undefined) {
-        return { ok: false, message: "Storage rejected the read (404)", body: null };
+        return {
+          ok: false,
+          status: "not_found",
+          message: "Storage rejected the read (404)",
+          body: null,
+        };
       }
-      return { ok: true, message: "", body: new TextEncoder().encode(content) };
+      return { ok: true, status: "ok", message: "", body: new TextEncoder().encode(content) };
     },
     deleteObject: async (key): Promise<DeleteResult> => {
       store.delete(key);
-      return { ok: true, message: "" };
+      return { ok: true, status: "ok", message: "" };
     },
     listObjects: async (): Promise<ListResult> => {
-      return { ok: true, message: "", objects: [] };
+      return { ok: true, status: "ok", message: "", objects: [] };
     },
   };
   return { storage, objects: store };
@@ -369,10 +374,10 @@ test("executeSyncPlan: a failed push is reported and doesn't stop the rest of th
   const { storage, objects } = fakeStorage();
   storage.putObject = async (key) => {
     if (key === "a.md") {
-      return { ok: false, message: "Storage rejected the write (500)" };
+      return { ok: false, status: "server", message: "Storage rejected the write (500)" };
     }
     objects.set(key, "world");
-    return { ok: true, message: "" };
+    return { ok: true, status: "ok", message: "" };
   };
 
   const actions: SyncAction[] = [
@@ -384,6 +389,56 @@ test("executeSyncPlan: a failed push is reported and doesn't stop the rest of th
   assert.deepEqual(failures, [{ path: "a.md", message: "Storage rejected the write (500)" }]);
   assert.equal(objects.get("b.md"), "world");
   assert.equal(files.size, 0);
+});
+
+test("executeSyncPlan: a pull whose local write throws is reported and doesn't stop the rest of the plan", async () => {
+  // writeFile can throw on a disk full or permission error. Like every storage failure, that must
+  // be recorded as a per file failure rather than escaping the loop and abandoning b.md.
+  const reader = fakeReader({});
+  const { writer, files } = fakeLocalWriter();
+  writer.writeFile = async (path) => {
+    if (path === "a.md") {
+      throw new Error("EACCES: permission denied");
+    }
+    files.set(path, "pulled");
+  };
+  const { storage } = fakeStorage({ "a.md": "remote a", "b.md": "remote b" });
+
+  const actions: SyncAction[] = [
+    { kind: "pull", path: "a.md" },
+    { kind: "pull", path: "b.md" },
+  ];
+  const failures = await executeSyncPlan(actions, reader, writer, storage, 1);
+
+  assert.deepEqual(failures, [{ path: "a.md", message: "EACCES: permission denied" }]);
+  assert.equal(files.get("b.md"), "pulled");
+});
+
+test("executeSyncPlan: a conflict whose rename throws is reported and the local edit is never overwritten", async () => {
+  // If the rename that vacates the local path throws, the local edit is still sitting there. We
+  // must report the failure and skip the pull, otherwise the remote version would clobber a
+  // diverged edit we failed to preserve.
+  const reader = fakeReader({ "a.md": "local edit" });
+  const { writer, files } = fakeLocalWriter();
+  files.set("a.md", "local edit");
+  writer.renameFile = async () => {
+    throw new Error("EACCES: permission denied");
+  };
+  const { storage, objects } = fakeStorage({ "a.md": "remote edit" });
+  const now = Date.parse("2026-07-14T10:00:00.000Z");
+
+  const failures = await executeSyncPlan(
+    [{ kind: "conflict", path: "a.md", deletedSide: "none" }],
+    reader,
+    writer,
+    storage,
+    now,
+  );
+
+  assert.deepEqual(failures, [{ path: "a.md", message: "EACCES: permission denied" }]);
+  // The local edit is untouched and the remote version never overwrote it.
+  assert.equal(files.get("a.md"), "local edit");
+  assert.equal(objects.has(conflictCopyPath("a.md", now)), false);
 });
 
 test("readRemoteManifest: a 404 is treated as an empty snapshot", async () => {
@@ -470,6 +525,7 @@ test("readRemoteManifest: a non 404 failure is reported, never guessed at as emp
   const { storage } = fakeStorage();
   storage.getObject = async () => ({
     ok: false,
+    status: "server",
     message: "Storage rejected the read (500)",
     body: null,
   });
