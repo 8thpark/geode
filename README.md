@@ -13,6 +13,7 @@
 ![GitHub Repo stars](https://img.shields.io/github/stars/8thpark/geode?style=social)
 
 - [Why?](#why)
+- [Changelog](#changelog)
 - [Contributing](#contributing)
 - [Security](#security)
 - [License](#license)
@@ -23,12 +24,20 @@
 devices (including iOS) through storage that you own, and encrypted before anything leaves your
 device.
 
-Our aim is to build the best remote sync plugin available for Obsidian users, whilst also offering a
-remote MCP server and API to your vault, so that any agent (like Claude or Codex) can read/write to
-the same vault, using it as memory.
+Our aim is to build the best remote sync plugin available for Obsidian users; Apple Notes is the
+quality bar, something that just always works and you don't even think about.
 
-**TL;DR** → Remote sync, using storage you own, encrypted, with MCP/API for your agents, so they can
-use Obsidian as memory.
+Whilst also offering a remote MCP server and API to your vault, so that any agent (e.g. Claude,
+Codex) can read/write to the same vault, using it as memory. As we believe the full power of
+Obsidian is unlocked via agents.
+
+**TL;DR** → Remote sync, using storage you own, encrypted, with MCP/API for your agents to use
+Obsidian as memory.
+
+## Changelog
+
+We are working hard to get to our first `v0.1.0` release, see
+[progress](https://github.com/8thpark/geode/milestones).
 
 ## Contributing
 
