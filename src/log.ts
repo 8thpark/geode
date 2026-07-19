@@ -125,7 +125,12 @@ export function createLogger(sink: LogSink, minLevel: LogLevel): Logger {
       return;
     }
     consoleFor(level)(`geode: ${message}`);
-    void sink.append({ time: Date.now(), level, message });
+    // Fire and forget: the Logger API is synchronous, so append can't be awaited. Report a
+    // failed persist to the console rather than leaving it as an unhandled rejection, and never
+    // back into sink, which would recurse if the sink itself is what's failing.
+    sink.append({ time: Date.now(), level, message }).catch((err) => {
+      console.error(`geode: log sink append failed: ${err}`);
+    });
   };
 
   return {

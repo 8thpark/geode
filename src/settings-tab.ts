@@ -468,7 +468,11 @@ export class GeodeSettingTab extends PluginSettingTab {
     this.connectionMessage = "";
     this.refreshActionsUI();
 
-    const secretAccessKey = this.app.secretStorage.getSecret(this.draft.secretId) ?? "";
+    const rawSecret = this.app.secretStorage.getSecret(this.draft.secretId);
+    let secretAccessKey = "";
+    if (rawSecret !== null) {
+      secretAccessKey = rawSecret;
+    }
     if (secretAccessKey === "") {
       this.plugin.logger.warn(`no secret found for ID "${this.draft.secretId}"`);
     }

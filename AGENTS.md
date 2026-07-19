@@ -62,61 +62,22 @@ Current documentation:
   active, alongside iCloud and Syncthing; free and good enough for simple setups; they cap the sync
   market, not the agent access market
 - [Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api) (2/5 risk) → 2.6k
-  stars, active, ships a built-in MCP server; strong locally but requires Obsidian running on an
-  awake machine
-- Remote MCP via tunnels and hosted connectors
-  ([obsidian-web-mcp](https://github.com/jimprosser/obsidian-web-mcp), 146 stars and young, and
-  [MCPBundles](https://www.mcpbundles.com)) (4/5 risk) → early movers on our paid layer; all still
-  need a live device or a tunnel to the vault, whereas Geode reads from storage with nothing awake
-- Desktop agents reading vault files directly (Claude Desktop, Claude Code, etc) (2/5 risk) → the
-  good enough default whenever the laptop is on; always on access is the differentiation to protect
-- Hosted PKM with native AI ([Notion](https://notion.com), [Anytype](https://anytype.io),
-  [Capacities](https://capacities.io)) (3/5 risk) → the long game threat is users leaving Obsidian
-  entirely, not picking a rival plugin
 
 ## Remember
 
-- Less is always more, simple is always better, boring is best, to avoid the magic!
-- Whilst still meeting requirements, being secure, and delivering value for our users
-
-## Development
-
-- Line length is set to 100 characters for all project files
+Less is always more, simple is always better, boring is best, avoid the magic! Whilst still meeting
+requirements, being secure, and delivering value for our users.
 
 ## Code Style
 
-Write TypeScript as if it were Go: simple, explicit, boring. When unsure, ask what the dullest Go
-programmer would do.
+It is critically important that you abide by all the rules set out in the `typescript-as-go` skill
+(`.agents/skills/typescript-as-go/SKILL.md`) when writing TypeScript, no exceptions.
 
-- The formatter is law; Biome decides and nobody debates the output
-- Pure functions first; classes only where the Obsidian API demands them (`Plugin`,
-  `PluginSettingTab`), and those classes are shells: methods delegate immediately to module level
-  functions, no logic lives on the class
-- Named exports only, except the plugin class Obsidian requires as a default export
-- String literal unions over enums; `erasableSyntaxOnly` in tsconfig enforces strippable syntax
-- `type` over `interface`: data shapes are structs, not contracts, and `type` can't be reopened by
-  declaration merging; `interface` only if implementing a framework contract demands it
-- Errors are values: domain logic returns results rather than throwing; exceptions stay at the
-  framework boundary
-- Explicit zero values: every type has a complete default (see `DEFAULT_SETTINGS`), never undefined
-  shaped holes
-- Guard clauses and early returns; flat beats nested; no `else` after a `return`
-- No ternary expressions; Go doesn't have one and neither do we, write the `if` (file local helpers
-  like `stringOr(v, fallback)` cover the defaulting cases)
-- Braces on every `if`, even a one line body; Go's formatter won't let you drop them and neither do
-  we
-- Every exported symbol gets a one sentence `//` doc comment above it, Go style ("normalizeSettings
-  returns..."); no JSDoc `/** */` blocks
-- Table driven tests with `node:test` and `node:assert/strict`; no test framework dependencies
-- Small files with one concern; no barrel files, no `utils.ts` dumping ground
-- File names are kebab-case (`settings-tab.ts`); tests sit beside the code they test as
-  `name.test.ts`, Go's `_test.go` pattern; graduate to package folders (`settings/tab.ts`) only when
-  a concern outgrows single files
-- Framework code stays thin glue; logic lives in pure modules that never import `obsidian`
-- No clever generics, no decorators, no magic
-- A small, focused dependency beats hand rolling something fiddly to get right (request signing, a
-  mock server); it loses to hand rolling the moment it drags in a framework or an SDK we don't need
+Additional rules for the project:
 
-## Links
-
-- [Obsidian Developer Documentation](https://docs.obsidian.md)
+1. Line length is set to 100 characters for all project files
+2. Classes only where the Obsidian API demands them (`Plugin`, `PluginSettingTab`), and those
+   classes are shells: methods delegate immediately to module level functions, no logic lives on the
+   class; the plugin class is the one default export Obsidian requires
+3. Framework code stays thin glue; logic lives in pure modules that never import `obsidian`
+4. `erasableSyntaxOnly` in tsconfig enforces strippable syntax
