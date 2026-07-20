@@ -6,41 +6,39 @@ export type FileState = {
   hash: string;
 };
 
-// VaultSnapshot is every file geode saw the last time it took a snapshot.
-export type VaultSnapshot = {
+// Snapshot is every file geode saw the last time it took a snapshot.
+export type Snapshot = {
   files: FileState[];
 };
 
-// isVaultSnapshot reports whether a value parsed from untrusted JSON (a remote manifest, a local
+// isSnapshot reports whether a value parsed from untrusted JSON (a remote manifest, a local
 // state.json) is shaped like a snapshot: a non-null object with a files array. Callers use this
-// instead of a blind `as VaultSnapshot` cast, so a body that parses but is the wrong shape becomes
+// instead of a blind `as Snapshot` cast, so a body that parses but is the wrong shape becomes
 // a handled corrupt/empty case rather than a TypeError when planSync later iterates files. The
 // check stops at the array itself: a malformed entry degrades rather than crashes downstream.
-export function isVaultSnapshot(value: unknown): value is VaultSnapshot {
-  return (
-    typeof value === "object" && value !== null && Array.isArray((value as VaultSnapshot).files)
-  );
+export function isSnapshot(value: unknown): value is Snapshot {
+  return typeof value === "object" && value !== null && Array.isArray((value as Snapshot).files);
 }
 
-// VaultFile is one file as seen live in the vault, before hashing.
-export type VaultFile = {
+// File is one file as seen live in the vault, before hashing.
+export type File = {
   path: string;
   size: number;
   mtime: number;
 };
 
-// VaultReader lists files present in the vault right now and reads their bytes. The real
-// implementation wraps Obsidian's Vault API (see vault-adapter.ts); tests use an in-memory fake.
-export type VaultReader = {
-  listFiles: () => Promise<VaultFile[]>;
+// Reader lists files present in the vault right now and reads their bytes. The real
+// implementation wraps Obsidian's Vault API (see obsidian.ts); tests use an in-memory fake.
+export type Reader = {
+  listFiles: () => Promise<File[]>;
   readFile: (path: string) => Promise<Uint8Array>;
 };
 
-// StateStore reads and writes the persisted snapshot. The real implementation stores it inside
-// the plugin's own data directory (see vault-adapter.ts); tests use an in-memory fake.
-export type StateStore = {
-  read: () => Promise<VaultSnapshot>;
-  write: (snapshot: VaultSnapshot) => Promise<void>;
+// Store reads and writes the persisted snapshot. The real implementation stores it inside
+// the plugin's own data directory (see obsidian.ts); tests use an in-memory fake.
+export type Store = {
+  read: () => Promise<Snapshot>;
+  write: (snapshot: Snapshot) => Promise<void>;
 };
 
 // Change describes one path whose state differs between two snapshots.
@@ -105,10 +103,10 @@ async function mapWithConcurrency<T, R>(
 // rehash when neither has moved. Concurrency is bounded by limit to avoid unbounded memory
 // pressure on large vaults.
 export async function takeSnapshot(
-  reader: VaultReader,
-  previous: VaultSnapshot,
+  reader: Reader,
+  previous: Snapshot,
   concurrency = 8,
-): Promise<VaultSnapshot> {
+): Promise<Snapshot> {
   const previousByPath = byPath(previous.files);
   const liveFiles = await reader.listFiles();
 
@@ -130,7 +128,7 @@ export async function takeSnapshot(
 }
 
 // diffSnapshots compares two snapshots and reports every path whose content differs.
-export function diffSnapshots(previous: VaultSnapshot, current: VaultSnapshot): Change[] {
+export function diffSnapshots(previous: Snapshot, current: Snapshot): Change[] {
   const previousByPath = byPath(previous.files);
   const currentByPath = byPath(current.files);
   const changes: Change[] = [];

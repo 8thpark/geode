@@ -9,7 +9,7 @@ export type LogEntry = {
 };
 
 // LogSink persists log entries and reads them back. The real implementation writes to a capped
-// file inside the plugin's own data directory (see log-adapter.ts); tests, and the fallback used
+// file inside the plugin's own data directory (see adapter.ts); tests, and the fallback used
 // when there's nowhere to persist to, use an in-memory sink (see createMemorySink below).
 export type LogSink = {
   append: (entry: LogEntry) => Promise<void>;

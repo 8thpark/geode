@@ -1,4 +1,4 @@
-import type { ObjectMeta } from "../../storage.ts";
+import type { ObjectMeta } from "./storage.ts";
 
 // ListPage is one page of a ListObjectsV2 response: the objects it carries and, when the listing
 // is truncated, the token that fetches the next page. nextContinuationToken is undefined once the

@@ -7,7 +7,8 @@ import {
   SecretComponent,
   Setting,
 } from "obsidian";
-import type GeodePlugin from "./main";
+import type GeodePlugin from "../main";
+import { testConnection } from "../storage/storage";
 import {
   draftForDisplay,
   type GeodeSettings,
@@ -15,7 +16,6 @@ import {
   providerOr,
   settingsEqual,
 } from "./settings";
-import { testConnection } from "./storage";
 
 // ConnectionStatus is the last known state of a Test Connection check. It lives only in memory;
 // it is never persisted and resets to "unknown" whenever the draft changes.

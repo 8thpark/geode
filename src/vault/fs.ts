@@ -1,5 +1,5 @@
 // Integration test helper: a node:fs backed stand-in for Obsidian's Vault and DataAdapter, so the
-// real vault-adapter.ts code (createObsidianVaultReader/LocalWriter/StateStore) can be exercised
+// real obsidian.ts code (createObsidianReader/LocalWriter/Store) can be exercised
 // against a real filesystem in a temp directory. Not shipped: nothing in the plugin bundle imports
 // it. This closes the biggest fidelity gap in sync integration tests, the local file I/O layer,
 // without needing a running Obsidian.
@@ -33,7 +33,7 @@ function walk(root: string, dir = ""): string[] {
 }
 
 // nodeVault returns a Vault and DataAdapter both backed by the same temp directory root. Only the
-// subset of methods vault-adapter.ts actually calls is implemented, then cast to the full Obsidian
+// subset of methods obsidian.ts actually calls is implemented, then cast to the full Obsidian
 // interfaces, which is all the real code touches.
 export function nodeVault(root: string): { vault: Vault; adapter: DataAdapter } {
   const adapter = {

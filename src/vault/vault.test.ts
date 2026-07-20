@@ -2,23 +2,23 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   diffSnapshots,
-  isVaultSnapshot,
+  type File,
+  isSnapshot,
+  type Reader,
+  type Snapshot,
   takeSnapshot,
-  type VaultFile,
-  type VaultReader,
-  type VaultSnapshot,
-} from "./vault-state.ts";
+} from "./vault.ts";
 
-// fakeReader returns a VaultReader backed by an in-memory map, and a counter of how many times
+// fakeReader returns a Reader backed by an in-memory map, and a counter of how many times
 // readFile was called — used to prove the stat gate skips rereading unchanged files.
 function fakeReader(files: Record<string, { content: string; mtime: number }>): {
-  reader: VaultReader;
+  reader: Reader;
   readCount: () => number;
 } {
   let reads = 0;
-  const reader: VaultReader = {
+  const reader: Reader = {
     listFiles: async () => {
-      const list: VaultFile[] = [];
+      const list: File[] = [];
       for (const [path, file] of Object.entries(files)) {
         list.push({ path, size: file.content.length, mtime: file.mtime });
       }
@@ -36,7 +36,7 @@ function fakeReader(files: Record<string, { content: string; mtime: number }>): 
   return { reader, readCount: () => reads };
 }
 
-const empty: VaultSnapshot = { files: [] };
+const empty: Snapshot = { files: [] };
 
 test("takeSnapshot: a new file is hashed and reported as added", async () => {
   const { reader } = fakeReader({ "note.md": { content: "hello", mtime: 1 } });
@@ -89,7 +89,7 @@ test("diffSnapshots: a file missing from the current listing is reported as dele
   assert.deepEqual(changes, [{ path: "note.md", kind: "deleted" }]);
 });
 
-test("isVaultSnapshot: only a non-null object with a files array is accepted", () => {
+test("isSnapshot: only a non-null object with a files array is accepted", () => {
   const cases: { name: string; value: unknown; want: boolean }[] = [
     { name: "a proper empty snapshot", value: { files: [] }, want: true },
     { name: "a populated snapshot", value: { files: [{ path: "a.md" }] }, want: true },
@@ -102,7 +102,7 @@ test("isVaultSnapshot: only a non-null object with a files array is accepted", (
   ];
 
   for (const { name, value, want } of cases) {
-    assert.equal(isVaultSnapshot(value), want, name);
+    assert.equal(isSnapshot(value), want, name);
   }
 });
 
@@ -115,9 +115,9 @@ test("takeSnapshot: concurrency is bounded by the limit", async () => {
 
   let inflight = 0;
   let peakInflight = 0;
-  const reader: VaultReader = {
+  const reader: Reader = {
     listFiles: async () => {
-      const list: VaultFile[] = [];
+      const list: File[] = [];
       for (const [path, file] of Object.entries(files)) {
         list.push({ path, size: file.content.length, mtime: file.mtime });
       }

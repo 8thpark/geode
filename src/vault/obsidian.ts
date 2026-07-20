@@ -1,12 +1,6 @@
 import type { DataAdapter, Vault } from "obsidian";
-import type { LocalWriter } from "./sync.ts";
-import {
-  isVaultSnapshot,
-  type StateStore,
-  type VaultFile,
-  type VaultReader,
-  type VaultSnapshot,
-} from "./vault-state.ts";
+import type { LocalWriter } from "../sync.ts";
+import { type File, isSnapshot, type Reader, type Snapshot, type Store } from "./vault.ts";
 
 // ensureParentDir creates path's parent folder, and any folders above it, before a write that
 // might land somewhere the vault has never had a file before. mkdir is assumed to create
@@ -23,13 +17,13 @@ async function ensureParentDir(adapter: DataAdapter, path: string): Promise<void
   }
 }
 
-// createObsidianVaultReader returns a VaultReader backed by the real vault's file tree. Obsidian
+// createObsidianReader returns a Reader backed by the real vault's file tree. Obsidian
 // already excludes .obsidian/** from Vault.getFiles(), so the plugin's own state file (which
 // lives inside .obsidian/plugins/geode/) never shows up as a vault file to snapshot.
-export function createObsidianVaultReader(vault: Vault): VaultReader {
+export function createObsidianReader(vault: Vault): Reader {
   return {
     listFiles: async () => {
-      const files: VaultFile[] = [];
+      const files: File[] = [];
       for (const file of vault.getFiles()) {
         files.push({ path: file.path, size: file.stat.size, mtime: file.stat.mtime });
       }
@@ -46,11 +40,11 @@ export function createObsidianVaultReader(vault: Vault): VaultReader {
   };
 }
 
-// createObsidianStateStore returns a StateStore that persists the snapshot at statePath via the
+// createObsidianStore returns a Store that persists the snapshot at statePath via the
 // vault adapter. A missing or unparseable file is treated as "no snapshot yet" rather than an
 // error, since the safest fallback for corrupt state is to start fresh, not to crash sync.
-export function createObsidianStateStore(adapter: DataAdapter, statePath: string): StateStore {
-  const empty: VaultSnapshot = { files: [] };
+export function createObsidianStore(adapter: DataAdapter, statePath: string): Store {
+  const empty: Snapshot = { files: [] };
 
   return {
     read: async () => {
@@ -60,7 +54,7 @@ export function createObsidianStateStore(adapter: DataAdapter, statePath: string
       }
       try {
         const parsed: unknown = JSON.parse(await adapter.read(statePath));
-        if (isVaultSnapshot(parsed)) {
+        if (isSnapshot(parsed)) {
           return parsed;
         }
         return empty;

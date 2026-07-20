@@ -1,23 +1,23 @@
 import type { App } from "obsidian";
 import { Plugin, setIcon, setTooltip } from "obsidian";
-import { createLogger, type Logger, type LogSink } from "./log";
-import { createLogSink } from "./log-adapter";
-import { GeodeLogView, LOG_VIEW_TYPE } from "./log-view";
+import { createLogSink } from "./log/adapter";
+import { createLogger, type Logger, type LogSink } from "./log/log";
+import { GeodeLogView, LOG_VIEW_TYPE } from "./log/view";
 import {
   DEFAULT_SETTINGS,
   type GeodeSettings,
   hasConnectionConfig,
   normalizeSettings,
-} from "./settings";
-import { GeodeSettingTab } from "./settings-tab";
-import { createS3Client } from "./storage";
+} from "./settings/settings";
+import { GeodeSettingTab } from "./settings/tab";
+import { createS3Client } from "./storage/storage";
 import { syncOnce } from "./sync";
 import {
   createObsidianLocalWriter,
-  createObsidianStateStore,
-  createObsidianVaultReader,
-} from "./vault-adapter";
-import { diffSnapshots, takeSnapshot } from "./vault-state";
+  createObsidianReader,
+  createObsidianStore,
+} from "./vault/obsidian";
+import { diffSnapshots, takeSnapshot } from "./vault/vault";
 
 // VAULT_STATE_DEBOUNCE_MS delays a vault state refresh after the last file event, so a burst of
 // edits (autosave, bulk rename, etc.) collapses into one snapshot instead of one per file.
@@ -199,8 +199,8 @@ export default class GeodePlugin extends Plugin {
   private async runSync(dir: string): Promise<void> {
     const secretAccessKey = this.app.secretStorage.getSecret(this.settings.secretId) ?? "";
     const storage = createS3Client(this.settings, secretAccessKey);
-    const stateStore = createObsidianStateStore(this.app.vault.adapter, `${dir}/state.json`);
-    const reader = createObsidianVaultReader(this.app.vault);
+    const stateStore = createObsidianStore(this.app.vault.adapter, `${dir}/state.json`);
+    const reader = createObsidianReader(this.app.vault);
     const localWriter = createObsidianLocalWriter(this.app.vault.adapter);
 
     const previous = await stateStore.read();
@@ -251,8 +251,8 @@ export default class GeodePlugin extends Plugin {
       return;
     }
 
-    const store = createObsidianStateStore(this.app.vault.adapter, `${dir}/state.json`);
-    const reader = createObsidianVaultReader(this.app.vault);
+    const store = createObsidianStore(this.app.vault.adapter, `${dir}/state.json`);
+    const reader = createObsidianReader(this.app.vault);
 
     // Both callers fire this and forget (void), so a rejection here would surface as an
     // unhandled promise rejection. takeSnapshot can throw when a file vanishes mid-snapshot

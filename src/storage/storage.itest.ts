@@ -4,7 +4,7 @@
 // first; not part of `npm test`, run separately via `npm run test:integration`.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { DEFAULT_SETTINGS, type GeodeSettings } from "./settings.ts";
+import { DEFAULT_SETTINGS, type GeodeSettings } from "../settings/settings.ts";
 import { createS3Client, testConnection } from "./storage.ts";
 
 const SECRET_ACCESS_KEY = "geodedev";

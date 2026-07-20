@@ -1,4 +1,4 @@
-import type { ResultStatus } from "../../storage.ts";
+import type { ResultStatus } from "./storage.ts";
 
 // messageFor converts a caught error into a plain message string.
 export function messageFor(err: unknown): string {

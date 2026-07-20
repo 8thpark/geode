@@ -1,4 +1,4 @@
-// Integration tests: drive the real sync orchestration (syncOnce) and the real vault-adapter file
+// Integration tests: drive the real sync orchestration (syncOnce) and the real vault/obsidian.ts file
 // I/O against a real S3 compatible server (MinIO, via `docker compose`) plus real temp directories
 // on disk. Each "device" is a temp vault wired through the real adapter code over a node:fs backed
 // Vault, so these exercise multi device convergence and conflict resolution end to end, not with
@@ -8,9 +8,8 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { nodeVault } from "./fs-vault.ts";
-import { DEFAULT_SETTINGS, type GeodeSettings } from "./settings.ts";
-import { createS3Client } from "./storage.ts";
+import { DEFAULT_SETTINGS, type GeodeSettings } from "./settings/settings.ts";
+import { createS3Client } from "./storage/storage.ts";
 import {
   conflictCopyPath,
   type LocalWriter,
@@ -18,12 +17,13 @@ import {
   type SyncOutcome,
   syncOnce,
 } from "./sync.ts";
+import { nodeVault } from "./vault/fs.ts";
 import {
   createObsidianLocalWriter,
-  createObsidianStateStore,
-  createObsidianVaultReader,
-} from "./vault-adapter.ts";
-import { type StateStore, takeSnapshot, type VaultReader } from "./vault-state.ts";
+  createObsidianReader,
+  createObsidianStore,
+} from "./vault/obsidian.ts";
+import { type Reader, type Store, takeSnapshot } from "./vault/vault.ts";
 
 const SECRET = "geodedev";
 
@@ -42,22 +42,22 @@ const STATE_PATH = ".obsidian/plugins/geode/state.json";
 
 type Device = {
   root: string;
-  reader: VaultReader;
+  reader: Reader;
   writer: LocalWriter;
-  stateStore: StateStore;
+  stateStore: Store;
 };
 
 // newDevice creates a fresh temp vault with the plugin data folder pre-created (as Obsidian would
-// have), wired to the real vault-adapter code over a node:fs backed vault.
+// have), wired to the real vault/obsidian.ts code over a node:fs backed vault.
 function newDevice(): Device {
   const root = mkdtempSync(join(tmpdir(), "geode-device-"));
   mkdirSync(join(root, ".obsidian", "plugins", "geode"), { recursive: true });
   const { vault, adapter } = nodeVault(root);
   return {
     root,
-    reader: createObsidianVaultReader(vault),
+    reader: createObsidianReader(vault),
     writer: createObsidianLocalWriter(adapter),
-    stateStore: createObsidianStateStore(adapter, STATE_PATH),
+    stateStore: createObsidianStore(adapter, STATE_PATH),
   };
 }
 

@@ -1,13 +1,13 @@
-import type { StorageClient } from "./storage.ts";
+import type { StorageClient } from "./storage/storage.ts";
 import {
   byPath,
   type Change,
   diffSnapshots,
-  isVaultSnapshot,
+  isSnapshot,
+  type Reader,
+  type Snapshot,
   takeSnapshot,
-  type VaultReader,
-  type VaultSnapshot,
-} from "./vault-state.ts";
+} from "./vault/vault.ts";
 
 // MANIFEST_KEY is the well known remote object holding the last synced snapshot, geode's source
 // of truth for "what does the other side think exists". Reserved: never treated as a real vault
@@ -15,7 +15,7 @@ import {
 export const MANIFEST_KEY = ".geode/manifest.json";
 
 // LocalWriter applies changes decided by a sync to the local vault. The real implementation
-// writes through the vault adapter (see vault-adapter.ts); tests use an in-memory fake.
+// writes through the vault adapter (see vault/obsidian.ts); tests use an in-memory fake.
 export type LocalWriter = {
   writeFile: (path: string, data: Uint8Array) => Promise<void>;
   deleteFile: (path: string) => Promise<void>;
@@ -43,7 +43,7 @@ export type SyncFailure = {
 // persist as the next sync's starting point and how many actions were applied; on failure it
 // carries a short user facing message and any per file failures for logging.
 export type SyncOutcome =
-  | { ok: true; snapshot: VaultSnapshot; changeCount: number }
+  | { ok: true; snapshot: Snapshot; changeCount: number }
   | { ok: false; message: string; failures: SyncFailure[] };
 
 // conflictCopyPath returns the name a locally diverged file is renamed to before the remote
@@ -80,11 +80,7 @@ function isReservedPath(path: string): boolean {
 // conflict: a path that changed on both sides to different content. previous is the snapshot
 // from the end of the last successful sync, the common ancestor both comparisons are made
 // against.
-export function planSync(
-  previous: VaultSnapshot,
-  local: VaultSnapshot,
-  remote: VaultSnapshot,
-): SyncAction[] {
+export function planSync(previous: Snapshot, local: Snapshot, remote: Snapshot): SyncAction[] {
   const localChanges = diffSnapshots(previous, local);
   const remoteChanges = diffSnapshots(previous, remote);
   const remoteByPath = changesByPath(remoteChanges);
@@ -176,7 +172,7 @@ async function applyLocalWrite(path: string, op: () => Promise<void>): Promise<S
 // rather than read internally so a conflict's copy name is deterministic under test.
 export async function executeSyncPlan(
   actions: SyncAction[],
-  reader: VaultReader,
+  reader: Reader,
   localWriter: LocalWriter,
   storage: StorageClient,
   now: number,
@@ -311,9 +307,7 @@ export async function executeSyncPlan(
 // remote that a prior sync really produced, where a local file absent from it was deleted).
 export async function readRemoteManifest(
   storage: StorageClient,
-): Promise<
-  { ok: true; snapshot: VaultSnapshot; firstSync: boolean } | { ok: false; message: string }
-> {
+): Promise<{ ok: true; snapshot: Snapshot; firstSync: boolean } | { ok: false; message: string }> {
   const fetched = await storage.getObject(MANIFEST_KEY);
 
   if (fetched.ok && fetched.body !== null) {
@@ -323,7 +317,7 @@ export async function readRemoteManifest(
     } catch {
       return { ok: false, message: "remote manifest is corrupt" };
     }
-    if (!isVaultSnapshot(parsed)) {
+    if (!isSnapshot(parsed)) {
       return { ok: false, message: "remote manifest is corrupt" };
     }
     return { ok: true, snapshot: parsed, firstSync: false };
@@ -345,8 +339,8 @@ export async function readRemoteManifest(
 // plugin through state.json, tests through their own store) and this stays pure over its inputs.
 // now is injected so a conflict copy's name is deterministic under test.
 export async function syncOnce(
-  previous: VaultSnapshot,
-  reader: VaultReader,
+  previous: Snapshot,
+  reader: Reader,
   localWriter: LocalWriter,
   storage: StorageClient,
   now: number,

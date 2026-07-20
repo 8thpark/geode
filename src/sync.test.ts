@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { DeleteResult, GetResult, ListResult, PutResult, StorageClient } from "./storage.ts";
+import type {
+  DeleteResult,
+  GetResult,
+  ListResult,
+  PutResult,
+  StorageClient,
+} from "./storage/storage.ts";
 import {
   conflictCopyPath,
   executeSyncPlan,
@@ -11,15 +17,15 @@ import {
   type SyncAction,
   syncOnce,
 } from "./sync.ts";
-import type { FileState, VaultReader, VaultSnapshot } from "./vault-state.ts";
+import type { FileState, Reader, Snapshot } from "./vault/vault.ts";
 
-const empty: VaultSnapshot = { files: [] };
+const empty: Snapshot = { files: [] };
 
 function file(path: string, hash: string): FileState {
   return { path, size: hash.length, mtime: 1, hash };
 }
 
-function snapshot(...files: FileState[]): VaultSnapshot {
+function snapshot(...files: FileState[]): Snapshot {
   return { files };
 }
 
@@ -144,8 +150,8 @@ test("conflictCopyPath: a dotfile at the vault root isn't mistaken for an extens
   );
 });
 
-// fakeReader returns a VaultReader backed by an in-memory map of path to content.
-function fakeReader(files: Record<string, string>): VaultReader {
+// fakeReader returns a Reader backed by an in-memory map of path to content.
+function fakeReader(files: Record<string, string>): Reader {
   return {
     listFiles: async () => {
       const list = [];
@@ -464,7 +470,7 @@ test("readRemoteManifest: a 404 is treated as an empty snapshot", async () => {
 });
 
 test("readRemoteManifest: valid JSON is parsed into a snapshot", async () => {
-  const want: VaultSnapshot = snapshot(file("a.md", "h1"));
+  const want: Snapshot = snapshot(file("a.md", "h1"));
   const { storage } = fakeStorage({ [MANIFEST_KEY]: JSON.stringify(want) });
 
   const result = await readRemoteManifest(storage);
