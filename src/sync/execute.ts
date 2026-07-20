@@ -16,31 +16,6 @@ export type SyncFailure = {
   message: string;
 };
 
-// localFailureMessage turns whatever a local vault operation threw into a SyncFailure message.
-// readFile throws when a file vanishes between the snapshot and now (a user deleting it mid sync),
-// and writeFile/deleteFile/renameFile can throw on a disk full or permission error; routing all of
-// them through failures keeps executeSyncPlan's "errors are values" contract, so one bad local
-// operation is a per file failure like any storage error, not an exception that abandons the rest
-// of the pass.
-function localFailureMessage(err: unknown): string {
-  if (err instanceof Error) {
-    return err.message;
-  }
-  return "local file operation failed";
-}
-
-// applyLocalWrite runs one localWriter mutation, converting a thrown I/O error into a SyncFailure
-// so it lands in the same failures array every storage operation already uses. Returns null when
-// the write succeeded.
-async function applyLocalWrite(path: string, op: () => Promise<void>): Promise<SyncFailure | null> {
-  try {
-    await op();
-    return null;
-  } catch (err) {
-    return { path, message: localFailureMessage(err) };
-  }
-}
-
 // executeSyncPlan carries out every action against reader/localWriter (the local vault) and
 // storage (the remote bucket), and reports whatever couldn't be completed. now is passed in
 // rather than read internally so a conflict's copy name is deterministic under test.
@@ -167,4 +142,29 @@ export async function executeSyncPlan(
   }
 
   return failures;
+}
+
+// applyLocalWrite runs one localWriter mutation, converting a thrown I/O error into a SyncFailure
+// so it lands in the same failures array every storage operation already uses. Returns null when
+// the write succeeded.
+async function applyLocalWrite(path: string, op: () => Promise<void>): Promise<SyncFailure | null> {
+  try {
+    await op();
+    return null;
+  } catch (err) {
+    return { path, message: localFailureMessage(err) };
+  }
+}
+
+// localFailureMessage turns whatever a local vault operation threw into a SyncFailure message.
+// readFile throws when a file vanishes between the snapshot and now (a user deleting it mid sync),
+// and writeFile/deleteFile/renameFile can throw on a disk full or permission error; routing all of
+// them through failures keeps executeSyncPlan's "errors are values" contract, so one bad local
+// operation is a per file failure like any storage error, not an exception that abandons the rest
+// of the pass.
+function localFailureMessage(err: unknown): string {
+  if (err instanceof Error) {
+    return err.message;
+  }
+  return "local file operation failed";
 }

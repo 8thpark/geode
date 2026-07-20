@@ -29,22 +29,6 @@ export function conflictCopyPath(path: string, now: number): string {
   return `${path.slice(0, lastDot)} (conflicted copy ${stamp})${path.slice(lastDot)}`;
 }
 
-// changesByPath builds a lookup from path to change, for matching a local change against a
-// remote change at that same path.
-function changesByPath(changes: Change[]): Map<string, Change> {
-  const result = new Map<string, Change>();
-  for (const change of changes) {
-    result.set(change.path, change);
-  }
-  return result;
-}
-
-// isReservedPath reports whether path is geode's own bookkeeping, never a real vault file to
-// sync, even if something in the vault happens to collide with it.
-function isReservedPath(path: string): boolean {
-  return path === MANIFEST_KEY;
-}
-
 // planSync compares what changed locally since the last successful sync against what changed
 // remotely since that same sync, and decides what to push, what to pull, and what's a genuine
 // conflict: a path that changed on both sides to different content. previous is the snapshot
@@ -110,4 +94,20 @@ export function planSync(previous: Snapshot, local: Snapshot, remote: Snapshot):
   }
 
   return actions;
+}
+
+// changesByPath builds a lookup from path to change, for matching a local change against a
+// remote change at that same path.
+function changesByPath(changes: Change[]): Map<string, Change> {
+  const result = new Map<string, Change>();
+  for (const change of changes) {
+    result.set(change.path, change);
+  }
+  return result;
+}
+
+// isReservedPath reports whether path is geode's own bookkeeping, never a real vault file to
+// sync, even if something in the vault happens to collide with it.
+function isReservedPath(path: string): boolean {
+  return path === MANIFEST_KEY;
 }

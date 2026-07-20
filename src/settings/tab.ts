@@ -17,9 +17,138 @@ import {
   settingsEqual,
 } from "./settings";
 
+// DEBUG_LABEL_WIDTH is the column width debug info labels are padded to, so values line up.
+const DEBUG_LABEL_WIDTH = 12;
+
 // ConnectionStatus is the last known state of a Test Connection check. It lives only in memory;
 // it is never persisted and resets to "unknown" whenever the draft changes.
 type ConnectionStatus = "unknown" | "checking" | "ok" | "error";
+
+// renderSettingsTab draws every section into containerEl from the tab's current draft state.
+export function renderSettingsTab(tab: GeodeSettingTab, containerEl: HTMLElement): void {
+  renderHeader(containerEl);
+  renderStorageSection(tab, containerEl);
+  renderSupportSection(tab, containerEl);
+}
+
+// connectionMessageFor returns the connection half of the status line for the given state.
+function connectionMessageFor(tab: GeodeSettingTab): string {
+  if (tab.connectionStatus === "checking") {
+    return "Checking connection...";
+  }
+  if (tab.connectionStatus === "ok") {
+    return "Connected";
+  }
+  if (tab.connectionStatus === "error") {
+    return tab.connectionMessage;
+  }
+  return "Not tested yet";
+}
+
+// connectionSummary returns a one line description of the last connection test, for debug info.
+// Blank when nothing has been tested yet, there's nothing worth reporting.
+function connectionSummary(tab: GeodeSettingTab): string {
+  if (tab.connectionStatus === "error") {
+    return `error - ${tab.connectionMessage}`;
+  }
+  if (tab.connectionStatus === "unknown") {
+    return "";
+  }
+  return tab.connectionStatus;
+}
+
+// debugInfoText builds the plain text block a user pastes into a support email or issue.
+function debugInfoText(tab: GeodeSettingTab): string {
+  return [
+    debugLine("Geode:", `v${tab.plugin.manifest.version}`),
+    debugLine("Obsidian:", `v${apiVersion}`),
+    debugLine("Platform:", platformLabel()),
+    debugLine("Provider:", tab.plugin.settings.provider),
+    debugLine("Connection:", connectionSummary(tab)),
+  ].join("\n");
+}
+
+// debugLine formats one "label: value" row of debug info, padded so values align in a column.
+function debugLine(label: string, value: string): string {
+  return `${label.padEnd(DEBUG_LABEL_WIDTH)}${value}`;
+}
+
+// flashButtonText sets a button's text to feedback, then reverts it to original after a delay.
+function flashButtonText(button: ButtonComponent, original: string, feedback: string): void {
+  button.setButtonText(feedback);
+  window.setTimeout(() => button.setButtonText(original), 1500);
+}
+
+// onFieldChanged clears any stale connection status and updates the actions row without
+// redrawing the whole tab, so text inputs never lose focus mid keystroke. Whether the draft
+// counts as dirty is derived by comparing it to saved settings, not tracked here.
+function onFieldChanged(tab: GeodeSettingTab): void {
+  tab.connectionStatus = "unknown";
+  tab.connectionMessage = "";
+  tab.refreshActionsUI();
+}
+
+// platformLabel returns a short human readable name for the OS Obsidian is running on.
+function platformLabel(): string {
+  if (Platform.isMacOS) {
+    return "macOS";
+  }
+  if (Platform.isWin) {
+    return "Windows";
+  }
+  if (Platform.isLinux) {
+    return "Linux";
+  }
+  if (Platform.isIosApp) {
+    return "iOS";
+  }
+  if (Platform.isAndroidApp) {
+    return "Android";
+  }
+  return "Unknown";
+}
+
+// renderActions draws the status dot, status line, Test Connection button, and Save button, and
+// stashes references on tab so later field edits can update them in place. The connection
+// message and the dirty reminder are separate spans on one line so each keeps its own colour.
+function renderActions(tab: GeodeSettingTab, containerEl: HTMLElement): void {
+  const setting = new Setting(containerEl).setName("Connection");
+
+  tab.statusDotEl = setting.nameEl.createSpan({ cls: "geode-status-dot" });
+  setting.nameEl.prepend(tab.statusDotEl);
+
+  const statusLine = setting.descEl.createSpan({ cls: "geode-status-line" });
+  tab.connectionMessageEl = statusLine.createSpan({ cls: "geode-connection-message" });
+  tab.statusSeparatorEl = statusLine.createSpan({
+    cls: "geode-status-separator",
+    text: " · ",
+  });
+  tab.dirtyTextEl = statusLine.createSpan({
+    cls: "geode-dirty-text",
+    text: "Unsaved changes",
+  });
+
+  setting.addButton((button) =>
+    button.setButtonText("Test").onClick(async () => {
+      await tab.checkConnection();
+    }),
+  );
+
+  setting.addButton((button) => {
+    tab.saveButtonEl = button;
+    // Obsidian's own disabled-button styling forces cursor: not-allowed with its own
+    // !important rule; an inline style is the only thing guaranteed to win over that.
+    button.buttonEl.style.setProperty("cursor", "pointer", "important");
+    button
+      .setButtonText("Save")
+      .setCta()
+      .onClick(async () => {
+        await tab.save();
+      });
+  });
+
+  tab.refreshActionsUI();
+}
 
 // renderHeader draws the plugin title, subtitle, and external link buttons. The title is a plain
 // div rather than an h1: Obsidian's settings pane suppresses nested h1 elements.
@@ -49,15 +178,6 @@ function renderHeader(containerEl: HTMLElement): void {
     .onClick(() => {
       window.open("https://docs.geodemd.com", "_blank");
     });
-}
-
-// onFieldChanged clears any stale connection status and updates the actions row without
-// redrawing the whole tab, so text inputs never lose focus mid keystroke. Whether the draft
-// counts as dirty is derived by comparing it to saved settings, not tracked here.
-function onFieldChanged(tab: GeodeSettingTab): void {
-  tab.connectionStatus = "unknown";
-  tab.connectionMessage = "";
-  tab.refreshActionsUI();
 }
 
 // renderProviderFields draws the fields specific to the selected provider.
@@ -131,62 +251,6 @@ function renderSecretRow(tab: GeodeSettingTab, containerEl: HTMLElement): void {
     });
 }
 
-// connectionMessageFor returns the connection half of the status line for the given state.
-function connectionMessageFor(tab: GeodeSettingTab): string {
-  if (tab.connectionStatus === "checking") {
-    return "Checking connection...";
-  }
-  if (tab.connectionStatus === "ok") {
-    return "Connected";
-  }
-  if (tab.connectionStatus === "error") {
-    return tab.connectionMessage;
-  }
-  return "Not tested yet";
-}
-
-// renderActions draws the status dot, status line, Test Connection button, and Save button, and
-// stashes references on tab so later field edits can update them in place. The connection
-// message and the dirty reminder are separate spans on one line so each keeps its own colour.
-function renderActions(tab: GeodeSettingTab, containerEl: HTMLElement): void {
-  const setting = new Setting(containerEl).setName("Connection");
-
-  tab.statusDotEl = setting.nameEl.createSpan({ cls: "geode-status-dot" });
-  setting.nameEl.prepend(tab.statusDotEl);
-
-  const statusLine = setting.descEl.createSpan({ cls: "geode-status-line" });
-  tab.connectionMessageEl = statusLine.createSpan({ cls: "geode-connection-message" });
-  tab.statusSeparatorEl = statusLine.createSpan({
-    cls: "geode-status-separator",
-    text: " · ",
-  });
-  tab.dirtyTextEl = statusLine.createSpan({
-    cls: "geode-dirty-text",
-    text: "Unsaved changes",
-  });
-
-  setting.addButton((button) =>
-    button.setButtonText("Test").onClick(async () => {
-      await tab.checkConnection();
-    }),
-  );
-
-  setting.addButton((button) => {
-    tab.saveButtonEl = button;
-    // Obsidian's own disabled-button styling forces cursor: not-allowed with its own
-    // !important rule; an inline style is the only thing guaranteed to win over that.
-    button.buttonEl.style.setProperty("cursor", "pointer", "important");
-    button
-      .setButtonText("Save")
-      .setCta()
-      .onClick(async () => {
-        await tab.save();
-      });
-  });
-
-  tab.refreshActionsUI();
-}
-
 // renderStorageSection draws the card of storage related settings.
 function renderStorageSection(tab: GeodeSettingTab, containerEl: HTMLElement): void {
   const card = containerEl.createDiv({ cls: "geode-card" });
@@ -236,63 +300,6 @@ function renderStorageSection(tab: GeodeSettingTab, containerEl: HTMLElement): v
 
   renderSecretRow(tab, card);
   renderActions(tab, card);
-}
-
-// platformLabel returns a short human readable name for the OS Obsidian is running on.
-function platformLabel(): string {
-  if (Platform.isMacOS) {
-    return "macOS";
-  }
-  if (Platform.isWin) {
-    return "Windows";
-  }
-  if (Platform.isLinux) {
-    return "Linux";
-  }
-  if (Platform.isIosApp) {
-    return "iOS";
-  }
-  if (Platform.isAndroidApp) {
-    return "Android";
-  }
-  return "Unknown";
-}
-
-// connectionSummary returns a one line description of the last connection test, for debug info.
-// Blank when nothing has been tested yet, there's nothing worth reporting.
-function connectionSummary(tab: GeodeSettingTab): string {
-  if (tab.connectionStatus === "error") {
-    return `error - ${tab.connectionMessage}`;
-  }
-  if (tab.connectionStatus === "unknown") {
-    return "";
-  }
-  return tab.connectionStatus;
-}
-
-// DEBUG_LABEL_WIDTH is the column width debug info labels are padded to, so values line up.
-const DEBUG_LABEL_WIDTH = 12;
-
-// debugLine formats one "label: value" row of debug info, padded so values align in a column.
-function debugLine(label: string, value: string): string {
-  return `${label.padEnd(DEBUG_LABEL_WIDTH)}${value}`;
-}
-
-// debugInfoText builds the plain text block a user pastes into a support email or issue.
-function debugInfoText(tab: GeodeSettingTab): string {
-  return [
-    debugLine("Geode:", `v${tab.plugin.manifest.version}`),
-    debugLine("Obsidian:", `v${apiVersion}`),
-    debugLine("Platform:", platformLabel()),
-    debugLine("Provider:", tab.plugin.settings.provider),
-    debugLine("Connection:", connectionSummary(tab)),
-  ].join("\n");
-}
-
-// flashButtonText sets a button's text to feedback, then reverts it to original after a delay.
-function flashButtonText(button: ButtonComponent, original: string, feedback: string): void {
-  button.setButtonText(feedback);
-  window.setTimeout(() => button.setButtonText(original), 1500);
 }
 
 // renderSupportSection draws the Support heading and its card of docs, email, and debug info.
@@ -351,13 +358,6 @@ function renderSupportSection(tab: GeodeSettingTab, containerEl: HTMLElement): v
       }
     });
   });
-}
-
-// renderSettingsTab draws every section into containerEl from the tab's current draft state.
-export function renderSettingsTab(tab: GeodeSettingTab, containerEl: HTMLElement): void {
-  renderHeader(containerEl);
-  renderStorageSection(tab, containerEl);
-  renderSupportSection(tab, containerEl);
 }
 
 // GeodeSettingTab renders the settings UI from an in-memory draft and only writes to plugin

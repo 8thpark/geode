@@ -8,30 +8,6 @@ import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { DataAdapter, TFile, Vault } from "obsidian";
 
-// abs joins a vault relative, forward slash path onto the temp root as a real OS path.
-function abs(root: string, path: string): string {
-  return join(root, ...path.split("/"));
-}
-
-// walk returns every file (not directory) under the root as vault relative, forward slash paths,
-// excluding anything under .obsidian, mirroring what Obsidian's Vault.getFiles() leaves out.
-function walk(root: string, dir = ""): string[] {
-  const here = dir === "" ? root : abs(root, dir);
-  const out: string[] = [];
-  for (const entry of readdirSync(here, { withFileTypes: true })) {
-    if (entry.name === ".obsidian") {
-      continue;
-    }
-    const rel = dir === "" ? entry.name : `${dir}/${entry.name}`;
-    if (entry.isDirectory()) {
-      out.push(...walk(root, rel));
-      continue;
-    }
-    out.push(rel);
-  }
-  return out;
-}
-
 // nodeVault returns a Vault and DataAdapter both backed by the same temp directory root. Only the
 // subset of methods obsidian.ts actually calls is implemented, then cast to the full Obsidian
 // interfaces, which is all the real code touches.
@@ -85,4 +61,28 @@ export function nodeVault(root: string): { vault: Vault; adapter: DataAdapter } 
   } as unknown as Vault;
 
   return { vault, adapter };
+}
+
+// abs joins a vault relative, forward slash path onto the temp root as a real OS path.
+function abs(root: string, path: string): string {
+  return join(root, ...path.split("/"));
+}
+
+// walk returns every file (not directory) under the root as vault relative, forward slash paths,
+// excluding anything under .obsidian, mirroring what Obsidian's Vault.getFiles() leaves out.
+function walk(root: string, dir = ""): string[] {
+  const here = dir === "" ? root : abs(root, dir);
+  const out: string[] = [];
+  for (const entry of readdirSync(here, { withFileTypes: true })) {
+    if (entry.name === ".obsidian") {
+      continue;
+    }
+    const rel = dir === "" ? entry.name : `${dir}/${entry.name}`;
+    if (entry.isDirectory()) {
+      out.push(...walk(root, rel));
+      continue;
+    }
+    out.push(rel);
+  }
+  return out;
 }
