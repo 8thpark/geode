@@ -6,7 +6,7 @@ compatibility: Designed for Claude Code (or similar products)
 metadata:
   author: revett
   repo: https://github.com/revett/typescript-as-go
-  version: 0.3.0
+  version: 0.4.0
 ---
 
 # TypeScript As Go
@@ -29,11 +29,15 @@ writing Typescript.
    composition over inheritance
 2. Named exports only, using a default export solely when a framework requires it
 3. Small files with one concern each and kebab-case file names (`settings-tab.ts`), graduating to
-   package folders (`settings/tab.ts`) only once a concern outgrows a single file
+   package folders (`settings/tab.ts`) only once a concern outgrows a single *production* file
+   (tests always sit beside their code, so they never on their own trigger the split); the folder's
+   primary file repeats the package name (`vault/vault.ts`, like Go's `bytes/bytes.go`), never an
+   `index.ts` barrel
 4. Framework code stays thin glue, with logic living in pure modules that never import the framework
 5. Names short and evocative, scaled to scope (terse for locals, descriptive for exports), never
-   prefixing a getter with `get` (`owner()`, not `getOwner()`), always camelCase or PascalCase and
-   never snake_case
+   prefixing a getter with `get` (`owner()`, not `getOwner()`), never stuttering the enclosing
+   package name in an exported symbol (`vault.Reader`, not `vault.VaultReader`), always camelCase or
+   PascalCase and never snake_case
 6. `type` over `interface` for data shapes, since they are structs not contracts and a `type` cannot
    be reopened by declaration merging; use `interface` only when a framework contract leaves no
    choice
