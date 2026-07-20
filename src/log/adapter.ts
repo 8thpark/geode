@@ -8,6 +8,11 @@ import {
   trimLogLines,
 } from "./log.ts";
 
+// COMPACT_INTERVAL is how many appends accumulate before the log file is trimmed back down to
+// maxLines. Appending is cheap (DataAdapter.append); a full read/trim/write is not, so
+// compaction runs in batches rather than after every single line.
+const COMPACT_INTERVAL = 50;
+
 // createLogSink returns the real file backed sink, or an in-memory fallback when dir is
 // undefined (some embedded/test hosts never set manifest.dir).
 export function createLogSink(
@@ -20,11 +25,6 @@ export function createLogSink(
   }
   return createObsidianLogSink(adapter, `${dir}/geode.log`, maxLines);
 }
-
-// COMPACT_INTERVAL is how many appends accumulate before the log file is trimmed back down to
-// maxLines. Appending is cheap (DataAdapter.append); a full read/trim/write is not, so
-// compaction runs in batches rather than after every single line.
-const COMPACT_INTERVAL = 50;
 
 // createObsidianLogSink returns a LogSink that persists to a capped file at logPath via the vault
 // adapter, appending cheaply and periodically trimming back down to maxLines so the file can't

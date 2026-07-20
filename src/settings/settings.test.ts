@@ -13,6 +13,11 @@ import {
 
 const normalizeCases: { name: string; input: unknown; want: GeodeSettings }[] = [
   {
+    name: "partial legacy object",
+    input: { bucket: "my-bucket", accessKeyId: "AKIA123" },
+    want: { ...DEFAULT_SETTINGS, bucket: "my-bucket", accessKeyId: "AKIA123" },
+  },
+  {
     name: "null",
     input: null,
     want: DEFAULT_SETTINGS,
@@ -26,11 +31,6 @@ const normalizeCases: { name: string; input: unknown; want: GeodeSettings }[] = 
     name: "empty object",
     input: {},
     want: DEFAULT_SETTINGS,
-  },
-  {
-    name: "partial legacy object",
-    input: { bucket: "my-bucket", accessKeyId: "AKIA123" },
-    want: { ...DEFAULT_SETTINGS, bucket: "my-bucket", accessKeyId: "AKIA123" },
   },
   {
     name: "junk types in string fields",
@@ -168,16 +168,6 @@ for (const { name, a, b, want } of settingsEqualCases) {
 
 const hasConnectionConfigCases: { name: string; input: GeodeSettings; want: boolean }[] = [
   {
-    name: "empty settings are incomplete",
-    input: DEFAULT_SETTINGS,
-    want: false,
-  },
-  {
-    name: "r2 missing account ID is incomplete",
-    input: { ...DEFAULT_SETTINGS, bucket: "b", accessKeyId: "a", secretId: "s" },
-    want: false,
-  },
-  {
     name: "r2 with all fields is complete",
     input: {
       ...DEFAULT_SETTINGS,
@@ -187,6 +177,16 @@ const hasConnectionConfigCases: { name: string; input: GeodeSettings; want: bool
       secretId: "s",
     },
     want: true,
+  },
+  {
+    name: "empty settings are incomplete",
+    input: DEFAULT_SETTINGS,
+    want: false,
+  },
+  {
+    name: "r2 missing account ID is incomplete",
+    input: { ...DEFAULT_SETTINGS, bucket: "b", accessKeyId: "a", secretId: "s" },
+    want: false,
   },
   {
     name: "custom missing region is incomplete",

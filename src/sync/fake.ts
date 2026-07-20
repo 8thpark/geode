@@ -11,36 +11,6 @@ import type { LocalWriter } from "./execute.ts";
 // empty is the zero snapshot: a vault with no files.
 export const empty: Snapshot = { files: [] };
 
-// file builds a FileState for path with the given hash, using the hash length as a stand-in size.
-export function file(path: string, hash: string): FileState {
-  return { path, size: hash.length, mtime: 1, hash };
-}
-
-// snapshot builds a Snapshot from the given file states.
-export function snapshot(...files: FileState[]): Snapshot {
-  return { files };
-}
-
-// fakeReader returns a Reader backed by an in-memory map of path to content.
-export function fakeReader(files: Record<string, string>): Reader {
-  return {
-    listFiles: async () => {
-      const list = [];
-      for (const [path, content] of Object.entries(files)) {
-        list.push({ path, size: content.length, mtime: 1 });
-      }
-      return list;
-    },
-    readFile: async (path) => {
-      const content = files[path];
-      if (content === undefined) {
-        throw new Error(`no such file: ${path}`);
-      }
-      return new TextEncoder().encode(content);
-    },
-  };
-}
-
 // fakeLocalWriter returns a LocalWriter backed by an in-memory map, and the map itself so tests
 // can assert on the result.
 export function fakeLocalWriter(): { writer: LocalWriter; files: Map<string, string> } {
@@ -61,6 +31,26 @@ export function fakeLocalWriter(): { writer: LocalWriter; files: Map<string, str
     },
   };
   return { writer, files };
+}
+
+// fakeReader returns a Reader backed by an in-memory map of path to content.
+export function fakeReader(files: Record<string, string>): Reader {
+  return {
+    listFiles: async () => {
+      const list = [];
+      for (const [path, content] of Object.entries(files)) {
+        list.push({ path, size: content.length, mtime: 1 });
+      }
+      return list;
+    },
+    readFile: async (path) => {
+      const content = files[path];
+      if (content === undefined) {
+        throw new Error(`no such file: ${path}`);
+      }
+      return new TextEncoder().encode(content);
+    },
+  };
 }
 
 // fakeStorage returns a StorageClient backed by an in-memory map of key to content.
@@ -95,4 +85,14 @@ export function fakeStorage(objects: Record<string, string> = {}): {
     },
   };
   return { storage, objects: store };
+}
+
+// file builds a FileState for path with the given hash, using the hash length as a stand-in size.
+export function file(path: string, hash: string): FileState {
+  return { path, size: hash.length, mtime: 1, hash };
+}
+
+// snapshot builds a Snapshot from the given file states.
+export function snapshot(...files: FileState[]): Snapshot {
+  return { files };
 }

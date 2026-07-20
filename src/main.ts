@@ -19,17 +19,17 @@ import {
 } from "./vault/obsidian";
 import { diffSnapshots, takeSnapshot } from "./vault/vault";
 
-// VAULT_STATE_DEBOUNCE_MS delays a vault state refresh after the last file event, so a burst of
-// edits (autosave, bulk rename, etc.) collapses into one snapshot instead of one per file.
-const VAULT_STATE_DEBOUNCE_MS = 2000;
+// LOG_MIN_LEVEL is fixed rather than user configurable: there's no meaningful "quiet" mode to
+// offer today, so a verbosity setting would be a toggle with no observable effect.
+const LOG_MIN_LEVEL = "debug";
 
 // MAX_LOG_LINES caps how many lines geode.log keeps on disk, so a long running session can't
 // grow it unbounded.
 const MAX_LOG_LINES = 500;
 
-// LOG_MIN_LEVEL is fixed rather than user configurable: there's no meaningful "quiet" mode to
-// offer today, so a verbosity setting would be a toggle with no observable effect.
-const LOG_MIN_LEVEL = "debug";
+// VAULT_STATE_DEBOUNCE_MS delays a vault state refresh after the last file event, so a burst of
+// edits (autosave, bulk rename, etc.) collapses into one snapshot instead of one per file.
+const VAULT_STATE_DEBOUNCE_MS = 2000;
 
 // AppWithSetting adds Obsidian's internal, undocumented settings-window API (there is no public
 // equivalent) so the Settings command can jump straight to Geode's tab, and opening the log view
