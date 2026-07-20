@@ -71,6 +71,8 @@ export default class GeodePlugin extends Plugin {
   private logSink!: LogSink;
   private statusBarEl!: HTMLElement;
   private refreshTimer: number | undefined;
+  private refreshInFlight: Promise<void> | null = null;
+  private refreshQueued = false;
   private syncing = false;
 
   async onload() {
@@ -245,7 +247,33 @@ export default class GeodePlugin extends Plugin {
   // common ancestor sync diffs both sides against, and only a completed sync may write it. Writing
   // the live vault here would poison that ancestor, so a brand new local file would look like a
   // remote deletion on the next sync and get wiped.
-  async refreshVaultState() {
+  //
+  // While a refresh is already running, subsequent calls are coalesced: at most one extra refresh
+  // runs after the in-flight one finishes, catching any changes that arrived mid-snapshot.
+  async refreshVaultState(): Promise<void> {
+    if (this.refreshInFlight !== null) {
+      this.refreshQueued = true;
+      return this.refreshInFlight;
+    }
+
+    let runQueued = false;
+    this.refreshInFlight = this.doRefresh();
+    try {
+      await this.refreshInFlight;
+      runQueued = this.refreshQueued;
+    } finally {
+      this.refreshInFlight = null;
+      this.refreshQueued = false;
+    }
+
+    if (runQueued) {
+      return this.refreshVaultState();
+    }
+  }
+
+  // doRefresh does the actual snapshot and diff work, split out so refreshVaultState can own the
+  // in flight guard without this getting lost in indentation.
+  private async doRefresh(): Promise<void> {
     const dir = this.manifest.dir;
     if (dir === undefined) {
       return;
