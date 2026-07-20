@@ -1,6 +1,6 @@
 import type { DataAdapter, Vault } from "obsidian";
 import type { LocalWriter } from "../sync.ts";
-import { type File, isSnapshot, type Reader, type Snapshot, type Store } from "./vault.ts";
+import { type FileInfo, isSnapshot, type Reader, type Snapshot, type Store } from "./vault.ts";
 
 // ensureParentDir creates path's parent folder, and any folders above it, before a write that
 // might land somewhere the vault has never had a file before. mkdir is assumed to create
@@ -23,7 +23,7 @@ async function ensureParentDir(adapter: DataAdapter, path: string): Promise<void
 export function createObsidianReader(vault: Vault): Reader {
   return {
     listFiles: async () => {
-      const files: File[] = [];
+      const files: FileInfo[] = [];
       for (const file of vault.getFiles()) {
         files.push({ path: file.path, size: file.stat.size, mtime: file.stat.mtime });
       }

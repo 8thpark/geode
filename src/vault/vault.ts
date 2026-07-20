@@ -20,8 +20,8 @@ export function isSnapshot(value: unknown): value is Snapshot {
   return typeof value === "object" && value !== null && Array.isArray((value as Snapshot).files);
 }
 
-// File is one file as seen live in the vault, before hashing.
-export type File = {
+// FileInfo is one file as seen live in the vault, before hashing.
+export type FileInfo = {
   path: string;
   size: number;
   mtime: number;
@@ -30,7 +30,7 @@ export type File = {
 // Reader lists files present in the vault right now and reads their bytes. The real
 // implementation wraps Obsidian's Vault API (see obsidian.ts); tests use an in-memory fake.
 export type Reader = {
-  listFiles: () => Promise<File[]>;
+  listFiles: () => Promise<FileInfo[]>;
   readFile: (path: string) => Promise<Uint8Array>;
 };
 

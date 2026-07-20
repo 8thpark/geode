@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   diffSnapshots,
-  type File,
+  type FileInfo,
   isSnapshot,
   type Reader,
   type Snapshot,
@@ -18,7 +18,7 @@ function fakeReader(files: Record<string, { content: string; mtime: number }>): 
   let reads = 0;
   const reader: Reader = {
     listFiles: async () => {
-      const list: File[] = [];
+      const list: FileInfo[] = [];
       for (const [path, file] of Object.entries(files)) {
         list.push({ path, size: file.content.length, mtime: file.mtime });
       }
@@ -117,7 +117,7 @@ test("takeSnapshot: concurrency is bounded by the limit", async () => {
   let peakInflight = 0;
   const reader: Reader = {
     listFiles: async () => {
-      const list: File[] = [];
+      const list: FileInfo[] = [];
       for (const [path, file] of Object.entries(files)) {
         list.push({ path, size: file.content.length, mtime: file.mtime });
       }
