@@ -1,5 +1,5 @@
 import type { DataAdapter, Vault } from "obsidian";
-import type { LocalWriter } from "../sync.ts";
+import type { LocalWriter } from "../sync/execute.ts";
 import { type FileInfo, isSnapshot, type Reader, type Snapshot, type Store } from "./vault.ts";
 
 // ensureParentDir creates path's parent folder, and any folders above it, before a write that

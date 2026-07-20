@@ -8,22 +8,18 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { DEFAULT_SETTINGS, type GeodeSettings } from "./settings/settings.ts";
-import { createS3Client } from "./storage/storage.ts";
-import {
-  conflictCopyPath,
-  type LocalWriter,
-  MANIFEST_KEY,
-  type SyncOutcome,
-  syncOnce,
-} from "./sync.ts";
-import { nodeVault } from "./vault/fs.ts";
+import { DEFAULT_SETTINGS, type GeodeSettings } from "../settings/settings.ts";
+import { createS3Client } from "../storage/storage.ts";
+import { nodeVault } from "../vault/fs.ts";
 import {
   createObsidianLocalWriter,
   createObsidianReader,
   createObsidianStore,
-} from "./vault/obsidian.ts";
-import { type Reader, type Store, takeSnapshot } from "./vault/vault.ts";
+} from "../vault/obsidian.ts";
+import { type Reader, type Store, takeSnapshot } from "../vault/vault.ts";
+import type { LocalWriter } from "./execute.ts";
+import { conflictCopyPath, MANIFEST_KEY } from "./plan.ts";
+import { type SyncOutcome, syncOnce } from "./sync.ts";
 
 const SECRET = "geodedev";
 

@@ -11,7 +11,7 @@ import {
 } from "./settings/settings";
 import { GeodeSettingTab } from "./settings/tab";
 import { createS3Client } from "./storage/storage";
-import { syncOnce } from "./sync";
+import { syncOnce } from "./sync/sync";
 import {
   createObsidianLocalWriter,
   createObsidianReader,
