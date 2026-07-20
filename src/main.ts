@@ -256,15 +256,17 @@ export default class GeodePlugin extends Plugin {
       return this.refreshInFlight;
     }
 
+    let runQueued = false;
     this.refreshInFlight = this.doRefresh();
     try {
       await this.refreshInFlight;
+      runQueued = this.refreshQueued;
     } finally {
       this.refreshInFlight = null;
+      this.refreshQueued = false;
     }
 
-    if (this.refreshQueued) {
-      this.refreshQueued = false;
+    if (runQueued) {
       return this.refreshVaultState();
     }
   }
