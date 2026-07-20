@@ -1,5 +1,27 @@
 import type { DataAdapter, Vault } from "obsidian";
-import type { StateStore, VaultFile, VaultReader, VaultSnapshot } from "./vault-state.ts";
+import type { LocalWriter } from "./sync.ts";
+import {
+  isVaultSnapshot,
+  type StateStore,
+  type VaultFile,
+  type VaultReader,
+  type VaultSnapshot,
+} from "./vault-state.ts";
+
+// ensureParentDir creates path's parent folder, and any folders above it, before a write that
+// might land somewhere the vault has never had a file before. mkdir is assumed to create
+// intermediate folders the same way Obsidian's own folder creation does.
+async function ensureParentDir(adapter: DataAdapter, path: string): Promise<void> {
+  const lastSlash = path.lastIndexOf("/");
+  if (lastSlash === -1) {
+    return;
+  }
+  const dir = path.slice(0, lastSlash);
+  const exists = await adapter.exists(dir);
+  if (!exists) {
+    await adapter.mkdir(dir);
+  }
+}
 
 // createObsidianVaultReader returns a VaultReader backed by the real vault's file tree. Obsidian
 // already excludes .obsidian/** from Vault.getFiles(), so the plugin's own state file (which
@@ -37,14 +59,41 @@ export function createObsidianStateStore(adapter: DataAdapter, statePath: string
         return empty;
       }
       try {
-        const raw = await adapter.read(statePath);
-        return JSON.parse(raw) as VaultSnapshot;
+        const parsed: unknown = JSON.parse(await adapter.read(statePath));
+        if (isVaultSnapshot(parsed)) {
+          return parsed;
+        }
+        return empty;
       } catch {
         return empty;
       }
     },
     write: async (snapshot) => {
       await adapter.write(statePath, JSON.stringify(snapshot));
+    },
+  };
+}
+
+// createObsidianLocalWriter returns a LocalWriter that applies pulled remote changes straight
+// through the low level data adapter, rather than the Vault API, since a path pulled down for
+// the first time has no TFile yet for Vault.modifyBinary/rename to operate on.
+export function createObsidianLocalWriter(adapter: DataAdapter): LocalWriter {
+  return {
+    writeFile: async (path, data) => {
+      await ensureParentDir(adapter, path);
+      const buffer = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+      await adapter.writeBinary(path, buffer as ArrayBuffer);
+    },
+    deleteFile: async (path) => {
+      const exists = await adapter.exists(path);
+      if (!exists) {
+        return;
+      }
+      await adapter.remove(path);
+    },
+    renameFile: async (path, newPath) => {
+      await ensureParentDir(adapter, newPath);
+      await adapter.rename(path, newPath);
     },
   };
 }

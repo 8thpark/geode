@@ -1,12 +1,8 @@
 # AGENTS.md
 
-## Context
+## Vision
 
-- [Obsidian Developer Documentation](https://docs.obsidian.md) on building plugins and themes
-
-## Product Vision
-
-- Your notes stay yours: plain files, synced through storage you control, encrypted before they
+- Your notes stay yours; files synced through storage you control, encrypted before they
   leave your device; no lock in, nothing held hostage, walk away any time
 - Your vault becomes reachable by the agents and tools you trust, from anywhere, without a laptop
   awake; Geode makes the vault a first class citizen of the agent era
@@ -21,39 +17,56 @@
 
 ## Documentation
 
-Ensure that documentation is added to, and updated, as the project progresses; as well as continue
-to update the private
-[Working Document](https://claude.ai/code/artifact/fa8682d6-0677-4d6c-a32d-c91e51411d8f) artifact as
-we make decisions together about the project, and to track progress.
+Documentation is a first class citizen in this project, and is critical to be correct and update,
+have the correct depth, and have the correct breadth. As changes are made to the project and it
+develops, it is critical that the documentation evolves with it.
+
+Current documentation:
+
+- `README.md`
+- `AGENTS.md`
+- `SECURITY.md`
+- `CONTRIBUTING.md`
 
 ## Similar Projects
 
-- [Obsidian Sync](https://obsidian.md/sync) (Risk 5/5) → First party, E2E encrypted, excellent on
+- [Obsidian Sync](https://obsidian.md/sync) (5/5 risk) → first party, E2E encrypted, excellent on
   mobile, very much alive; the existential scenario is Obsidian shipping an official API/MCP on top
   of it
-- [Remotely Save](https://github.com/remotely-save/remotely-save) (Risk 2/5) → 7.8k stars but no
+- [Synch](https://synch.run) (2/5 risk) → open source, E2EE, hosted at $1/month vs official
+  Sync's $5; undercuts on price for the "want E2EE without the cost" crowd, but that's a
+  different customer than ours, they're not bringing their own storage
+- [Remotely Save](https://github.com/remotely-save/remotely-save) (2/5 risk) → 7.8k stars but no
   push since Nov 2024 and 215 open issues; the leading BYO storage sync plugin is effectively
   unmaintained, and its users are our first audience
-- [Self-hosted LiveSync](https://github.com/vrtmrz/obsidian-livesync) (Risk 3/5) → 11.5k stars and
+- [Obsidian WebDAV Sync](https://github.com/hesprs/obsidian-webdav-sync) (4/5 risk) → 280 stars,
+  ~4 months old but shipping releases every few days; built explicitly as Remotely Save's
+  replacement, going after the exact same first audience, and already has three way sync, several
+  conflict strategies, and client side encryption, ground our own `#26`/`#27` haven't caught up to
+  yet; no MCP or agent story though, that half of the pitch is still ours alone
+- [Sync Vault](https://github.com/abcamus/obsidian-sync-vault-ce) (4/5 risk) → 106 stars, 9k
+  downloads, pushed today; the one to actually watch, it already bundles both halves of our own
+  pitch, a zero space VFS across S3/WebDAV/Baidu/Aliyun AND an explicit MCP AI engine, the only
+  other plugin here making that same agent era claim
+- [Simple Storage Sync + Backup](https://github.com/ceilaolabs/obsidian-s3-sync-and-backup) (3/5
+  risk) → 17 stars, same S3/R2 niche as us, already ships optional E2E encryption and
+  `LOCAL_`/`REMOTE_` conflict copies, our own `#26`/`#27` territory again, from a much smaller
+  project
+- [Twine](https://github.com/EnGassa/obsidian-twine) (1/5 risk) → 1 star, repo created six days
+  ago, effectively zero traction yet, but the pitch is nearly word for word ours (R2/B2/S3,
+  client side AES-256-GCM, no server, conflict copies preserved); worth naming for how crowded
+  this exact niche is getting, independently, right now, not as an actual threat today
+- [Self-hosted LiveSync](https://github.com/vrtmrz/obsidian-livesync) (3/5 risk) → 11.5k stars and
   very active; real time CouchDB sync for self hosters, same job, more demanding setup
-- [obsidian-git](https://github.com/Vinzent03/obsidian-git) (Risk 2/5) → 11.5k stars and very active
-- [Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api) (Risk 2/5) → 2.6k
-  stars, active, ships a built-in MCP server; strong locally but requires Obsidian running on an
-  awake machine
-- Remote MCP via tunnels and hosted connectors
-  ([obsidian-web-mcp](https://github.com/jimprosser/obsidian-web-mcp), 146 stars and young, and
-  [MCPBundles](https://www.mcpbundles.com)) (Risk 4/5) → Early movers on our paid layer; all still
-  need a live device or a tunnel to the vault, whereas Geode reads from storage with nothing awake
-- Desktop agents reading vault files directly (Claude Desktop, Claude Code, etc) (Risk 4/5) → The
-  good enough default whenever the laptop is on; always on access is the differentiation to protect
-- Hosted PKM with native AI ([Notion](https://notion.com), [Anytype](https://anytype.io),
-  [Capacities](https://capacities.io)) (Risk 3/5) → The long game threat is users leaving Obsidian
-  entirely, not picking a rival plugin
+- [obsidian-git](https://github.com/Vinzent03/obsidian-git) (2/5 risk) → 11.5k stars and very
+  active, alongside iCloud and Syncthing; free and good enough for simple setups; they cap the sync
+  market, not the agent access market
+- [Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api) (2/5 risk) → 2.6k
 
 ## Remember
 
-- Less is always more, simple is always better, boring is best, to avoid the magic!
-- Whilst still meeting requirements, being secure, and delivering value for our users
+Less is always more, simple is always better, boring is best, avoid the magic! Whilst still meeting
+requirements, being secure, and delivering value for our users.
 
 ## Code Style
 

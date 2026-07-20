@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   diffSnapshots,
+  isVaultSnapshot,
   takeSnapshot,
   type VaultFile,
   type VaultReader,
@@ -86,6 +87,23 @@ test("diffSnapshots: a file missing from the current listing is reported as dele
   const changes = diffSnapshots(first, empty);
 
   assert.deepEqual(changes, [{ path: "note.md", kind: "deleted" }]);
+});
+
+test("isVaultSnapshot: only a non-null object with a files array is accepted", () => {
+  const cases: { name: string; value: unknown; want: boolean }[] = [
+    { name: "a proper empty snapshot", value: { files: [] }, want: true },
+    { name: "a populated snapshot", value: { files: [{ path: "a.md" }] }, want: true },
+    { name: "an object with no files field", value: {}, want: false },
+    { name: "an object whose files is not an array", value: { files: "nope" }, want: false },
+    { name: "a bare array", value: [], want: false },
+    { name: "null", value: null, want: false },
+    { name: "a number", value: 42, want: false },
+    { name: "a string", value: "files", want: false },
+  ];
+
+  for (const { name, value, want } of cases) {
+    assert.equal(isVaultSnapshot(value), want, name);
+  }
 });
 
 test("takeSnapshot: concurrency is bounded by the limit", async () => {

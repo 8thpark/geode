@@ -81,6 +81,13 @@ With `npm run dev` running:
    `docker-compose.yml`). Click Test Connection.
 4. After changing source files, reload Obsidian to pick up the new `main.js` (Cmd-P → "Reload app
    without saving"). Installing the community Hot-Reload plugin removes the need for this step.
+5. Run `Geode: Sync` from the command palette, or click the status bar icon bottom right, to
+   push and pull against the storage server. Check the result either in the `Geode: Logs` pane or
+   directly in the bucket:
+   ```bash
+   docker compose run --rm --entrypoint sh create-bucket -c \
+     "mc alias set local http://minio:9000 geodedev geodedev && mc ls local/geode-dev"
+   ```
 
 Obsidian's plugin data file (`data.json`), geode's own vault state file (`state.json`), and its
 log file (`geode.log`), all of which land at the repo root because the dev vault symlinks the
