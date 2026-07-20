@@ -53,7 +53,7 @@ export function conflictCopyPath(path: string, now: number): string {
   const stamp = new Date(now).toISOString().replace(/[:.]/g, "-");
   const lastSlash = path.lastIndexOf("/");
   const lastDot = path.lastIndexOf(".");
-  if (lastDot === -1 || lastDot < lastSlash) {
+  if (lastDot === -1 || lastDot <= lastSlash + 1) {
     return `${path} (conflicted copy ${stamp})`;
   }
   return `${path.slice(0, lastDot)} (conflicted copy ${stamp})${path.slice(lastDot)}`;

@@ -130,6 +130,20 @@ test("conflictCopyPath: a dot in a folder name isn't mistaken for an extension",
   );
 });
 
+test("conflictCopyPath: a leading dot in the filename isn't mistaken for an extension", () => {
+  assert.equal(
+    conflictCopyPath("notes/.gitignore", Date.parse("2026-07-14T10:00:00.000Z")),
+    "notes/.gitignore (conflicted copy 2026-07-14T10-00-00-000Z)",
+  );
+});
+
+test("conflictCopyPath: a dotfile at the vault root isn't mistaken for an extension", () => {
+  assert.equal(
+    conflictCopyPath(".editorconfig", Date.parse("2026-07-14T10:00:00.000Z")),
+    ".editorconfig (conflicted copy 2026-07-14T10-00-00-000Z)",
+  );
+});
+
 // fakeReader returns a VaultReader backed by an in-memory map of path to content.
 function fakeReader(files: Record<string, string>): VaultReader {
   return {
