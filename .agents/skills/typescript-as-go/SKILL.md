@@ -6,7 +6,7 @@ compatibility: Designed for Claude Code (or similar products)
 metadata:
   author: revett
   repo: https://github.com/revett/typescript-as-go
-  version: 0.5.0
+  version: 0.5.1
 ---
 
 # TypeScript As Go
@@ -120,6 +120,5 @@ Notes:
 - Alphabetical is mechanical on purpose; there is no judgement call to make and no debate to have
 - A `DEFAULT_X` constant will therefore sit above the type it is annotated with; this is fine,
   types hoist, and predictable placement is worth more than local reading order
-- Test files group cases by the symbol under test, following the same order the source file declares
-  them; within one symbol's cases the happy path comes first, then the guards, failures, and edge
-  cases, never alphabetically
+- Test files are exempt and never resorted to match their source, reading instead as a narrative
+  that groups cases by the symbol under test from central to peripheral, happy path first
