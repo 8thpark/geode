@@ -75,6 +75,18 @@ export function diffSnapshots(previous: Snapshot, current: Snapshot): Change[] {
   return changes;
 }
 
+// hashBytes returns the lowercase hex SHA-256 digest of data.
+export async function hashBytes(data: Uint8Array): Promise<string> {
+  // Same TS/DOM lib generic mismatch as storage.ts's BodyInit cast: Uint8Array<ArrayBufferLike>
+  // vs BufferSource's stricter ArrayBuffer expectation. Not a real runtime issue.
+  const digest = await crypto.subtle.digest("SHA-256", data as BufferSource);
+  let hex = "";
+  for (const byte of new Uint8Array(digest)) {
+    hex += byte.toString(16).padStart(2, "0");
+  }
+  return hex;
+}
+
 // isSnapshot reports whether a value parsed from untrusted JSON (a remote manifest, a local
 // state.json) is shaped like a snapshot: a non-null object with a files array. Callers use this
 // instead of a blind `as Snapshot` cast, so a body that parses but is the wrong shape becomes
@@ -113,18 +125,6 @@ export async function takeSnapshot(
   });
 
   return { files };
-}
-
-// hashBytes returns the lowercase hex SHA-256 digest of data.
-async function hashBytes(data: Uint8Array): Promise<string> {
-  // Same TS/DOM lib generic mismatch as storage.ts's BodyInit cast: Uint8Array<ArrayBufferLike>
-  // vs BufferSource's stricter ArrayBuffer expectation. Not a real runtime issue.
-  const digest = await crypto.subtle.digest("SHA-256", data as BufferSource);
-  let hex = "";
-  for (const byte of new Uint8Array(digest)) {
-    hex += byte.toString(16).padStart(2, "0");
-  }
-  return hex;
 }
 
 // mapWithConcurrency runs fn over each item with at most limit concurrent invocations, preserving

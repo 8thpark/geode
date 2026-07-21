@@ -1,6 +1,10 @@
 import type { StorageClient } from "../storage/storage.ts";
-import type { Reader } from "../vault/vault.ts";
+import { byPath, type FileState, hashBytes, type Reader, type Snapshot } from "../vault/vault.ts";
 import { conflictCopyPath, type SyncAction } from "./plan.ts";
+
+// DRIFT_MESSAGE is the failure reported when a local file changed after the snapshot an action
+// was planned from; the next sync re-snapshots and replans the path as a conflict.
+const DRIFT_MESSAGE = "changed locally mid sync; sync again to reconcile";
 
 // LocalWriter applies changes decided by a sync to the local vault. The real implementation
 // writes through the vault adapter (see vault/obsidian.ts); tests use an in-memory fake.
@@ -17,16 +21,20 @@ export type SyncFailure = {
 };
 
 // executeSyncPlan carries out every action against reader/localWriter (the local vault) and
-// storage (the remote bucket), and reports whatever couldn't be completed. now is passed in
-// rather than read internally so a conflict's copy name is deterministic under test.
+// storage (the remote bucket), and reports whatever couldn't be completed. local is the snapshot
+// the plan was made from, so each destructive local write can first check the file hasn't changed
+// since (#86). now is passed in rather than read internally so a conflict's copy name is
+// deterministic under test.
 export async function executeSyncPlan(
   actions: SyncAction[],
+  local: Snapshot,
   reader: Reader,
   localWriter: LocalWriter,
   storage: StorageClient,
   now: number,
 ): Promise<SyncFailure[]> {
   const failures: SyncFailure[] = [];
+  const localByPath = byPath(local.files);
 
   for (const action of actions) {
     if (action.kind === "push") {
@@ -53,6 +61,10 @@ export async function executeSyncPlan(
     }
 
     if (action.kind === "pull") {
+      if (await localDrifted(reader, action.path, localByPath.get(action.path))) {
+        failures.push({ path: action.path, message: DRIFT_MESSAGE });
+        continue;
+      }
       const result = await storage.getObject(action.path);
       if (!result.ok || result.body === null) {
         failures.push({ path: action.path, message: result.message });
@@ -69,6 +81,10 @@ export async function executeSyncPlan(
     }
 
     if (action.kind === "pullDelete") {
+      if (await localDrifted(reader, action.path, localByPath.get(action.path))) {
+        failures.push({ path: action.path, message: DRIFT_MESSAGE });
+        continue;
+      }
       const failure = await applyLocalWrite(action.path, () => localWriter.deleteFile(action.path));
       if (failure !== null) {
         failures.push(failure);
@@ -77,8 +93,13 @@ export async function executeSyncPlan(
     }
 
     // conflict, deletedSide "local": the user deleted their copy, so there is no local edit to
-    // preserve; the remote edit simply wins and is restored onto the local path.
+    // preserve; the remote edit simply wins and is restored onto the local path. The snapshot has
+    // no entry here, so any file found now was recreated after it and must not be overwritten.
     if (action.deletedSide === "local") {
+      if (await localDrifted(reader, action.path, localByPath.get(action.path))) {
+        failures.push({ path: action.path, message: DRIFT_MESSAGE });
+        continue;
+      }
       const result = await storage.getObject(action.path);
       if (!result.ok || result.body === null) {
         failures.push({ path: action.path, message: result.message });
@@ -154,6 +175,34 @@ async function applyLocalWrite(path: string, op: () => Promise<void>): Promise<S
   } catch (err) {
     return { path, message: localFailureMessage(err) };
   }
+}
+
+// localDrifted reports whether the file at path now holds content the local snapshot never saw:
+// an edit or creation made in the window between the snapshot and this action running (#86).
+// Overwriting or deleting such a file would silently discard that edit, so the caller fails the
+// action instead; the next sync re-snapshots, sees both sides changed, and replans the path as a
+// conflict, which is where the conflict copy machinery lives. A path with nothing on disk, or
+// whose content still hashes to the snapshot's entry, is safe to write over. Reading right before
+// the destructive write shrinks the unguardable race to the moment between this read and the
+// write itself, rather than the whole plan execution.
+async function localDrifted(
+  reader: Reader,
+  path: string,
+  expected: FileState | undefined,
+): Promise<boolean> {
+  let bytes: Uint8Array;
+  try {
+    bytes = await reader.readFile(path);
+  } catch {
+    // Nothing on disk means nothing to discard; a read failing for any other reason resurfaces
+    // on the destructive write that follows, where it is reported.
+    return false;
+  }
+  if (expected === undefined) {
+    return true;
+  }
+
+  return (await hashBytes(bytes)) !== expected.hash;
 }
 
 // localFailureMessage turns whatever a local vault operation threw into a SyncFailure message.

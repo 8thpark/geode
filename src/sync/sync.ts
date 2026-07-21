@@ -121,7 +121,7 @@ export async function syncOnce(
   const local = await takeSnapshot(reader, ancestor);
 
   const actions = planSync(ancestor, local, remote.snapshot);
-  const failures = await executeSyncPlan(actions, reader, localWriter, storage, now);
+  const failures = await executeSyncPlan(actions, local, reader, localWriter, storage, now);
   if (failures.length > 0) {
     return { ok: false, message: `${failures.length} file(s) failed to sync`, failures };
   }

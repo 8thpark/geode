@@ -1,9 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { Snapshot } from "../vault/vault.ts";
+import { hashBytes, type Snapshot } from "../vault/vault.ts";
 import { empty, fakeLocalWriter, fakeReader, fakeStorage, file, snapshot } from "./fake.ts";
-import { MANIFEST_KEY } from "./plan.ts";
+import { conflictCopyPath, MANIFEST_KEY } from "./plan.ts";
 import { adoptLiveStats, readRemoteManifest, syncOnce } from "./sync.ts";
+
+// hashOf returns the real content hash of text, for snapshots whose entries executeSyncPlan's
+// drift check will verify against live bytes.
+async function hashOf(text: string): Promise<string> {
+  return hashBytes(new TextEncoder().encode(text));
+}
 
 test("readRemoteManifest: a 404 is treated as an empty snapshot", async () => {
   const { storage } = fakeStorage();
@@ -87,8 +93,9 @@ test("syncOnce: a present but empty manifest still trusts the ancestor and pulls
   // really did produce an empty remote. A file the ancestor knew about, unchanged locally, was
   // deleted remotely, and pullDelete is the correct result that must NOT be suppressed. The reader
   // reports the file at the same size and mtime as the ancestor so takeSnapshot reuses its hash and
-  // sees no local change.
-  const previous = snapshot(file("a.md", "h1"));
+  // sees no local change; the hash is the real content hash so the pullDelete's drift check also
+  // sees the file as unchanged.
+  const previous = snapshot({ path: "a.md", size: 2, mtime: 1, hash: await hashOf("xy") });
   const reader = fakeReader({ "a.md": "xy" });
   const { writer, files } = fakeLocalWriter();
   files.set("a.md", "xy");
@@ -211,6 +218,60 @@ test("syncOnce: a file changed mid sync is not recorded in the manifest and is p
   assert.equal(retry.ok, true);
   assert.equal(objects.get("a.md"), "edited mid sync");
   assert.equal(objects.get("c.md"), "created mid sync");
+});
+
+test("syncOnce: a file edited mid sync is never overwritten by a pull, and the retry preserves it as a conflict copy", async () => {
+  // Reproduces #86. Both files are in sync locally and edited remotely, so the pass plans a pull
+  // for each. While a.md's pull is fetching, the user edits b.md; before the fix the pull planned
+  // for b.md then overwrote that edit with the remote version, silently discarding it. The pass
+  // must refuse that pull and fail instead, and because state.json never advances, the retry sees
+  // b.md changed on both sides and preserves the edit as a conflict copy.
+  const ancestor = snapshot(
+    { path: "a.md", size: 4, mtime: 1, hash: await hashOf("a v1") },
+    { path: "b.md", size: 4, mtime: 1, hash: await hashOf("b v1") },
+  );
+  const remoteManifest = JSON.stringify(
+    snapshot(file("a.md", await hashOf("a v2")), file("b.md", await hashOf("b v2"))),
+  );
+  const { storage, objects } = fakeStorage({
+    [MANIFEST_KEY]: remoteManifest,
+    "a.md": "a v2",
+    "b.md": "b v2",
+  });
+  const readerFiles: Record<string, string> = { "a.md": "a v1", "b.md": "b v1" };
+  const reader = fakeReader(readerFiles);
+  const { writer, files } = fakeLocalWriter();
+  files.set("a.md", "a v1");
+  files.set("b.md", "b v1");
+  const inner = storage.getObject;
+  let edited = false;
+  storage.getObject = async (key) => {
+    if (key === "a.md" && !edited) {
+      edited = true;
+      readerFiles["b.md"] = "edited mid sync";
+      files.set("b.md", "edited mid sync");
+    }
+    return inner(key);
+  };
+  const now = Date.parse("2026-07-14T10:00:00.000Z");
+
+  const outcome = await syncOnce(ancestor, reader, writer, storage, now);
+
+  assert.equal(outcome.ok, false);
+  // The edit survived, a.md's pull still landed, and no manifest was uploaded.
+  assert.equal(files.get("b.md"), "edited mid sync");
+  assert.equal(files.get("a.md"), "a v2");
+  assert.equal(objects.get(MANIFEST_KEY), remoteManifest);
+
+  // The retry diffs against the same ancestor: b.md changed locally and remotely, a genuine
+  // conflict, so the edit is renamed to a conflict copy, pushed, and the remote version pulled.
+  const retry = await syncOnce(ancestor, reader, writer, storage, now);
+
+  assert.equal(retry.ok, true);
+  const copyPath = conflictCopyPath("b.md", now);
+  assert.equal(files.get(copyPath), "edited mid sync");
+  assert.equal(objects.get(copyPath), "edited mid sync");
+  assert.equal(files.get("b.md"), "b v2");
 });
 
 test("syncOnce: two first syncs racing for an empty bucket, the loser fails instead of clobbering", async () => {
