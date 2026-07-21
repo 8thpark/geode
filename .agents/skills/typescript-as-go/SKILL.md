@@ -6,7 +6,7 @@ compatibility: Designed for Claude Code (or similar products)
 metadata:
   author: revett
   repo: https://github.com/revett/typescript-as-go
-  version: 0.4.0
+  version: 0.5.1
 ---
 
 # TypeScript As Go
@@ -20,7 +20,7 @@ to read and review, not clever to write. No magic.
 ## Rules
 
 As an agent working in this project, you must follow the following allowed and banned rules when
-writing Typescript.
+writing Typescript, as well as the strict file layout rules.
 
 ### Allowed
 
@@ -99,3 +99,26 @@ writing Typescript.
 15. No chained array pipelines (`.filter().map()`, `.map().filter()`) and no `.reduce`; Go has no
     map or filter, so write an explicit `for...of` that guards with `continue` and pushes into a
     result, one readable loop over a pipeline (a single `.map` on an already clean list is fine)
+
+### File Layout
+
+Every file declares its symbols in the same order, so a reader always knows where to look and a diff
+never argues about placement. Sort by kind first, then by export status within a kind, then
+alphabetically (case insensitive) within that:
+
+1. Imports, ordered by the formatter
+2. Exported constants, A-Z
+3. Constants, A-Z
+4. Exported types, A-Z
+5. Types, A-Z
+6. Exported functions, A-Z
+7. Functions, A-Z
+8. The framework class shell and its default export, last, since it is glue rather than logic
+
+Notes:
+
+- Alphabetical is mechanical on purpose; there is no judgement call to make and no debate to have
+- A `DEFAULT_X` constant will therefore sit above the type it is annotated with; this is fine,
+  types hoist, and predictable placement is worth more than local reading order
+- Test files are exempt and never resorted to match their source, reading instead as a narrative
+  that groups cases by the symbol under test from central to peripheral, happy path first

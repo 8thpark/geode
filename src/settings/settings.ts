@@ -1,3 +1,16 @@
+// DEFAULT_SETTINGS is the complete zero value used before any user configuration is loaded.
+export const DEFAULT_SETTINGS: GeodeSettings = {
+  version: 1,
+  provider: "r2",
+  accountId: "",
+  endpoint: "",
+  region: "",
+  bucket: "",
+  accessKeyId: "",
+  secretId: "",
+  ignorePatterns: [],
+};
+
 // GeodeSettings is the persisted shape of a Geode plugin's user configuration.
 export type GeodeSettings = {
   version: number;
@@ -17,41 +30,40 @@ export type GeodeSettings = {
   ignorePatterns: string[];
 };
 
-// DEFAULT_SETTINGS is the complete zero value used before any user configuration is loaded.
-export const DEFAULT_SETTINGS: GeodeSettings = {
-  version: 1,
-  provider: "r2",
-  accountId: "",
-  endpoint: "",
-  region: "",
-  bucket: "",
-  accessKeyId: "",
-  secretId: "",
-  ignorePatterns: [],
-};
-
-// stringOr returns v if it is a string, otherwise fallback.
-function stringOr(v: unknown, fallback: string): string {
-  if (typeof v === "string") {
-    return v;
+// draftForDisplay returns the draft a settings tab should show for a given render.
+// When auto is true (Obsidian is opening the tab), the draft is re-seeded from saved
+// settings so an external data.json update cannot leave a stale draft and phantom
+// "Unsaved changes". When auto is false (an internal re-render such as a provider
+// switch), the in-progress draft is kept.
+export function draftForDisplay(
+  auto: boolean,
+  currentDraft: GeodeSettings,
+  savedSettings: GeodeSettings,
+): GeodeSettings {
+  if (auto) {
+    return { ...savedSettings };
   }
-  return fallback;
+  return currentDraft;
 }
 
-// stringArrayOr returns v if it is a string array, otherwise fallback.
-function stringArrayOr(v: unknown, fallback: string[]): string[] {
-  if (Array.isArray(v) && v.every((item) => typeof item === "string")) {
-    return v;
+// endpointFor returns the storage endpoint URL to use for the given settings.
+export function endpointFor(settings: GeodeSettings): string {
+  if (settings.provider === "r2") {
+    return `https://${settings.accountId}.r2.cloudflarestorage.com`;
   }
-  return fallback;
+
+  return settings.endpoint;
 }
 
-// providerOr returns "custom" if v is "custom", otherwise "r2".
-export function providerOr(v: unknown): "r2" | "custom" {
-  if (v === "custom") {
-    return "custom";
+// hasConnectionConfig reports whether settings have enough filled in to attempt a connection.
+export function hasConnectionConfig(settings: GeodeSettings): boolean {
+  if (settings.bucket === "" || settings.accessKeyId === "" || settings.secretId === "") {
+    return false;
   }
-  return "r2";
+  if (settings.provider === "r2") {
+    return settings.accountId !== "";
+  }
+  return settings.endpoint !== "" && settings.region !== "";
 }
 
 // normalizeSettings returns a complete GeodeSettings from whatever loadData produced,
@@ -76,13 +88,12 @@ export function normalizeSettings(raw: unknown): GeodeSettings {
   };
 }
 
-// endpointFor returns the storage endpoint URL to use for the given settings.
-export function endpointFor(settings: GeodeSettings): string {
-  if (settings.provider === "r2") {
-    return `https://${settings.accountId}.r2.cloudflarestorage.com`;
+// providerOr returns "custom" if v is "custom", otherwise "r2".
+export function providerOr(v: unknown): "r2" | "custom" {
+  if (v === "custom") {
+    return "custom";
   }
-
-  return settings.endpoint;
+  return "r2";
 }
 
 // regionFor returns the signing region to use for the given settings. R2 always signs with
@@ -124,29 +135,18 @@ export function settingsEqual(a: GeodeSettings, b: GeodeSettings): boolean {
   );
 }
 
-// hasConnectionConfig reports whether settings have enough filled in to attempt a connection.
-export function hasConnectionConfig(settings: GeodeSettings): boolean {
-  if (settings.bucket === "" || settings.accessKeyId === "" || settings.secretId === "") {
-    return false;
+// stringOr returns v if it is a string, otherwise fallback.
+function stringOr(v: unknown, fallback: string): string {
+  if (typeof v === "string") {
+    return v;
   }
-  if (settings.provider === "r2") {
-    return settings.accountId !== "";
-  }
-  return settings.endpoint !== "" && settings.region !== "";
+  return fallback;
 }
 
-// draftForDisplay returns the draft a settings tab should show for a given render.
-// When auto is true (Obsidian is opening the tab), the draft is re-seeded from saved
-// settings so an external data.json update cannot leave a stale draft and phantom
-// "Unsaved changes". When auto is false (an internal re-render such as a provider
-// switch), the in-progress draft is kept.
-export function draftForDisplay(
-  auto: boolean,
-  currentDraft: GeodeSettings,
-  savedSettings: GeodeSettings,
-): GeodeSettings {
-  if (auto) {
-    return { ...savedSettings };
+// stringArrayOr returns v if it is a string array, otherwise fallback.
+function stringArrayOr(v: unknown, fallback: string[]): string[] {
+  if (Array.isArray(v) && v.every((item) => typeof item === "string")) {
+    return v;
   }
-  return currentDraft;
+  return fallback;
 }

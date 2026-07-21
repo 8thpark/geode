@@ -3,19 +3,28 @@ import { shouldIgnore } from "../ignore.ts";
 import type { LocalWriter } from "../sync/execute.ts";
 import { type FileInfo, isSnapshot, type Reader, type Snapshot, type Store } from "./vault.ts";
 
-// ensureParentDir creates path's parent folder, and any folders above it, before a write that
-// might land somewhere the vault has never had a file before. mkdir is assumed to create
-// intermediate folders the same way Obsidian's own folder creation does.
-async function ensureParentDir(adapter: DataAdapter, path: string): Promise<void> {
-  const lastSlash = path.lastIndexOf("/");
-  if (lastSlash === -1) {
-    return;
-  }
-  const dir = path.slice(0, lastSlash);
-  const exists = await adapter.exists(dir);
-  if (!exists) {
-    await adapter.mkdir(dir);
-  }
+// createObsidianLocalWriter returns a LocalWriter that applies pulled remote changes straight
+// through the low level data adapter, rather than the Vault API, since a path pulled down for
+// the first time has no TFile yet for Vault.modifyBinary/rename to operate on.
+export function createObsidianLocalWriter(adapter: DataAdapter): LocalWriter {
+  return {
+    writeFile: async (path, data) => {
+      await ensureParentDir(adapter, path);
+      const buffer = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+      await adapter.writeBinary(path, buffer as ArrayBuffer);
+    },
+    deleteFile: async (path) => {
+      const exists = await adapter.exists(path);
+      if (!exists) {
+        return;
+      }
+      await adapter.remove(path);
+    },
+    renameFile: async (path, newPath) => {
+      await ensureParentDir(adapter, newPath);
+      await adapter.rename(path, newPath);
+    },
+  };
 }
 
 // createObsidianReader returns a Reader backed by the real vault's file tree. Obsidian
@@ -75,26 +84,17 @@ export function createObsidianStore(adapter: DataAdapter, statePath: string): St
   };
 }
 
-// createObsidianLocalWriter returns a LocalWriter that applies pulled remote changes straight
-// through the low level data adapter, rather than the Vault API, since a path pulled down for
-// the first time has no TFile yet for Vault.modifyBinary/rename to operate on.
-export function createObsidianLocalWriter(adapter: DataAdapter): LocalWriter {
-  return {
-    writeFile: async (path, data) => {
-      await ensureParentDir(adapter, path);
-      const buffer = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
-      await adapter.writeBinary(path, buffer as ArrayBuffer);
-    },
-    deleteFile: async (path) => {
-      const exists = await adapter.exists(path);
-      if (!exists) {
-        return;
-      }
-      await adapter.remove(path);
-    },
-    renameFile: async (path, newPath) => {
-      await ensureParentDir(adapter, newPath);
-      await adapter.rename(path, newPath);
-    },
-  };
+// ensureParentDir creates path's parent folder, and any folders above it, before a write that
+// might land somewhere the vault has never had a file before. mkdir is assumed to create
+// intermediate folders the same way Obsidian's own folder creation does.
+async function ensureParentDir(adapter: DataAdapter, path: string): Promise<void> {
+  const lastSlash = path.lastIndexOf("/");
+  if (lastSlash === -1) {
+    return;
+  }
+  const dir = path.slice(0, lastSlash);
+  const exists = await adapter.exists(dir);
+  if (!exists) {
+    await adapter.mkdir(dir);
+  }
 }

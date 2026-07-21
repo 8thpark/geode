@@ -8,15 +8,37 @@ export type ListPage = {
   nextContinuationToken: string | undefined;
 };
 
-// fieldFrom returns the text content of the first <tag>...</tag> found in an XML fragment, or
-// "" if it isn't present.
-function fieldFrom(block: string, tag: string): string {
-  const pattern = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`);
-  const found = pattern.exec(block);
-  if (found === null) {
-    return "";
+// parseListObjectsXml extracts object keys, sizes, and last-modified timestamps from an S3
+// ListObjectsV2 XML response, along with the continuation token when the listing is truncated.
+// Regex rather than a DOM parser: the schema is narrow and stable, and DOMParser isn't available
+// outside a browser-like runtime, which would make this untestable under node:test.
+export function parseListObjectsXml(xml: string): ListPage {
+  const objects: ObjectMeta[] = [];
+  const contentsPattern = /<Contents>([\s\S]*?)<\/Contents>/g;
+  let match = contentsPattern.exec(xml);
+
+  while (match !== null) {
+    const block = match[1];
+    objects.push({
+      key: decodeXmlText(fieldFrom(block, "Key")),
+      size: Number(fieldFrom(block, "Size")),
+      lastModified: fieldFrom(block, "LastModified"),
+    });
+    match = contentsPattern.exec(xml);
   }
-  return found[1];
+
+  // A token is only meaningful when IsTruncated is true. Guarding on both avoids looping forever
+  // if a provider echoes a stale token on the final page.
+  const truncated = fieldFrom(xml, "IsTruncated") === "true";
+  const token = decodeXmlText(fieldFrom(xml, "NextContinuationToken"));
+  let nextContinuationToken: string | undefined;
+  if (truncated && token !== "") {
+    nextContinuationToken = token;
+  }
+  return {
+    objects,
+    nextContinuationToken,
+  };
 }
 
 // decodeXmlText returns the plain text represented by XML character and entity references.
@@ -57,35 +79,13 @@ function decodeXmlText(text: string): string {
   );
 }
 
-// parseListObjectsXml extracts object keys, sizes, and last-modified timestamps from an S3
-// ListObjectsV2 XML response, along with the continuation token when the listing is truncated.
-// Regex rather than a DOM parser: the schema is narrow and stable, and DOMParser isn't available
-// outside a browser-like runtime, which would make this untestable under node:test.
-export function parseListObjectsXml(xml: string): ListPage {
-  const objects: ObjectMeta[] = [];
-  const contentsPattern = /<Contents>([\s\S]*?)<\/Contents>/g;
-  let match = contentsPattern.exec(xml);
-
-  while (match !== null) {
-    const block = match[1];
-    objects.push({
-      key: decodeXmlText(fieldFrom(block, "Key")),
-      size: Number(fieldFrom(block, "Size")),
-      lastModified: fieldFrom(block, "LastModified"),
-    });
-    match = contentsPattern.exec(xml);
+// fieldFrom returns the text content of the first <tag>...</tag> found in an XML fragment, or
+// "" if it isn't present.
+function fieldFrom(block: string, tag: string): string {
+  const pattern = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`);
+  const found = pattern.exec(block);
+  if (found === null) {
+    return "";
   }
-
-  // A token is only meaningful when IsTruncated is true. Guarding on both avoids looping forever
-  // if a provider echoes a stale token on the final page.
-  const truncated = fieldFrom(xml, "IsTruncated") === "true";
-  const token = decodeXmlText(fieldFrom(xml, "NextContinuationToken"));
-  let nextContinuationToken: string | undefined;
-  if (truncated && token !== "") {
-    nextContinuationToken = token;
-  }
-  return {
-    objects,
-    nextContinuationToken,
-  };
+  return found[1];
 }

@@ -8,14 +8,6 @@ export const LOG_VIEW_TYPE = "geode-log-view";
 // pane is sitting open still show up without a manual refresh.
 const POLL_INTERVAL_MS = 2000;
 
-// renderRow draws one entry into list, colour coded by level via a geode-log-row.is-<level> class.
-function renderRow(list: HTMLElement, entry: LogEntry): void {
-  const row = list.createDiv({ cls: `geode-log-row is-${entry.level}` });
-  row.createSpan({ cls: "geode-log-time", text: new Date(entry.time).toLocaleString() });
-  row.createSpan({ cls: "geode-log-level", text: entry.level.toUpperCase() });
-  row.createSpan({ cls: "geode-log-message", text: entry.message });
-}
-
 // renderLogView draws entries into containerEl, most recent first.
 function renderLogView(containerEl: HTMLElement, entries: LogEntry[]): void {
   containerEl.empty();
@@ -30,6 +22,14 @@ function renderLogView(containerEl: HTMLElement, entries: LogEntry[]): void {
   for (const entry of [...entries].reverse()) {
     renderRow(list, entry);
   }
+}
+
+// renderRow draws one entry into list, colour coded by level via a geode-log-row.is-<level> class.
+function renderRow(list: HTMLElement, entry: LogEntry): void {
+  const row = list.createDiv({ cls: `geode-log-row is-${entry.level}` });
+  row.createSpan({ cls: "geode-log-time", text: new Date(entry.time).toLocaleString() });
+  row.createSpan({ cls: "geode-log-level", text: entry.level.toUpperCase() });
+  row.createSpan({ cls: "geode-log-message", text: entry.message });
 }
 
 // GeodeLogView renders geode's persisted log as a plain, most recent first list. Read only: it
