@@ -164,6 +164,32 @@ test("executeSyncPlan: pullDelete of a file edited after the snapshot is refused
   assert.equal(files.get("a.md"), "edited after snapshot");
 });
 
+test("executeSyncPlan: pullDelete of a file that exists but cannot be read is refused, never treated as absent", async () => {
+  // A read failing on a file that is still present (a permission error, say) must not read as
+  // "nothing to discard": the delete could succeed against content the drift check never
+  // verified. The action must fail with the read's own error and leave the file alone.
+  const reader = fakeReader({ "a.md": "hello" });
+  reader.readFile = async () => {
+    throw new Error("EACCES: permission denied");
+  };
+  const { writer, files } = fakeLocalWriter();
+  files.set("a.md", "hello");
+  const local = snapshot(file("a.md", await hashOf("hello")));
+  const { storage } = fakeStorage();
+
+  const failures = await executeSyncPlan(
+    [{ kind: "pullDelete", path: "a.md" }],
+    local,
+    reader,
+    writer,
+    storage,
+    1,
+  );
+
+  assert.deepEqual(failures, [{ path: "a.md", message: "EACCES: permission denied" }]);
+  assert.equal(files.get("a.md"), "hello");
+});
+
 test("executeSyncPlan: a conflict renames the local copy, pushes it to storage, and pulls the remote version clean", async () => {
   const reader = fakeReader({ "a.md": "local edit" });
   const { writer, files } = fakeLocalWriter();

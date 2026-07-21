@@ -36,6 +36,9 @@ export function fakeLocalWriter(): { writer: LocalWriter; files: Map<string, str
 // fakeReader returns a Reader backed by an in-memory map of path to content.
 export function fakeReader(files: Record<string, string>): Reader {
   return {
+    fileExists: async (path) => {
+      return files[path] !== undefined;
+    },
     listFiles: async () => {
       const list = [];
       for (const [path, content] of Object.entries(files)) {

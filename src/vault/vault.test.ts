@@ -17,6 +17,9 @@ function fakeReader(files: Record<string, { content: string; mtime: number }>): 
 } {
   let reads = 0;
   const reader: Reader = {
+    fileExists: async (path) => {
+      return files[path] !== undefined;
+    },
     listFiles: async () => {
       const list: FileInfo[] = [];
       for (const [path, file] of Object.entries(files)) {
@@ -116,6 +119,9 @@ test("takeSnapshot: concurrency is bounded by the limit", async () => {
   let inflight = 0;
   let peakInflight = 0;
   const reader: Reader = {
+    fileExists: async (path) => {
+      return files[path] !== undefined;
+    },
     listFiles: async () => {
       const list: FileInfo[] = [];
       for (const [path, file] of Object.entries(files)) {

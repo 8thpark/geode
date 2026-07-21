@@ -19,9 +19,11 @@ export type FileState = {
   hash: string;
 };
 
-// Reader lists files present in the vault right now and reads their bytes. The real
-// implementation wraps Obsidian's Vault API (see obsidian.ts); tests use an in-memory fake.
+// Reader lists files present in the vault right now, reads their bytes, and answers whether a
+// path currently exists, so a failed read on a present file is never mistaken for absence. The
+// real implementation wraps Obsidian's Vault API (see obsidian.ts); tests use an in-memory fake.
 export type Reader = {
+  fileExists: (path: string) => Promise<boolean>;
   listFiles: () => Promise<FileInfo[]>;
   readFile: (path: string) => Promise<Uint8Array>;
 };

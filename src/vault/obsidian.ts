@@ -31,6 +31,9 @@ export function createObsidianLocalWriter(adapter: DataAdapter): LocalWriter {
 // lives inside .obsidian/plugins/geode/) never shows up as a vault file to snapshot.
 export function createObsidianReader(vault: Vault): Reader {
   return {
+    fileExists: async (path) => {
+      return vault.getFileByPath(path) !== null;
+    },
     listFiles: async () => {
       const files: FileInfo[] = [];
       for (const file of vault.getFiles()) {
