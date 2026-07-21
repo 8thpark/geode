@@ -1,4 +1,4 @@
-import type { StorageClient } from "../storage/storage.ts";
+import type { PutCondition, StorageClient } from "../storage/storage.ts";
 import { isSnapshot, type Reader, type Snapshot, takeSnapshot } from "../vault/vault.ts";
 import { executeSyncPlan, type LocalWriter, type SyncFailure } from "./execute.ts";
 import { MANIFEST_KEY, planSync } from "./plan.ts";
@@ -20,9 +20,17 @@ export type SyncOutcome =
 // genuinely empty": syncOnce must ignore the local ancestor in the former (nothing has ever been
 // synced, so state.json cannot be a valid common ancestor) but trust it in the latter (an empty
 // remote that a prior sync really produced, where a local file absent from it was deleted).
+//
+// etag rides along with an existing manifest so syncOnce can make its manifest upload conditional
+// on the remote still being exactly this version, the guard against two devices syncing at
+// overlapping times (#83).
 export async function readRemoteManifest(
   storage: StorageClient,
-): Promise<{ ok: true; snapshot: Snapshot; firstSync: boolean } | { ok: false; message: string }> {
+): Promise<
+  | { ok: true; snapshot: Snapshot; firstSync: true }
+  | { ok: true; snapshot: Snapshot; firstSync: false; etag: string }
+  | { ok: false; message: string }
+> {
   const fetched = await storage.getObject(MANIFEST_KEY);
 
   if (fetched.ok && fetched.body !== null) {
@@ -35,7 +43,14 @@ export async function readRemoteManifest(
     if (!isSnapshot(parsed)) {
       return { ok: false, message: "remote manifest is corrupt" };
     }
-    return { ok: true, snapshot: parsed, firstSync: false };
+    // Every S3 compatible server returns an ETag on a successful read; without one (a stripping
+    // proxy, a broken provider) the manifest upload can't be made conditional, and uploading it
+    // unconditionally is exactly the concurrent clobber #83 fixed, so refuse rather than sync
+    // unsafely.
+    if (fetched.etag === null) {
+      return { ok: false, message: "remote manifest has no etag" };
+    }
+    return { ok: true, snapshot: parsed, firstSync: false, etag: fetched.etag };
   }
 
   // TODO(#41): GetResult conflates 404 with every other failure; swap this for a real status
@@ -88,8 +103,26 @@ export async function syncOnce(
   // conflict rename just applied.
   const final = await takeSnapshot(reader, local);
   const manifestBody = new TextEncoder().encode(JSON.stringify(final));
-  const uploaded = await storage.putObject(MANIFEST_KEY, manifestBody);
+
+  // The upload is conditional on the remote manifest still being exactly what this pass read at
+  // the start (or still absent, on a first sync). An unconditional put would last-writer-win
+  // against a device syncing at overlapping times, and the loser's pushes would then read as
+  // remote deletions on the winner's next sync: files silently deleted (#83). Losing the race
+  // fails this pass loudly instead; state.json doesn't advance, and the next sync re-reads the
+  // fresh manifest and reconciles both devices' work with nothing lost.
+  let condition: PutCondition = { kind: "ifAbsent" };
+  if (!remote.firstSync) {
+    condition = { kind: "ifMatch", etag: remote.etag };
+  }
+  const uploaded = await storage.putObject(MANIFEST_KEY, manifestBody, condition);
   if (!uploaded.ok) {
+    if (uploaded.status === "conflict") {
+      return {
+        ok: false,
+        message: "another device synced at the same time; sync again",
+        failures: [],
+      };
+    }
     return { ok: false, message: uploaded.message, failures: [] };
   }
 

@@ -38,6 +38,56 @@ test("putObject then getObject round trips the same bytes", async () => {
   assert.deepEqual(getResult.body, body);
 });
 
+test("getObject returns the object's etag for a later conditional put", async () => {
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
+  await client.putObject("etag-test/note.md", new TextEncoder().encode("v1"));
+
+  const getResult = await client.getObject("etag-test/note.md");
+  assert.equal(getResult.ok, true);
+  assert.notEqual(getResult.etag, null);
+});
+
+test("putObject ifAbsent creates a missing key but is rejected once the key exists", async () => {
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
+  const key = `conditional-test/absent-${Date.now()}.md`;
+
+  const first = await client.putObject(key, new TextEncoder().encode("v1"), { kind: "ifAbsent" });
+  assert.equal(first.ok, true);
+
+  const second = await client.putObject(key, new TextEncoder().encode("v2"), { kind: "ifAbsent" });
+  assert.equal(second.ok, false);
+  assert.equal(second.status, "conflict");
+
+  await client.deleteObject(key);
+});
+
+test("putObject ifMatch succeeds with the current etag and is rejected once it goes stale", async () => {
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
+  const key = "conditional-test/match.md";
+  await client.putObject(key, new TextEncoder().encode("v1"));
+
+  const getResult = await client.getObject(key);
+  assert.equal(getResult.ok, true);
+  assert.ok(getResult.etag !== null);
+  const etag = getResult.etag;
+
+  const fresh = await client.putObject(key, new TextEncoder().encode("v2 longer"), {
+    kind: "ifMatch",
+    etag,
+  });
+  assert.equal(fresh.ok, true);
+
+  // The etag read before the v2 write is now stale, exactly a concurrent writer's position.
+  const stale = await client.putObject(key, new TextEncoder().encode("v3"), {
+    kind: "ifMatch",
+    etag,
+  });
+  assert.equal(stale.ok, false);
+  assert.equal(stale.status, "conflict");
+
+  await client.deleteObject(key);
+});
+
 test("getObject on a missing key fails without a body", async () => {
   const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
   const result = await client.getObject("does/not/exist.md");

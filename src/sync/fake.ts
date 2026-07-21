@@ -53,14 +53,34 @@ export function fakeReader(files: Record<string, string>): Reader {
   };
 }
 
-// fakeStorage returns a StorageClient backed by an in-memory map of key to content.
+// fakeStorage returns a StorageClient backed by an in-memory map of key to content. Etags are
+// fake but real shaped: a quoted revision counter bumped on every write, so a conditional put
+// detects a concurrent writer exactly the way a real ETag would.
 export function fakeStorage(objects: Record<string, string> = {}): {
   storage: StorageClient;
   objects: Map<string, string>;
 } {
   const store = new Map<string, string>(Object.entries(objects));
+  let revision = 0;
+  const etags = new Map<string, string>();
+  for (const key of store.keys()) {
+    revision++;
+    etags.set(key, `"v${revision}"`);
+  }
   const storage: StorageClient = {
-    putObject: async (key, body): Promise<PutResult> => {
+    putObject: async (key, body, condition): Promise<PutResult> => {
+      if (condition !== undefined && condition.kind === "ifAbsent" && store.has(key)) {
+        return { ok: false, status: "conflict", message: "Storage rejected the write (412)" };
+      }
+      if (
+        condition !== undefined &&
+        condition.kind === "ifMatch" &&
+        etags.get(key) !== condition.etag
+      ) {
+        return { ok: false, status: "conflict", message: "Storage rejected the write (412)" };
+      }
+      revision++;
+      etags.set(key, `"v${revision}"`);
       store.set(key, new TextDecoder().decode(body));
       return { ok: true, status: "ok", message: "" };
     },
@@ -72,9 +92,21 @@ export function fakeStorage(objects: Record<string, string> = {}): {
           status: "not_found",
           message: "Storage rejected the read (404)",
           body: null,
+          etag: null,
         };
       }
-      return { ok: true, status: "ok", message: "", body: new TextEncoder().encode(content) };
+      let etag: string | null = null;
+      const stored = etags.get(key);
+      if (stored !== undefined) {
+        etag = stored;
+      }
+      return {
+        ok: true,
+        status: "ok",
+        message: "",
+        body: new TextEncoder().encode(content),
+        etag,
+      };
     },
     deleteObject: async (key): Promise<DeleteResult> => {
       store.delete(key);

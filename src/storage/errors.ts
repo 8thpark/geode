@@ -17,5 +17,8 @@ export function statusForHttp(code: number): ResultStatus {
   if (code === 403 || code === 401) {
     return "auth";
   }
+  if (code === 412) {
+    return "conflict";
+  }
   return "server";
 }

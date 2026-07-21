@@ -13,13 +13,28 @@ test("readRemoteManifest: a 404 is treated as an empty snapshot", async () => {
   assert.deepEqual(result, { ok: true, snapshot: { files: [] }, firstSync: true });
 });
 
-test("readRemoteManifest: valid JSON is parsed into a snapshot", async () => {
+test("readRemoteManifest: valid JSON is parsed into a snapshot, with the manifest's etag", async () => {
   const want: Snapshot = snapshot(file("a.md", "h1"));
   const { storage } = fakeStorage({ [MANIFEST_KEY]: JSON.stringify(want) });
 
   const result = await readRemoteManifest(storage);
 
-  assert.deepEqual(result, { ok: true, snapshot: want, firstSync: false });
+  assert.deepEqual(result, { ok: true, snapshot: want, firstSync: false, etag: '"v1"' });
+});
+
+test("readRemoteManifest: a manifest without an etag is refused, not synced unsafely", async () => {
+  // Without an etag the manifest upload can't be conditional, and an unconditional upload is the
+  // concurrent clobber #83 fixed; the pass must refuse rather than proceed.
+  const { storage } = fakeStorage({ [MANIFEST_KEY]: JSON.stringify(empty) });
+  const inner = storage.getObject;
+  storage.getObject = async (key) => {
+    const result = await inner(key);
+    return { ...result, etag: null };
+  };
+
+  const result = await readRemoteManifest(storage);
+
+  assert.deepEqual(result, { ok: false, message: "remote manifest has no etag" });
 });
 
 test("readRemoteManifest: corrupt JSON is reported as a failure, not an empty snapshot", async () => {
@@ -92,9 +107,84 @@ test("readRemoteManifest: a non 404 failure is reported, never guessed at as emp
     status: "server",
     message: "Storage rejected the read (500)",
     body: null,
+    etag: null,
   });
 
   const result = await readRemoteManifest(storage);
 
   assert.deepEqual(result, { ok: false, message: "Storage rejected the read (500)" });
+});
+
+test("syncOnce: a manifest overwritten by another device mid sync fails the pass instead of clobbering it", async () => {
+  // Reproduces #83. Device A (under test) and device B share a synced vault containing a.md, then
+  // sync at overlapping times: B's whole pass (pushing b.md and its manifest) lands while A is
+  // between reading the manifest and uploading its own. Before the fix A's unconditional upload
+  // clobbered B's manifest, so b.md read as a remote deletion on B's next sync and was silently
+  // deleted. A's conditional upload must instead lose the race and fail the pass.
+  const ancestor = snapshot(file("a.md", "h1"));
+  const { storage, objects } = fakeStorage({ [MANIFEST_KEY]: JSON.stringify(ancestor) });
+  const bManifest = JSON.stringify(snapshot(file("a.md", "h1"), file("b.md", "h2")));
+  const inner = storage.putObject;
+  let raced = false;
+  storage.putObject = async (key, body, condition) => {
+    if (key === MANIFEST_KEY && !raced) {
+      raced = true;
+      await inner("b.md", new TextEncoder().encode("bee"));
+      await inner(MANIFEST_KEY, new TextEncoder().encode(bManifest));
+    }
+    return inner(key, body, condition);
+  };
+  // a.md matches the ancestor's size and mtime so takeSnapshot reuses its hash and sees no local
+  // change there; c.md is A's new local file, so A has something to push and a manifest to upload.
+  const reader = fakeReader({ "a.md": "xy", "c.md": "ccc" });
+  const { writer, files } = fakeLocalWriter();
+  files.set("a.md", "xy");
+  files.set("c.md", "ccc");
+
+  const outcome = await syncOnce(ancestor, reader, writer, storage, 1);
+
+  assert.deepEqual(outcome, {
+    ok: false,
+    message: "another device synced at the same time; sync again",
+    failures: [],
+  });
+  // B's manifest survived; A's never landed.
+  assert.equal(objects.get(MANIFEST_KEY), bManifest);
+  // A's push still reached the bucket (harmless: the next pass folds it into the manifest).
+  assert.equal(objects.get("c.md"), "ccc");
+  // Nothing was touched locally.
+  assert.equal(files.get("a.md"), "xy");
+  assert.equal(files.get("c.md"), "ccc");
+
+  // The failed pass never advanced state.json, so A retries with the same ancestor, now against
+  // B's manifest: b.md is pulled, nothing is deleted, and the pass completes.
+  const retry = await syncOnce(ancestor, reader, writer, storage, 1);
+  assert.equal(retry.ok, true);
+  assert.equal(files.get("b.md"), "bee");
+  assert.equal(files.get("a.md"), "xy");
+});
+
+test("syncOnce: two first syncs racing for an empty bucket, the loser fails instead of clobbering", async () => {
+  // Both devices see no manifest and plan a first sync. The other device's manifest lands while
+  // this one is mid pass; the "ifAbsent" conditional upload must lose rather than overwrite it.
+  const { storage, objects } = fakeStorage();
+  const otherManifest = JSON.stringify(snapshot(file("b.md", "h2")));
+  const inner = storage.putObject;
+  let raced = false;
+  storage.putObject = async (key, body, condition) => {
+    if (key === MANIFEST_KEY && !raced) {
+      raced = true;
+      await inner(MANIFEST_KEY, new TextEncoder().encode(otherManifest));
+    }
+    return inner(key, body, condition);
+  };
+  const reader = fakeReader({ "a.md": "alpha" });
+  const { writer, files } = fakeLocalWriter();
+  files.set("a.md", "alpha");
+
+  const outcome = await syncOnce(empty, reader, writer, storage, 1);
+
+  assert.equal(outcome.ok, false);
+  assert.equal(objects.get(MANIFEST_KEY), otherManifest);
+  assert.equal(files.get("a.md"), "alpha");
 });
