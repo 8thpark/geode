@@ -173,6 +173,49 @@ test("syncOnce: a manifest overwritten by another device mid sync fails the pass
   assert.equal(files.get("a.md"), "xy");
 });
 
+test("syncOnce: retry adopts an identical orphaned upload without another file PUT", async () => {
+  const ancestor = snapshot({ path: "a.md", size: 4, mtime: 1, hash: await hashOf("base") });
+  const { storage, objects } = fakeStorage({
+    [MANIFEST_KEY]: JSON.stringify(ancestor),
+    "a.md": "base",
+  });
+  const inner = storage.putObject;
+  let filePuts = 0;
+  let raceManifest = true;
+  storage.putObject = async (key, body, condition) => {
+    if (key === "a.md") {
+      filePuts++;
+    }
+    if (key === MANIFEST_KEY && raceManifest) {
+      raceManifest = false;
+      await inner(MANIFEST_KEY, new TextEncoder().encode(JSON.stringify(ancestor)));
+    }
+    return inner(key, body, condition);
+  };
+  const reader = fakeReader({ "a.md": "ours!" });
+  const { writer } = fakeLocalWriter();
+
+  const first = await syncOnce(ancestor, reader, writer, storage, 1);
+
+  assert.deepEqual(first, {
+    ok: false,
+    message: "another device synced at the same time; sync again",
+    failures: [],
+    snapshot: null,
+  });
+  assert.equal(objects.get("a.md"), "ours!");
+  assert.equal(filePuts, 1);
+
+  const retry = await syncOnce(ancestor, reader, writer, storage, 1);
+
+  assert.equal(retry.ok, true);
+  assert.equal(filePuts, 1, "retry replaced an identical orphaned upload");
+  assert.deepEqual(JSON.parse(objects.get(MANIFEST_KEY) ?? ""), retry.snapshot);
+  assert.deepEqual(retry.snapshot, {
+    files: [{ path: "a.md", size: 5, mtime: 1, hash: await hashOf("ours!") }],
+  });
+});
+
 test("syncOnce: losing the manifest race cannot overwrite the winner's file", async () => {
   // Reproduces #110. Both passes plan an update to a.md from the same manifest. The winning pass
   // uploads its file and manifest just as the losing pass starts its file PUT. The file PUT must
@@ -203,7 +246,12 @@ test("syncOnce: losing the manifest race cannot overwrite the winner's file", as
 
   const outcome = await syncOnce(ancestor, reader, writer, storage, 1);
 
-  assert.equal(outcome.ok, false);
+  assert.deepEqual(outcome, {
+    ok: false,
+    message: "another device synced at the same time; sync again",
+    failures: [{ path: "a.md", message: "Storage rejected the write (412)" }],
+    snapshot: null,
+  });
   assert.equal(objects.get("a.md"), "winner", "losing pass overwrote winning file object");
   assert.equal(objects.get(MANIFEST_KEY), winnerManifest);
 });
