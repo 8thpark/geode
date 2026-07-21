@@ -173,6 +173,41 @@ test("syncOnce: a manifest overwritten by another device mid sync fails the pass
   assert.equal(files.get("a.md"), "xy");
 });
 
+test("syncOnce: a pass that loses the manifest race cannot overwrite the winner's file", async () => {
+  // Reproduces #110. Both passes plan an update to a.md from the same manifest. The winning pass
+  // uploads its file and manifest just as the losing pass starts its file PUT. The file PUT must
+  // be tied to the object version the loser planned from, so it fails instead of leaving bytes
+  // that disagree with the winning manifest.
+  const baseHash = await hashOf("base");
+  const winnerHash = await hashOf("winner");
+  const ancestor = snapshot({ path: "a.md", size: 4, mtime: 1, hash: baseHash });
+  const winnerManifest = JSON.stringify(
+    snapshot({ path: "a.md", size: 6, mtime: 1, hash: winnerHash }),
+  );
+  const { storage, objects } = fakeStorage({
+    [MANIFEST_KEY]: JSON.stringify(ancestor),
+    "a.md": "base",
+  });
+  const inner = storage.putObject;
+  let raced = false;
+  storage.putObject = async (key, body, condition) => {
+    if (key === "a.md" && !raced) {
+      raced = true;
+      await inner("a.md", new TextEncoder().encode("winner"));
+      await inner(MANIFEST_KEY, new TextEncoder().encode(winnerManifest));
+    }
+    return inner(key, body, condition);
+  };
+  const reader = fakeReader({ "a.md": "loser" });
+  const { writer } = fakeLocalWriter();
+
+  const outcome = await syncOnce(ancestor, reader, writer, storage, 1);
+
+  assert.equal(outcome.ok, false);
+  assert.equal(objects.get("a.md"), "winner", "losing pass overwrote winning file object");
+  assert.equal(objects.get(MANIFEST_KEY), winnerManifest);
+});
+
 test("syncOnce: a file changed mid sync is not recorded in the manifest and is pushed next pass", async () => {
   // Reproduces #84. The vault is in sync (a.md, unchanged), and b.md is new locally, so the pass
   // pushes b.md. While that push is in flight the user edits a.md and creates c.md. Before the
@@ -181,8 +216,11 @@ test("syncOnce: a file changed mid sync is not recorded in the manifest and is p
   // with the manifest), and another device could push the stale bucket copy of a.md back over the
   // edit. The manifest must instead keep claiming only what the bucket holds, leaving both files
   // as local changes for the next pass to push.
-  const ancestor = snapshot(file("a.md", "h1"));
-  const { storage, objects } = fakeStorage({ [MANIFEST_KEY]: JSON.stringify(ancestor) });
+  const ancestor = snapshot({ path: "a.md", size: 2, mtime: 1, hash: await hashOf("xy") });
+  const { storage, objects } = fakeStorage({
+    [MANIFEST_KEY]: JSON.stringify(ancestor),
+    "a.md": "xy",
+  });
   // a.md matches the ancestor's size and mtime so takeSnapshot reuses its hash and sees no local
   // change there; b.md is the new local file whose push is the mid sync moment to interleave on.
   const readerFiles: Record<string, string> = { "a.md": "xy", "b.md": "beta" };
@@ -211,7 +249,7 @@ test("syncOnce: a file changed mid sync is not recorded in the manifest and is p
   assert.deepEqual(paths.sort(), ["a.md", "b.md"]);
   assert.deepEqual(
     manifest.files.filter((f) => f.path === "a.md"),
-    [file("a.md", "h1")],
+    ancestor.files,
   );
   assert.equal(objects.has("c.md"), false);
 
