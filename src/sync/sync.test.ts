@@ -173,7 +173,7 @@ test("syncOnce: a manifest overwritten by another device mid sync fails the pass
   assert.equal(files.get("a.md"), "xy");
 });
 
-test("syncOnce: a pass that loses the manifest race cannot overwrite the winner's file", async () => {
+test("syncOnce: losing the manifest race cannot overwrite the winner's file", async () => {
   // Reproduces #110. Both passes plan an update to a.md from the same manifest. The winning pass
   // uploads its file and manifest just as the losing pass starts its file PUT. The file PUT must
   // be tied to the object version the loser planned from, so it fails instead of leaving bytes
