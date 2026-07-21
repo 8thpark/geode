@@ -8,14 +8,18 @@ import {
   takeSnapshot,
 } from "../vault/vault.ts";
 import { executeSyncPlan, type LocalWriter, type SyncFailure } from "./execute.ts";
-import { MANIFEST_KEY, manifestAfterSync, planSync } from "./plan.ts";
+import { MANIFEST_KEY, manifestAfterSync, planSync, type SyncAction } from "./plan.ts";
 
 // SyncOutcome is the result of a single sync pass. On success it carries the new snapshot to
 // persist as the next sync's starting point and how many actions were applied; on failure it
-// carries a short user facing message and any per file failures for logging.
+// carries a short user facing message and any per file failures for logging. A failure outcome
+// still carries a snapshot when the pass made progress worth persisting (#87): completed actions
+// are recorded so they are never re-planned, while each failed action's path stays at the
+// ancestor's view and is re-planned next pass. snapshot is null when nothing advanced (the
+// manifest never uploaded, or never got that far).
 export type SyncOutcome =
   | { ok: true; snapshot: Snapshot; changeCount: number }
-  | { ok: false; message: string; failures: SyncFailure[] };
+  | { ok: false; message: string; failures: SyncFailure[]; snapshot: Snapshot | null };
 
 // adoptLiveStats returns manifest with each entry swapped for the live vault's entry at the same
 // path wherever the content hashes match, so state.json carries local size and mtime and the next
@@ -89,6 +93,32 @@ export async function readRemoteManifest(
   return { ok: false, message: fetched.message };
 }
 
+// revertFailedPaths returns snapshot with every failed action's path restored to the ancestor's
+// view of it, so state.json never advances past an action that didn't complete: those paths diff
+// against the same ancestor next pass and are re-planned, while every completed path keeps its
+// new entry. Reverting is what makes recording progress around a failed pull safe — advancing
+// that path to the manifest's entry would make the unchanged local content read as a fresh local
+// edit, and the next pass would push it over the newer remote version. Exported for its tests;
+// syncOnce is the only production caller.
+export function revertFailedPaths(
+  snapshot: Snapshot,
+  ancestor: Snapshot,
+  failed: SyncAction[],
+): Snapshot {
+  const files = byPath(snapshot.files);
+  const ancestorByPath = byPath(ancestor.files);
+  for (const action of failed) {
+    const entry = ancestorByPath.get(action.path);
+    if (entry === undefined) {
+      files.delete(action.path);
+      continue;
+    }
+    files.set(action.path, entry);
+  }
+
+  return { files: [...files.values()] };
+}
+
 // syncOnce runs one full sync pass over the injected local vault (reader/localWriter) and remote
 // bucket (storage): it snapshots the local vault against previous (the last synced snapshot),
 // reads the remote manifest, plans and executes the reconciliation, then uploads a manifest
@@ -105,7 +135,7 @@ export async function syncOnce(
 ): Promise<SyncOutcome> {
   const remote = await readRemoteManifest(storage);
   if (!remote.ok) {
-    return { ok: false, message: remote.message, failures: [] };
+    return { ok: false, message: remote.message, failures: [], snapshot: null };
   }
 
   // No remote manifest means no prior sync ever completed against this bucket, so previous (the
@@ -121,18 +151,18 @@ export async function syncOnce(
   const local = await takeSnapshot(reader, ancestor);
 
   const actions = planSync(ancestor, local, remote.snapshot);
-  const failures = await executeSyncPlan(actions, local, reader, localWriter, storage, now);
-  if (failures.length > 0) {
-    return { ok: false, message: `${failures.length} file(s) failed to sync`, failures };
-  }
+  const executed = await executeSyncPlan(actions, local, reader, localWriter, storage, now);
 
   // The manifest is derived from what the plan just did to the bucket, never from a fresh disk
   // snapshot: a file edited while the plan ran would land in a re-snapshot claiming content the
   // bucket never received, the edit would then never upload (state.json already agrees with the
   // manifest), and another device could later push the stale bucket copy back over it (#84). The
   // re-snapshot here only refreshes stats, so a mid sync edit keeps its bucket entry and reads as
-  // a local change on the next pass.
-  const manifest = manifestAfterSync(local, remote.snapshot, actions, now);
+  // a local change on the next pass. Only completed actions feed in, so a failed action's path
+  // keeps the entry the bucket really holds; the manifest is uploaded even when some actions
+  // failed, so one bad file never leaves the rest of the pass's pushes invisible to every other
+  // device (#87).
+  const manifest = manifestAfterSync(local, remote.snapshot, executed.completed, now);
   const final = adoptLiveStats(manifest, await takeSnapshot(reader, local));
   const manifestBody = new TextEncoder().encode(JSON.stringify(final));
 
@@ -152,10 +182,20 @@ export async function syncOnce(
       return {
         ok: false,
         message: "another device synced at the same time; sync again",
-        failures: [],
+        failures: executed.failures,
+        snapshot: null,
       };
     }
-    return { ok: false, message: uploaded.message, failures: [] };
+    return { ok: false, message: uploaded.message, failures: executed.failures, snapshot: null };
+  }
+
+  if (executed.failures.length > 0) {
+    return {
+      ok: false,
+      message: `${executed.failures.length} file(s) failed to sync`,
+      failures: executed.failures,
+      snapshot: revertFailedPaths(final, ancestor, executed.failed),
+    };
   }
 
   return { ok: true, snapshot: final, changeCount: actions.length };

@@ -81,13 +81,19 @@ async function deleteLocal(d: Device, path: string): Promise<void> {
 }
 
 // sync runs one pass for a device, mirroring the plugin's runSync spine: read previous state, run
-// syncOnce, persist the new snapshot on success.
+// syncOnce, persist the new snapshot whenever one comes back (a full success, or a failed pass
+// that still made progress).
 async function sync(d: Device, now = Date.now()): Promise<SyncOutcome> {
   const previous = await d.stateStore.read();
   const outcome = await syncOnce(previous, d.reader, d.writer, storage, now);
   if (outcome.ok) {
     await d.stateStore.write(outcome.snapshot);
+    return outcome;
   }
+  if (outcome.snapshot !== null) {
+    await d.stateStore.write(outcome.snapshot);
+  }
+
   return outcome;
 }
 

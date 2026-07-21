@@ -208,6 +208,11 @@ export default class GeodePlugin extends Plugin {
     const previous = await stateStore.read();
     const outcome = await syncOnce(previous, reader, localWriter, storage, Date.now());
     if (!outcome.ok) {
+      // A failed pass can still have made progress worth keeping (#87): the snapshot records what
+      // completed so it is never re-planned, while each failed file stays pending for next pass.
+      if (outcome.snapshot !== null) {
+        await stateStore.write(outcome.snapshot);
+      }
       for (const failure of outcome.failures) {
         this.logger.error(`sync: ${failure.path}: ${failure.message}`);
       }

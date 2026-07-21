@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { hashBytes, type Snapshot } from "../vault/vault.ts";
+import type { LocalWriter } from "./execute.ts";
 import { empty, fakeLocalWriter, fakeReader, fakeStorage, file, snapshot } from "./fake.ts";
 import { conflictCopyPath, MANIFEST_KEY } from "./plan.ts";
-import { adoptLiveStats, readRemoteManifest, syncOnce } from "./sync.ts";
+import { adoptLiveStats, readRemoteManifest, revertFailedPaths, syncOnce } from "./sync.ts";
 
 // hashOf returns the real content hash of text, for snapshots whose entries executeSyncPlan's
 // drift check will verify against live bytes.
@@ -154,6 +155,7 @@ test("syncOnce: a manifest overwritten by another device mid sync fails the pass
     ok: false,
     message: "another device synced at the same time; sync again",
     failures: [],
+    snapshot: null,
   });
   // B's manifest survived; A's never landed.
   assert.equal(objects.get(MANIFEST_KEY), bManifest);
@@ -243,6 +245,13 @@ test("syncOnce: a file edited mid sync is never overwritten by a pull, and the r
   const { writer, files } = fakeLocalWriter();
   files.set("a.md", "a v1");
   files.set("b.md", "b v1");
+  // Mirror pulls into the reader, as writing to a real vault would: the retry below re-snapshots
+  // through the reader and must see what the first pass's completed pull actually left on disk.
+  const innerWrite = writer.writeFile;
+  writer.writeFile = async (path, data) => {
+    await innerWrite(path, data);
+    readerFiles[path] = new TextDecoder().decode(data);
+  };
   const inner = storage.getObject;
   let edited = false;
   storage.getObject = async (key) => {
@@ -257,21 +266,154 @@ test("syncOnce: a file edited mid sync is never overwritten by a pull, and the r
 
   const outcome = await syncOnce(ancestor, reader, writer, storage, now);
 
-  assert.equal(outcome.ok, false);
-  // The edit survived, a.md's pull still landed, and no manifest was uploaded.
+  assert.ok(!outcome.ok);
+  // The edit survived and a.md's pull still landed.
   assert.equal(files.get("b.md"), "edited mid sync");
   assert.equal(files.get("a.md"), "a v2");
-  assert.equal(objects.get(MANIFEST_KEY), remoteManifest);
+  // A manifest was still uploaded (#87), and it records exactly what the bucket really holds:
+  // both remote versions, untouched by this pass's pulls.
+  const manifestBody = objects.get(MANIFEST_KEY);
+  assert.ok(manifestBody !== undefined);
+  const manifest = JSON.parse(manifestBody) as Snapshot;
+  const hashes = new Map(manifest.files.map((f) => [f.path, f.hash]));
+  assert.equal(hashes.get("a.md"), await hashOf("a v2"));
+  assert.equal(hashes.get("b.md"), await hashOf("b v2"));
 
-  // The retry diffs against the same ancestor: b.md changed locally and remotely, a genuine
-  // conflict, so the edit is renamed to a conflict copy, pushed, and the remote version pulled.
-  const retry = await syncOnce(ancestor, reader, writer, storage, now);
+  // The pass still returned a snapshot recording its progress, with b.md held at the ancestor's
+  // view. The retry diffs b.md against that same ancestor: changed locally and remotely, a
+  // genuine conflict, so the edit is renamed to a conflict copy, pushed, and the remote version
+  // pulled.
+  assert.ok(outcome.snapshot !== null);
+  const retry = await syncOnce(outcome.snapshot, reader, writer, storage, now);
 
   assert.equal(retry.ok, true);
   const copyPath = conflictCopyPath("b.md", now);
   assert.equal(files.get(copyPath), "edited mid sync");
   assert.equal(objects.get(copyPath), "edited mid sync");
   assert.equal(files.get("b.md"), "b v2");
+});
+
+test("syncOnce: a failed push doesn't discard the progress of the rest of the pass", async () => {
+  // Reproduces #87. Two new local files; a.md's push is rejected by the provider, b.md's lands.
+  // Before the fix the pass bailed without uploading a manifest or returning a snapshot: b.md sat
+  // in the bucket invisible to every other device, all completed work was re-planned from scratch
+  // next time, and a file that fails permanently wedged sync forever. The pass must instead
+  // record b.md's progress in both the manifest and the returned snapshot, leaving only a.md
+  // pending.
+  const reader = fakeReader({ "a.md": "alpha", "b.md": "world" });
+  const { writer } = fakeLocalWriter();
+  const { storage, objects } = fakeStorage();
+  const inner = storage.putObject;
+  let rejectA = true;
+  let bPushes = 0;
+  storage.putObject = async (key, body, condition) => {
+    if (key === "a.md" && rejectA) {
+      return { ok: false, status: "server", message: "Storage rejected the write (500)" };
+    }
+    if (key === "b.md") {
+      bPushes++;
+    }
+    return inner(key, body, condition);
+  };
+
+  const outcome = await syncOnce(empty, reader, writer, storage, 1);
+
+  assert.ok(!outcome.ok);
+  assert.deepEqual(outcome.failures, [
+    { path: "a.md", message: "Storage rejected the write (500)" },
+  ]);
+  // b.md's push landed and the manifest records it, so other devices can already see it; a.md
+  // never reached the bucket and the manifest doesn't claim it.
+  assert.equal(objects.get("b.md"), "world");
+  const manifestBody = objects.get(MANIFEST_KEY);
+  assert.ok(manifestBody !== undefined);
+  const manifest = JSON.parse(manifestBody) as Snapshot;
+  assert.deepEqual(
+    manifest.files.map((f) => f.path),
+    ["b.md"],
+  );
+  // The snapshot records the same progress: b.md done, a.md still absent so it re-plans as a
+  // push.
+  assert.ok(outcome.snapshot !== null);
+  assert.deepEqual(
+    outcome.snapshot.files.map((f) => f.path),
+    ["b.md"],
+  );
+
+  // Once the provider accepts a.md, the retry pushes only it; b.md's completed work is never
+  // re-done.
+  rejectA = false;
+  const retry = await syncOnce(outcome.snapshot, reader, writer, storage, 1);
+
+  assert.equal(retry.ok, true);
+  assert.equal(objects.get("a.md"), "alpha");
+  assert.equal(bPushes, 1);
+});
+
+test("syncOnce: a failed pull records progress without the ancestor ever advancing past it", async () => {
+  // The other half of #87, and the reason a failed action's path must revert to the ancestor's
+  // view: a.md was edited remotely and its pull fails (a locked file, say), while b.md is new
+  // remotely and pulls fine. The pass must record b.md's progress, but if a.md's entry advanced
+  // to the manifest's view the unchanged local copy would read as a fresh local edit on the next
+  // pass and be pushed over the newer remote version, quietly undoing the remote edit.
+  const ancestor = snapshot({ path: "a.md", size: 4, mtime: 1, hash: await hashOf("a v1") });
+  const remoteManifest = JSON.stringify(
+    snapshot(
+      { path: "a.md", size: 4, mtime: 1, hash: await hashOf("a v2") },
+      { path: "b.md", size: 3, mtime: 1, hash: await hashOf("bee") },
+    ),
+  );
+  const { storage, objects } = fakeStorage({
+    [MANIFEST_KEY]: remoteManifest,
+    "a.md": "a v2",
+    "b.md": "bee",
+  });
+  const inner = storage.putObject;
+  let aPushes = 0;
+  storage.putObject = async (key, body, condition) => {
+    if (key === "a.md") {
+      aPushes++;
+    }
+    return inner(key, body, condition);
+  };
+  const readerFiles: Record<string, string> = { "a.md": "a v1" };
+  const reader = fakeReader(readerFiles);
+  let lockA = true;
+  const writer: LocalWriter = {
+    writeFile: async (path, data) => {
+      if (path === "a.md" && lockA) {
+        throw new Error("EBUSY: resource busy or locked");
+      }
+      readerFiles[path] = new TextDecoder().decode(data);
+    },
+    deleteFile: async (path) => {
+      delete readerFiles[path];
+    },
+    renameFile: async () => {
+      throw new Error("unexpected rename");
+    },
+  };
+
+  const outcome = await syncOnce(ancestor, reader, writer, storage, 1);
+
+  assert.ok(!outcome.ok);
+  assert.deepEqual(outcome.failures, [{ path: "a.md", message: "EBUSY: resource busy or locked" }]);
+  // b.md's pull landed and is recorded; a.md stays at the ancestor's view, not the manifest's.
+  assert.equal(readerFiles["b.md"], "bee");
+  assert.ok(outcome.snapshot !== null);
+  const entries = new Map(outcome.snapshot.files.map((f) => [f.path, f.hash]));
+  assert.equal(entries.get("a.md"), await hashOf("a v1"));
+  assert.equal(entries.get("b.md"), await hashOf("bee"));
+
+  // Once the file unlocks, the retry pulls the newer remote version; the stale local copy is
+  // never pushed over it.
+  lockA = false;
+  const retry = await syncOnce(outcome.snapshot, reader, writer, storage, 1);
+
+  assert.equal(retry.ok, true);
+  assert.equal(readerFiles["a.md"], "a v2");
+  assert.equal(objects.get("a.md"), "a v2");
+  assert.equal(aPushes, 0);
 });
 
 test("syncOnce: two first syncs racing for an empty bucket, the loser fails instead of clobbering", async () => {
@@ -323,4 +465,21 @@ test("adoptLiveStats: a mid sync creation is never added to the manifest", () =>
   const live = snapshot(file("c.md", "h9"));
 
   assert.deepEqual(adoptLiveStats(empty, live), empty);
+});
+
+test("revertFailedPaths: a failed action's path is restored to the ancestor's entry", () => {
+  const manifest = snapshot(file("a.md", "h2"), file("b.md", "h3"));
+  const ancestor = snapshot(file("a.md", "h1"));
+
+  const result = revertFailedPaths(manifest, ancestor, [{ kind: "pull", path: "a.md" }]);
+
+  assert.deepEqual(result, snapshot(file("a.md", "h1"), file("b.md", "h3")));
+});
+
+test("revertFailedPaths: a path the ancestor never knew is dropped, so it re-plans from scratch", () => {
+  const manifest = snapshot(file("a.md", "h2"));
+
+  const result = revertFailedPaths(manifest, empty, [{ kind: "pull", path: "a.md" }]);
+
+  assert.deepEqual(result, empty);
 });
