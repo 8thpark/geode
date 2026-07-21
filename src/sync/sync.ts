@@ -189,10 +189,12 @@ export async function syncOnce(
     return { ok: false, message: uploaded.message, failures: executed.failures, snapshot: null };
   }
 
-  if (executed.failures.length > 0) {
+  // The count comes from failed (one entry per planned path), not failures: a conflict can report
+  // two operation failures (copy push and pull) for the same file, and the message counts files.
+  if (executed.failed.length > 0) {
     return {
       ok: false,
-      message: `${executed.failures.length} file(s) failed to sync`,
+      message: `${executed.failed.length} file(s) failed to sync`,
       failures: executed.failures,
       snapshot: revertFailedPaths(final, ancestor, executed.failed),
     };

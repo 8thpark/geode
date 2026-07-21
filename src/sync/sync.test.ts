@@ -350,6 +350,38 @@ test("syncOnce: a failed push doesn't discard the progress of the rest of the pa
   assert.equal(bPushes, 1);
 });
 
+test("syncOnce: the failure message counts files, not operation failures", async () => {
+  // A conflict whose copy push and pull both fail reports two operation failures for one vault
+  // path. The user facing message must count the one file, not the two operations.
+  const ancestor = snapshot({ path: "a.md", size: 4, mtime: 1, hash: await hashOf("a v1") });
+  const remoteManifest = JSON.stringify(
+    snapshot({ path: "a.md", size: 4, mtime: 1, hash: await hashOf("a v2") }),
+  );
+  // The manifest claims a.md but the object is absent, so the conflict's pull 404s; the copy push
+  // is rejected by the override below. Both sides changed relative to the ancestor, so the plan is
+  // a single conflict (deletedSide "none") for a.md.
+  const { storage } = fakeStorage({ [MANIFEST_KEY]: remoteManifest });
+  const copyPath = conflictCopyPath("a.md", 1);
+  const inner = storage.putObject;
+  storage.putObject = async (key, body, condition) => {
+    if (key === copyPath) {
+      return { ok: false, status: "server", message: "Storage rejected the write (500)" };
+    }
+    return inner(key, body, condition);
+  };
+  const reader = fakeReader({ "a.md": "a local" });
+  const { writer } = fakeLocalWriter();
+
+  const outcome = await syncOnce(ancestor, reader, writer, storage, 1);
+
+  assert.ok(!outcome.ok);
+  assert.deepEqual(outcome.failures, [
+    { path: copyPath, message: "Storage rejected the write (500)" },
+    { path: "a.md", message: "Storage rejected the read (404)" },
+  ]);
+  assert.equal(outcome.message, "1 file(s) failed to sync");
+});
+
 test("syncOnce: a failed pull records progress without the ancestor ever advancing past it", async () => {
   // The other half of #87, and the reason a failed action's path must revert to the ancestor's
   // view: a.md was edited remotely and its pull fails (a locked file, say), while b.md is new
