@@ -98,29 +98,54 @@ async function ensureParentDir(adapter: DataAdapter, path: string): Promise<void
   }
 }
 
-// tempWritePath returns the hidden sibling path a pull is staged to before renaming into place.
-// The dot prefix keeps it out of Obsidian's file index, so it can never appear in a snapshot, and
-// the name is deterministic so a leftover from an interrupted pull is overwritten by the next
-// pull of the same path rather than accumulating.
-function tempWritePath(path: string): string {
+// hiddenSiblingPath returns a dot prefixed sibling of path carrying suffix, the naming scheme for
+// geode's staging files: hidden so Obsidian never indexes them and they can never appear in a
+// snapshot, deterministic so a leftover from an interrupted write is reclaimed by the next write
+// to the same path rather than accumulating.
+function hiddenSiblingPath(path: string, suffix: string): string {
   const lastSlash = path.lastIndexOf("/");
 
-  return `${path.slice(0, lastSlash + 1)}.${path.slice(lastSlash + 1)}.geode-tmp`;
+  return `${path.slice(0, lastSlash + 1)}.${path.slice(lastSlash + 1)}${suffix}`;
+}
+
+// replaceViaAside installs the staged file over an existing destination for an adapter whose
+// rename refuses to overwrite: the current content is renamed aside, the staged file claims the
+// path, and only then is the aside copy removed. The destination's bytes are never deleted while
+// a restore is still possible, so if the rename actually failed for some other reason
+// (permissions, a transient I/O error) and the retry fails the same way, the aside copy is
+// renamed straight back and the file survives untouched.
+async function replaceViaAside(
+  adapter: DataAdapter,
+  tempPath: string,
+  path: string,
+): Promise<void> {
+  const asidePath = hiddenSiblingPath(path, ".geode-old");
+  const leftover = await adapter.exists(asidePath);
+  if (leftover) {
+    await adapter.remove(asidePath);
+  }
+  await adapter.rename(path, asidePath);
+  try {
+    await adapter.rename(tempPath, path);
+  } catch (err) {
+    await adapter.rename(asidePath, path);
+    throw err;
+  }
+  await adapter.remove(asidePath);
 }
 
 // writeThroughTemp stages data at a hidden temp path beside its destination, then renames it into
 // place, so a crash mid write leaves the destination either untouched or fully written, never
 // holding torn bytes (#88). Desktop's adapter rename replaces an existing destination atomically;
-// for an adapter whose rename refuses to overwrite, the destination is removed and the rename
-// retried, shrinking the exposure from the whole download and write to the instant between remove
-// and rename, where a crash leaves the path absent and the next sync replans the pull instead of
-// pushing corruption.
+// a rename that fails while the destination exists is retried through replaceViaAside, shrinking
+// the exposure from the whole download and write to the instant between the two renames, where a
+// crash leaves the path absent and the next sync replans the pull instead of pushing corruption.
 async function writeThroughTemp(
   adapter: DataAdapter,
   path: string,
   data: ArrayBuffer,
 ): Promise<void> {
-  const tempPath = tempWritePath(path);
+  const tempPath = hiddenSiblingPath(path, ".geode-tmp");
   await adapter.writeBinary(tempPath, data);
   try {
     await adapter.rename(tempPath, path);
@@ -129,7 +154,6 @@ async function writeThroughTemp(
     if (!exists) {
       throw err;
     }
-    await adapter.remove(path);
-    await adapter.rename(tempPath, path);
+    await replaceViaAside(adapter, tempPath, path);
   }
 }
