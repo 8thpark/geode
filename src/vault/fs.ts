@@ -69,12 +69,13 @@ function abs(root: string, path: string): string {
 }
 
 // walk returns every file (not directory) under the root as vault relative, forward slash paths,
-// excluding anything under .obsidian, mirroring what Obsidian's Vault.getFiles() leaves out.
+// excluding dot prefixed entries (.obsidian, staged .geode-tmp writes), mirroring how Obsidian's
+// Vault.getFiles() never indexes hidden files.
 function walk(root: string, dir = ""): string[] {
   const here = dir === "" ? root : abs(root, dir);
   const out: string[] = [];
   for (const entry of readdirSync(here, { withFileTypes: true })) {
-    if (entry.name === ".obsidian") {
+    if (entry.name.startsWith(".")) {
       continue;
     }
     const rel = dir === "" ? entry.name : `${dir}/${entry.name}`;
