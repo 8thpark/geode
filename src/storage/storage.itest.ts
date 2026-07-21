@@ -64,28 +64,32 @@ test("putObject ifAbsent creates a missing key but is rejected once the key exis
 test("putObject ifMatch succeeds with the current etag and is rejected once it goes stale", async () => {
   const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
   const key = "conditional-test/match.md";
-  await client.putObject(key, new TextEncoder().encode("v1"));
+  try {
+    await client.putObject(key, new TextEncoder().encode("v1"));
 
-  const getResult = await client.getObject(key);
-  assert.equal(getResult.ok, true);
-  assert.ok(getResult.etag !== null);
-  const etag = getResult.etag;
+    const getResult = await client.getObject(key);
+    assert.equal(getResult.ok, true);
+    assert.ok(getResult.etag !== null);
+    const etag = getResult.etag;
 
-  const fresh = await client.putObject(key, new TextEncoder().encode("v2 longer"), {
-    kind: "ifMatch",
-    etag,
-  });
-  assert.equal(fresh.ok, true);
+    const fresh = await client.putObject(key, new TextEncoder().encode("v2 longer"), {
+      kind: "ifMatch",
+      etag,
+    });
+    assert.equal(fresh.ok, true);
 
-  // The etag read before the v2 write is now stale, exactly a concurrent writer's position.
-  const stale = await client.putObject(key, new TextEncoder().encode("v3"), {
-    kind: "ifMatch",
-    etag,
-  });
-  assert.equal(stale.ok, false);
-  assert.equal(stale.status, "conflict");
-
-  await client.deleteObject(key);
+    // The etag read before the v2 write is now stale, exactly a concurrent writer's position.
+    const stale = await client.putObject(key, new TextEncoder().encode("v3"), {
+      kind: "ifMatch",
+      etag,
+    });
+    assert.equal(stale.ok, false);
+    assert.equal(stale.status, "conflict");
+  } finally {
+    // The key is fixed, so a mid test assertion failure must not leave a leftover object that
+    // changes the next run's behaviour.
+    await client.deleteObject(key);
+  }
 });
 
 test("getObject on a missing key fails without a body", async () => {

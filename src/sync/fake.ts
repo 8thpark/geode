@@ -110,6 +110,7 @@ export function fakeStorage(objects: Record<string, string> = {}): {
     },
     deleteObject: async (key): Promise<DeleteResult> => {
       store.delete(key);
+      etags.delete(key);
       return { ok: true, status: "ok", message: "" };
     },
     listObjects: async (): Promise<ListResult> => {
