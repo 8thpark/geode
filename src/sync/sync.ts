@@ -17,6 +17,27 @@ export type SyncOutcome =
   | { ok: true; snapshot: Snapshot; changeCount: number }
   | { ok: false; message: string; failures: SyncFailure[] };
 
+// adoptLiveStats returns manifest with each entry swapped for the live vault's entry at the same
+// path wherever the content hashes match, so state.json carries local size and mtime and the next
+// snapshot can stat-skip the rehash. An entry whose live content differs (a mid sync edit) and a
+// live file the manifest doesn't know (a mid sync creation) both keep the manifest's view, so the
+// next sync's diff picks them up as local changes. Exported for its tests; syncOnce is the only
+// production caller.
+export function adoptLiveStats(manifest: Snapshot, live: Snapshot): Snapshot {
+  const liveByPath = byPath(live.files);
+  const files: FileState[] = [];
+  for (const entry of manifest.files) {
+    const liveEntry = liveByPath.get(entry.path);
+    if (liveEntry !== undefined && liveEntry.hash === entry.hash) {
+      files.push(liveEntry);
+      continue;
+    }
+    files.push(entry);
+  }
+
+  return { files };
+}
+
 // readRemoteManifest fetches and parses the remote manifest. A confirmed 404 means no manifest
 // has ever been written, the safe assumption for a first sync against an empty bucket, so that's
 // treated as an empty snapshot flagged firstSync. Any other failure (network, auth, a real 5xx)
@@ -138,24 +159,4 @@ export async function syncOnce(
   }
 
   return { ok: true, snapshot: final, changeCount: actions.length };
-}
-
-// adoptLiveStats returns manifest with each entry swapped for the live vault's entry at the same
-// path wherever the content hashes match, so state.json carries local size and mtime and the next
-// snapshot can stat-skip the rehash. An entry whose live content differs (a mid sync edit) and a
-// live file the manifest doesn't know (a mid sync creation) both keep the manifest's view, so the
-// next sync's diff picks them up as local changes.
-function adoptLiveStats(manifest: Snapshot, live: Snapshot): Snapshot {
-  const liveByPath = byPath(live.files);
-  const files: FileState[] = [];
-  for (const entry of manifest.files) {
-    const liveEntry = liveByPath.get(entry.path);
-    if (liveEntry !== undefined && liveEntry.hash === entry.hash) {
-      files.push(liveEntry);
-      continue;
-    }
-    files.push(entry);
-  }
-
-  return { files };
 }

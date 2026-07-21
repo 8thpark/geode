@@ -3,7 +3,7 @@ import { test } from "node:test";
 import type { Snapshot } from "../vault/vault.ts";
 import { empty, fakeLocalWriter, fakeReader, fakeStorage, file, snapshot } from "./fake.ts";
 import { MANIFEST_KEY } from "./plan.ts";
-import { readRemoteManifest, syncOnce } from "./sync.ts";
+import { adoptLiveStats, readRemoteManifest, syncOnce } from "./sync.ts";
 
 test("readRemoteManifest: a 404 is treated as an empty snapshot", async () => {
   const { storage } = fakeStorage();
@@ -236,4 +236,30 @@ test("syncOnce: two first syncs racing for an empty bucket, the loser fails inst
   assert.equal(outcome.ok, false);
   assert.equal(objects.get(MANIFEST_KEY), otherManifest);
   assert.equal(files.get("a.md"), "alpha");
+});
+
+test("adoptLiveStats: an entry whose content matches the live vault adopts the live stats", () => {
+  const manifest = snapshot({ path: "a.md", size: 2, mtime: 5, hash: "h1" });
+  const live = snapshot({ path: "a.md", size: 2, mtime: 9, hash: "h1" });
+
+  assert.deepEqual(adoptLiveStats(manifest, live), live);
+});
+
+test("adoptLiveStats: a mid sync edit keeps the manifest's entry, so the next diff sees it", () => {
+  const manifest = snapshot(file("a.md", "h1"));
+  const live = snapshot({ path: "a.md", size: 7, mtime: 9, hash: "h2" });
+
+  assert.deepEqual(adoptLiveStats(manifest, live), manifest);
+});
+
+test("adoptLiveStats: a mid sync deletion keeps the manifest's entry, so the next diff sees it", () => {
+  const manifest = snapshot(file("a.md", "h1"));
+
+  assert.deepEqual(adoptLiveStats(manifest, empty), manifest);
+});
+
+test("adoptLiveStats: a mid sync creation is never added to the manifest", () => {
+  const live = snapshot(file("c.md", "h9"));
+
+  assert.deepEqual(adoptLiveStats(empty, live), empty);
 });

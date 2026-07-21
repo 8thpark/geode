@@ -56,6 +56,8 @@ export function manifestAfterSync(
       continue;
     }
     if (action.kind === "push") {
+      // A push is only ever planned for a file present in the local snapshot, so the guard is
+      // narrowing, not a real branch; a miss would mean planSync broke that invariant.
       const pushed = localByPath.get(action.path);
       if (pushed !== undefined) {
         files.set(action.path, pushed);
