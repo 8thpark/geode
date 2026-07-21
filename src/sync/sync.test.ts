@@ -164,6 +164,55 @@ test("syncOnce: a manifest overwritten by another device mid sync fails the pass
   assert.equal(files.get("a.md"), "xy");
 });
 
+test("syncOnce: a file changed mid sync is not recorded in the manifest and is pushed next pass", async () => {
+  // Reproduces #84. The vault is in sync (a.md, unchanged), and b.md is new locally, so the pass
+  // pushes b.md. While that push is in flight the user edits a.md and creates c.md. Before the
+  // fix the manifest was a re-snapshot of the disk taken after the plan ran, so it recorded both
+  // with content the bucket never received; neither then ever uploaded (state.json already agreed
+  // with the manifest), and another device could push the stale bucket copy of a.md back over the
+  // edit. The manifest must instead keep claiming only what the bucket holds, leaving both files
+  // as local changes for the next pass to push.
+  const ancestor = snapshot(file("a.md", "h1"));
+  const { storage, objects } = fakeStorage({ [MANIFEST_KEY]: JSON.stringify(ancestor) });
+  // a.md matches the ancestor's size and mtime so takeSnapshot reuses its hash and sees no local
+  // change there; b.md is the new local file whose push is the mid sync moment to interleave on.
+  const readerFiles: Record<string, string> = { "a.md": "xy", "b.md": "beta" };
+  const reader = fakeReader(readerFiles);
+  const { writer } = fakeLocalWriter();
+  const inner = storage.putObject;
+  let edited = false;
+  storage.putObject = async (key, body, condition) => {
+    if (key === "b.md" && !edited) {
+      edited = true;
+      readerFiles["a.md"] = "edited mid sync";
+      readerFiles["c.md"] = "created mid sync";
+    }
+    return inner(key, body, condition);
+  };
+
+  const outcome = await syncOnce(ancestor, reader, writer, storage, 1);
+
+  assert.ok(outcome.ok);
+  // The manifest still records a.md as the bucket knows it, and doesn't know c.md at all: neither
+  // file's new content ever reached the bucket.
+  const manifestBody = objects.get(MANIFEST_KEY);
+  assert.ok(manifestBody !== undefined);
+  const manifest = JSON.parse(manifestBody) as Snapshot;
+  const paths = manifest.files.map((f) => f.path);
+  assert.deepEqual(paths.sort(), ["a.md", "b.md"]);
+  assert.deepEqual(
+    manifest.files.filter((f) => f.path === "a.md"),
+    [file("a.md", "h1")],
+  );
+  assert.equal(objects.has("c.md"), false);
+
+  // The next pass sees both as plain local changes and pushes them.
+  const retry = await syncOnce(outcome.snapshot, reader, writer, storage, 1);
+  assert.equal(retry.ok, true);
+  assert.equal(objects.get("a.md"), "edited mid sync");
+  assert.equal(objects.get("c.md"), "created mid sync");
+});
+
 test("syncOnce: two first syncs racing for an empty bucket, the loser fails instead of clobbering", async () => {
   // Both devices see no manifest and plan a first sync. The other device's manifest lands while
   // this one is mid pass; the "ifAbsent" conditional upload must lose rather than overwrite it.

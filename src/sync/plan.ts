@@ -29,6 +29,55 @@ export function conflictCopyPath(path: string, now: number): string {
   return `${path.slice(0, lastDot)} (conflicted copy ${stamp})${path.slice(lastDot)}`;
 }
 
+// manifestAfterSync returns the snapshot of what the bucket holds once every action in the plan
+// has succeeded: remote as it was read, minus pushed deletions, plus pushed files and conflict
+// copies recorded at the local snapshot's entry. It is computed from the plan rather than
+// re-snapshotted from disk so the manifest can never record content the bucket does not have
+// (#84): a file that changed while the plan ran keeps its bucket entry, and the next sync sees
+// the drift as a local change and pushes it. The one race left, a push whose bytes drifted past
+// the local snapshot before they were read, only ever understates the bucket, and the next pass
+// simply pushes again.
+export function manifestAfterSync(
+  local: Snapshot,
+  remote: Snapshot,
+  actions: SyncAction[],
+  now: number,
+): Snapshot {
+  const files = byPath(remote.files);
+  const localByPath = byPath(local.files);
+
+  for (const action of actions) {
+    // pull and pullDelete only change the local vault; the bucket is untouched.
+    if (action.kind === "pull" || action.kind === "pullDelete") {
+      continue;
+    }
+    if (action.kind === "pushDelete") {
+      files.delete(action.path);
+      continue;
+    }
+    if (action.kind === "push") {
+      const pushed = localByPath.get(action.path);
+      if (pushed !== undefined) {
+        files.set(action.path, pushed);
+      }
+      continue;
+    }
+    // conflict: a local deletion pushes nothing, the remote entry stands as is. The other two
+    // sides push the local edit under its conflict copy name; the original path is already
+    // correct in remote (present for deletedSide "none", absent for "remote").
+    if (action.deletedSide === "local") {
+      continue;
+    }
+    const copied = localByPath.get(action.path);
+    if (copied !== undefined) {
+      const copyPath = conflictCopyPath(action.path, now);
+      files.set(copyPath, { ...copied, path: copyPath });
+    }
+  }
+
+  return { files: [...files.values()] };
+}
+
 // planSync compares what changed locally since the last successful sync against what changed
 // remotely since that same sync, and decides what to push, what to pull, and what's a genuine
 // conflict: a path that changed on both sides to different content. previous is the snapshot

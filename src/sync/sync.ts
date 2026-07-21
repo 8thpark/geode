@@ -1,7 +1,14 @@
 import type { PutCondition, StorageClient } from "../storage/storage.ts";
-import { isSnapshot, type Reader, type Snapshot, takeSnapshot } from "../vault/vault.ts";
+import {
+  byPath,
+  type FileState,
+  isSnapshot,
+  type Reader,
+  type Snapshot,
+  takeSnapshot,
+} from "../vault/vault.ts";
 import { executeSyncPlan, type LocalWriter, type SyncFailure } from "./execute.ts";
-import { MANIFEST_KEY, planSync } from "./plan.ts";
+import { MANIFEST_KEY, manifestAfterSync, planSync } from "./plan.ts";
 
 // SyncOutcome is the result of a single sync pass. On success it carries the new snapshot to
 // persist as the next sync's starting point and how many actions were applied; on failure it
@@ -63,8 +70,8 @@ export async function readRemoteManifest(
 
 // syncOnce runs one full sync pass over the injected local vault (reader/localWriter) and remote
 // bucket (storage): it snapshots the local vault against previous (the last synced snapshot),
-// reads the remote manifest, plans and executes the reconciliation, then re-snapshots and uploads
-// the manifest so it always matches what is really on disk. previous is passed in and the new
+// reads the remote manifest, plans and executes the reconciliation, then uploads a manifest
+// reflecting what the bucket now actually holds. previous is passed in and the new
 // snapshot returned rather than read or written internally, so the caller owns persistence (the
 // plugin through state.json, tests through their own store) and this stays pure over its inputs.
 // now is injected so a conflict copy's name is deterministic under test.
@@ -98,10 +105,14 @@ export async function syncOnce(
     return { ok: false, message: `${failures.length} file(s) failed to sync`, failures };
   }
 
-  // Re-snapshot rather than hand merging local with the plan's outcome: this is the only way to
-  // be sure the manifest we upload matches what's really on disk after every pull, delete, and
-  // conflict rename just applied.
-  const final = await takeSnapshot(reader, local);
+  // The manifest is derived from what the plan just did to the bucket, never from a fresh disk
+  // snapshot: a file edited while the plan ran would land in a re-snapshot claiming content the
+  // bucket never received, the edit would then never upload (state.json already agrees with the
+  // manifest), and another device could later push the stale bucket copy back over it (#84). The
+  // re-snapshot here only refreshes stats, so a mid sync edit keeps its bucket entry and reads as
+  // a local change on the next pass.
+  const manifest = manifestAfterSync(local, remote.snapshot, actions, now);
+  const final = adoptLiveStats(manifest, await takeSnapshot(reader, local));
   const manifestBody = new TextEncoder().encode(JSON.stringify(final));
 
   // The upload is conditional on the remote manifest still being exactly what this pass read at
@@ -127,4 +138,24 @@ export async function syncOnce(
   }
 
   return { ok: true, snapshot: final, changeCount: actions.length };
+}
+
+// adoptLiveStats returns manifest with each entry swapped for the live vault's entry at the same
+// path wherever the content hashes match, so state.json carries local size and mtime and the next
+// snapshot can stat-skip the rehash. An entry whose live content differs (a mid sync edit) and a
+// live file the manifest doesn't know (a mid sync creation) both keep the manifest's view, so the
+// next sync's diff picks them up as local changes.
+function adoptLiveStats(manifest: Snapshot, live: Snapshot): Snapshot {
+  const liveByPath = byPath(live.files);
+  const files: FileState[] = [];
+  for (const entry of manifest.files) {
+    const liveEntry = liveByPath.get(entry.path);
+    if (liveEntry !== undefined && liveEntry.hash === entry.hash) {
+      files.push(liveEntry);
+      continue;
+    }
+    files.push(entry);
+  }
+
+  return { files };
 }
