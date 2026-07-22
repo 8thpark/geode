@@ -206,14 +206,19 @@ test("syncOnce: retry adopts an identical orphaned upload without another file P
   assert.equal(objects.get("a.md"), "ours!");
   assert.equal(filePuts, 1);
 
+  // The manifest is still at the ancestor while a.md already contains our bytes, so the retry's
+  // pre-PUT check must return `done` and adopt the orphan instead of issuing another file PUT.
   const retry = await syncOnce(ancestor, reader, writer, storage, 1);
 
-  assert.equal(retry.ok, true);
+  assert.deepEqual(retry, {
+    ok: true,
+    snapshot: {
+      files: [{ path: "a.md", size: 5, mtime: 1, hash: await hashOf("ours!") }],
+    },
+    changeCount: 1,
+  });
   assert.equal(filePuts, 1, "retry replaced an identical orphaned upload");
   assert.deepEqual(JSON.parse(objects.get(MANIFEST_KEY) ?? ""), retry.snapshot);
-  assert.deepEqual(retry.snapshot, {
-    files: [{ path: "a.md", size: 5, mtime: 1, hash: await hashOf("ours!") }],
-  });
 });
 
 test("syncOnce: losing the manifest race cannot overwrite the winner's file", async () => {
