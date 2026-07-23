@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { DEFAULT_SETTINGS, type GeodeSettings } from "../settings/settings.ts";
-import { createS3Client } from "../storage/storage.ts";
+import { createS3Client, type StorageClient } from "../storage/storage.ts";
 import { nodeVault } from "../vault/fs.ts";
 import {
   createObsidianLocalWriter,
@@ -81,13 +81,19 @@ async function deleteLocal(d: Device, path: string): Promise<void> {
 }
 
 // sync runs one pass for a device, mirroring the plugin's runSync spine: read previous state, run
-// syncOnce, persist the new snapshot on success.
+// syncOnce, persist the new snapshot whenever one comes back (a full success, or a failed pass
+// that still made progress).
 async function sync(d: Device, now = Date.now()): Promise<SyncOutcome> {
   const previous = await d.stateStore.read();
   const outcome = await syncOnce(previous, d.reader, d.writer, storage, now);
   if (outcome.ok) {
     await d.stateStore.write(outcome.snapshot);
+    return outcome;
   }
+  if (outcome.snapshot !== null) {
+    await d.stateStore.write(outcome.snapshot);
+  }
+
   return outcome;
 }
 
@@ -306,6 +312,51 @@ test("sync: a stale state.json from an older build never deletes the vault on th
     }
   } finally {
     cleanup(a);
+  }
+});
+
+test("sync: two devices syncing at overlapping times never silently delete a file", async () => {
+  // Reproduces #83 against a real bucket. B's entire sync pass lands while A's pass sits between
+  // reading the manifest and uploading its own, the exact interleaving overlapping automatic
+  // syncs produce. Before the fix A's unconditional manifest upload clobbered B's, so B's next
+  // sync read from-b.md as a remote deletion and silently deleted it.
+  await resetRemote("eight/");
+  const a = newDevice();
+  const b = newDevice();
+  try {
+    await writeLocal(a, "eight/base.md", "shared base");
+    assert.equal((await sync(a)).ok, true);
+    assert.equal((await sync(b)).ok, true);
+
+    await writeLocal(a, "eight/from-a.md", "a's new note");
+    await writeLocal(b, "eight/from-b.md", "b's new note here");
+
+    let interleaved = false;
+    const racingStorage: StorageClient = {
+      ...storage,
+      putObject: async (key, body, condition) => {
+        if (key === MANIFEST_KEY && !interleaved) {
+          interleaved = true;
+          assert.equal((await sync(b)).ok, true);
+        }
+        return storage.putObject(key, body, condition);
+      },
+    };
+    const previous = await a.stateStore.read();
+    const outcome = await syncOnce(previous, a.reader, a.writer, racingStorage, Date.now());
+
+    // A lost the race: the pass fails loudly and state.json does not advance.
+    assert.equal(outcome.ok, false);
+
+    // A's next ordinary sync reconciles both devices' work; nothing was lost anywhere.
+    assert.equal((await sync(a)).ok, true);
+    assert.equal((await sync(b)).ok, true);
+    assert.equal(await readLocal(a, "eight/from-b.md"), "b's new note here");
+    assert.equal(await readLocal(b, "eight/from-a.md"), "a's new note");
+    assert.equal(await readLocal(a, "eight/base.md"), "shared base");
+    assert.equal(await readLocal(b, "eight/base.md"), "shared base");
+  } finally {
+    cleanup(a, b);
   }
 });
 
