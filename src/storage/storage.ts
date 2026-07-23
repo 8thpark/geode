@@ -62,7 +62,14 @@ export type PutResult = {
 // ResultStatus classifies the outcome of a storage operation so callers can distinguish absent
 // objects and failed put preconditions from transient failures without parsing the message
 // string.
-export type ResultStatus = "ok" | "not_found" | "conflict" | "auth" | "server" | "network";
+export type ResultStatus =
+  | "ok"
+  | "not_found"
+  | "conflict"
+  | "auth"
+  | "client"
+  | "server"
+  | "network";
 
 // StorageClient reads, writes, deletes, and lists objects in a bucket. Every method takes and
 // returns plain data, never provider credentials or settings, so a future WebDAV or Dropbox
