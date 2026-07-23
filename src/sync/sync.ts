@@ -7,17 +7,8 @@ import {
   type Snapshot,
   takeSnapshot,
 } from "../vault/vault.ts";
-import {
-  executeSyncPlan,
-  type LocalWriter,
-  type SyncFailure,
-} from "./execute.ts";
-import {
-  MANIFEST_KEY,
-  manifestAfterSync,
-  planSync,
-  type SyncAction,
-} from "./plan.ts";
+import { executeSyncPlan, type LocalWriter, type SyncFailure } from "./execute.ts";
+import { MANIFEST_KEY, manifestAfterSync, planSync, type SyncAction } from "./plan.ts";
 
 // SyncOutcome is the result of a single sync pass. On success it carries the new snapshot to
 // persist as the next sync's starting point and how many actions were applied; on failure it
@@ -163,14 +154,7 @@ export async function syncOnce(
   const local = await takeSnapshot(reader, ancestor);
 
   const actions = planSync(ancestor, local, remote.snapshot);
-  const executed = await executeSyncPlan(
-    actions,
-    local,
-    reader,
-    localWriter,
-    storage,
-    now,
-  );
+  const executed = await executeSyncPlan(actions, local, reader, localWriter, storage, now);
 
   // The manifest is derived from what the plan just did to the bucket, never from a fresh disk
   // snapshot: a file edited while the plan ran would land in a re-snapshot claiming content the
@@ -181,12 +165,7 @@ export async function syncOnce(
   // keeps the entry the bucket really holds; the manifest is uploaded even when some actions
   // failed, so one bad file never leaves the rest of the pass's pushes invisible to every other
   // device (#87).
-  const manifest = manifestAfterSync(
-    local,
-    remote.snapshot,
-    executed.completed,
-    now,
-  );
+  const manifest = manifestAfterSync(local, remote.snapshot, executed.completed, now);
   const final = adoptLiveStats(manifest, await takeSnapshot(reader, local));
   const manifestBody = new TextEncoder().encode(JSON.stringify(final));
 
@@ -200,11 +179,7 @@ export async function syncOnce(
   if (!remote.firstSync) {
     condition = { kind: "ifMatch", etag: remote.etag };
   }
-  const uploaded = await storage.putObject(
-    MANIFEST_KEY,
-    manifestBody,
-    condition,
-  );
+  const uploaded = await storage.putObject(MANIFEST_KEY, manifestBody, condition);
   if (!uploaded.ok) {
     if (uploaded.status === "conflict") {
       return {

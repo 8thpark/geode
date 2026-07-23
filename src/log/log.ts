@@ -79,13 +79,7 @@ export function createMemorySink(maxLines: number): LogSink {
 // line. Backslashes are escaped first so a pre-existing literal "\n" (two characters) is not
 // misinterpreted when newlines are escaped next.
 export function escapeMessage(msg: string): string {
-  return msg
-    .split("\\")
-    .join("\\\\")
-    .split("\n")
-    .join("\\n")
-    .split("\r")
-    .join("\\r");
+  return msg.split("\\").join("\\\\").split("\n").join("\\n").split("\r").join("\\r");
 }
 
 // formatLogLine renders one entry as a single persisted line: an ISO timestamp, the level, then
@@ -169,12 +163,7 @@ function consoleFor(level: LogLevel): (message: string) => void {
 }
 
 function isLogLevel(value: string): value is LogLevel {
-  return (
-    value === "debug" ||
-    value === "info" ||
-    value === "warn" ||
-    value === "error"
-  );
+  return value === "debug" || value === "info" || value === "warn" || value === "error";
 }
 
 // linesOf splits a log's text into its lines. Every persisted line ends in "\n", so a naive split
