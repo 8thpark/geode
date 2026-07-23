@@ -154,7 +154,27 @@ export async function syncOnce(
   const local = await takeSnapshot(reader, ancestor);
 
   const actions = planSync(ancestor, local, remote.snapshot);
-  const executed = await executeSyncPlan(actions, local, reader, localWriter, storage, now);
+  const executed = await executeSyncPlan(
+    actions,
+    local,
+    reader,
+    localWriter,
+    storage,
+    now,
+    remote.snapshot,
+  );
+
+  // A failed file precondition means the plan's remote snapshot is no longer current. Do not
+  // upload any manifest from that stale view, even if its own CAS has not lost yet: another pass
+  // may have uploaded the file object but still be about to upload its manifest.
+  if (executed.concurrent) {
+    return {
+      ok: false,
+      message: "another device synced at the same time; sync again",
+      failures: executed.failures,
+      snapshot: null,
+    };
+  }
 
   // The manifest is derived from what the plan just did to the bucket, never from a fresh disk
   // snapshot: a file edited while the plan ran would land in a re-snapshot claiming content the
