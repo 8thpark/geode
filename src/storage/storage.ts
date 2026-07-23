@@ -1,9 +1,5 @@
 import { AwsClient } from "aws4fetch";
-import {
-  endpointFor,
-  type GeodeSettings,
-  regionFor,
-} from "../settings/settings.ts";
+import { endpointFor, type GeodeSettings, regionFor } from "../settings/settings.ts";
 import { encodeKey } from "./encode.ts";
 import { messageFor, statusForHttp } from "./errors.ts";
 import { parseListObjectsXml } from "./xml.ts";
@@ -54,9 +50,7 @@ export type ObjectMeta = {
 // equals etag, "ifAbsent" only while no object exists at the key. A failed precondition comes
 // back as a "conflict" status, how a caller detects a concurrent writer instead of silently
 // overwriting what that writer just stored.
-export type PutCondition =
-  | { kind: "ifMatch"; etag: string }
-  | { kind: "ifAbsent" };
+export type PutCondition = { kind: "ifMatch"; etag: string } | { kind: "ifAbsent" };
 
 // PutResult reports whether an object was written. Message is the empty string when ok is true.
 export type PutResult = {
@@ -68,33 +62,20 @@ export type PutResult = {
 // ResultStatus classifies the outcome of a storage operation so callers can distinguish absent
 // objects and failed put preconditions from transient failures without parsing the message
 // string.
-export type ResultStatus =
-  | "ok"
-  | "not_found"
-  | "conflict"
-  | "auth"
-  | "server"
-  | "network";
+export type ResultStatus = "ok" | "not_found" | "conflict" | "auth" | "server" | "network";
 
 // StorageClient reads, writes, deletes, and lists objects in a bucket. Every method takes and
 // returns plain data, never provider credentials or settings, so a future WebDAV or Dropbox
 // client can satisfy this same shape without changing anything that depends on it.
 export type StorageClient = {
-  putObject: (
-    key: string,
-    body: Uint8Array,
-    condition?: PutCondition,
-  ) => Promise<PutResult>;
+  putObject: (key: string, body: Uint8Array, condition?: PutCondition) => Promise<PutResult>;
   getObject: (key: string) => Promise<GetResult>;
   deleteObject: (key: string) => Promise<DeleteResult>;
   listObjects: (prefix?: string) => Promise<ListResult>;
 };
 
 // createS3Client returns a StorageClient backed by the S3 compatible endpoint in settings.
-export function createS3Client(
-  settings: GeodeSettings,
-  secretAccessKey: string,
-): StorageClient {
+export function createS3Client(settings: GeodeSettings, secretAccessKey: string): StorageClient {
   const client = new AwsClient({
     accessKeyId: settings.accessKeyId,
     secretAccessKey,
@@ -104,8 +85,7 @@ export function createS3Client(
   const baseUrl = `${endpointFor(settings)}/${settings.bucket}`;
 
   return {
-    putObject: (key, body, condition) =>
-      s3PutObject(client, baseUrl, key, body, condition),
+    putObject: (key, body, condition) => s3PutObject(client, baseUrl, key, body, condition),
     getObject: (key) => s3GetObject(client, baseUrl, key),
     deleteObject: (key) => s3DeleteObject(client, baseUrl, key),
     listObjects: (prefix) => s3ListObjects(client, baseUrl, prefix),
@@ -150,9 +130,7 @@ export async function testConnection(
 
 // conditionHeaders converts a PutCondition into the HTTP precondition headers an S3 compatible
 // server evaluates before accepting a write.
-function conditionHeaders(
-  condition: PutCondition | undefined,
-): Record<string, string> {
+function conditionHeaders(condition: PutCondition | undefined): Record<string, string> {
   if (condition === undefined) {
     return {};
   }
@@ -167,10 +145,7 @@ function conditionHeaders(
 // "" if everything required is present. The requirements mirror hasConnectionConfig: all providers
 // need bucket, access key, and secret; R2 derives endpoint and region from the account ID, so
 // only custom needs them explicitly.
-function missingFieldFor(
-  settings: GeodeSettings,
-  secretAccessKey: string,
-): string {
+function missingFieldFor(settings: GeodeSettings, secretAccessKey: string): string {
   if (settings.bucket === "") {
     return "bucket";
   }
@@ -223,11 +198,7 @@ async function s3DeleteObject(
 }
 
 // s3GetObject reads the bytes stored at key.
-async function s3GetObject(
-  client: AwsClient,
-  baseUrl: string,
-  key: string,
-): Promise<GetResult> {
+async function s3GetObject(client: AwsClient, baseUrl: string, key: string): Promise<GetResult> {
   let response: Response;
   try {
     response = await client.fetch(`${baseUrl}/${encodeKey(key)}`, {
