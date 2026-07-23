@@ -34,6 +34,64 @@ test("parseLogLine preserves tabs inside the message", () => {
   assert.deepEqual(parsed, entry);
 });
 
+const messageRoundTripCases: { message: string; label: string }[] = [
+  { label: "embedded newline", message: "error\nstacktrace" },
+  { label: "embedded CR", message: "line1\rline2" },
+  { label: "literal backslash-n", message: "path\\nother" },
+  { label: "both literal backslash-n and real newline", message: "path\\nother\nand more" },
+  { label: "multiple newlines", message: "a\nb\nc" },
+  { label: "CRLF", message: "line1\r\nline2" },
+];
+
+for (const { message, label } of messageRoundTripCases) {
+  test(`formatLogLine/parseLogLine round trip: ${label}`, () => {
+    const entry: LogEntry = {
+      time: Date.parse("2026-07-14T10:00:00.000Z"),
+      level: "error",
+      message,
+    };
+
+    const parsed = parseLogLine(formatLogLine(entry));
+
+    assert.deepEqual(parsed, entry);
+  });
+}
+
+test("formatLogLine produces a single physical line for a message with newlines", () => {
+  const entry: LogEntry = {
+    time: Date.parse("2026-07-14T10:00:00.000Z"),
+    level: "error",
+    message: "ENOENT\n  at readFileSync",
+  };
+
+  const line = formatLogLine(entry);
+
+  assert.equal(line.includes("\n"), false);
+});
+
+test("parseLogLine survives the adapter's split-on-newline path", () => {
+  const entry: LogEntry = {
+    time: Date.parse("2026-07-14T10:00:00.000Z"),
+    level: "error",
+    message: "sync: ENOENT\n  at readFileSync\n  at load",
+  };
+
+  const persisted = `${formatLogLine(entry)}\n`;
+
+  const entries: LogEntry[] = [];
+  for (const line of persisted.split("\n")) {
+    if (line !== "") {
+      const parsed = parseLogLine(line);
+      if (parsed !== undefined) {
+        entries.push(parsed);
+      }
+    }
+  }
+
+  assert.equal(entries.length, 1);
+  assert.deepEqual(entries[0], entry);
+});
+
 const malformedLines = [
   "",
   "not a log line",
