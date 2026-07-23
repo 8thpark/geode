@@ -8,8 +8,8 @@ export function messageFor(err: unknown): string {
   return "Network error";
 }
 
-// statusForHttp maps an HTTP status code to a ResultStatus; unrecognised codes (including 5xx and
-// stray 4xx such as 429) fall through to "server", which callers treat as retryable.
+// statusForHttp maps HTTP 400 to the non-retryable client status and preserves known domain
+// statuses; unrecognised codes, including 5xx and 429, fall through to retryable server status.
 export function statusForHttp(code: number): ResultStatus {
   if (code === 400) {
     return "client";
