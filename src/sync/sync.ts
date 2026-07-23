@@ -19,7 +19,12 @@ import { MANIFEST_KEY, manifestAfterSync, planSync, type SyncAction } from "./pl
 // manifest never uploaded, or never got that far).
 export type SyncOutcome =
   | { ok: true; snapshot: Snapshot; changeCount: number }
-  | { ok: false; message: string; failures: SyncFailure[]; snapshot: Snapshot | null };
+  | {
+      ok: false;
+      message: string;
+      failures: SyncFailure[];
+      snapshot: Snapshot | null;
+    };
 
 // adoptLiveStats returns manifest with each entry swapped for the live vault's entry at the same
 // path wherever the content hashes match, so state.json carries local size and mtime and the next
@@ -85,9 +90,7 @@ export async function readRemoteManifest(
     return { ok: true, snapshot: parsed, firstSync: false, etag: fetched.etag };
   }
 
-  // TODO(#41): GetResult conflates 404 with every other failure; swap this for a real status
-  // once that's fixed, rather than sniffing the message text for a status code.
-  if (fetched.message.includes("(404)")) {
+  if (fetched.status === "not_found") {
     return { ok: true, snapshot: { files: [] }, firstSync: true };
   }
   return { ok: false, message: fetched.message };
@@ -186,7 +189,12 @@ export async function syncOnce(
         snapshot: null,
       };
     }
-    return { ok: false, message: uploaded.message, failures: executed.failures, snapshot: null };
+    return {
+      ok: false,
+      message: uploaded.message,
+      failures: executed.failures,
+      snapshot: null,
+    };
   }
 
   // The count comes from failed (one entry per planned path), not failures: a conflict can report
