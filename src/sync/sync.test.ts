@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { hashBytes, type Snapshot } from "../vault/vault.ts";
+import { encodeSnapshot, hashBytes, type Snapshot } from "../vault/vault.ts";
 import type { LocalWriter } from "./execute.ts";
 import { empty, fakeLocalWriter, fakeReader, fakeStorage, file, snapshot } from "./fake.ts";
 import { conflictCopyPath, MANIFEST_KEY } from "./plan.ts";
@@ -22,7 +22,7 @@ test("readRemoteManifest: a 404 is treated as an empty snapshot", async () => {
 
 test("readRemoteManifest: valid JSON is parsed into a snapshot, with the manifest's etag", async () => {
   const want: Snapshot = snapshot(file("a.md", "h1"));
-  const { storage } = fakeStorage({ [MANIFEST_KEY]: JSON.stringify(want) });
+  const { storage } = fakeStorage({ [MANIFEST_KEY]: encodeSnapshot(want) });
 
   const result = await readRemoteManifest(storage);
 
@@ -32,7 +32,7 @@ test("readRemoteManifest: valid JSON is parsed into a snapshot, with the manifes
 test("readRemoteManifest: a manifest without an etag is refused, not synced unsafely", async () => {
   // Without an etag the manifest upload can't be conditional, and an unconditional upload is the
   // concurrent clobber #83 fixed; the pass must refuse rather than proceed.
-  const { storage } = fakeStorage({ [MANIFEST_KEY]: JSON.stringify(empty) });
+  const { storage } = fakeStorage({ [MANIFEST_KEY]: encodeSnapshot(empty) });
   const inner = storage.getObject;
   storage.getObject = async (key) => {
     const result = await inner(key);
@@ -63,6 +63,30 @@ test("readRemoteManifest: JSON of the wrong shape is corrupt, not a snapshot wit
 
     assert.deepEqual(result, { ok: false, message: "remote manifest is corrupt" }, body);
   }
+});
+
+test("readRemoteManifest: a pre-marker manifest with no version field is accepted as version 1", async () => {
+  // Buckets written before the format version marker existed (#91) are version 1 by definition;
+  // they must keep syncing, not read as corrupt.
+  const want: Snapshot = snapshot(file("a.md", "h1"));
+  const { storage } = fakeStorage({ [MANIFEST_KEY]: JSON.stringify(want) });
+
+  const result = await readRemoteManifest(storage);
+
+  assert.deepEqual(result, { ok: true, snapshot: want, firstSync: false, etag: '"v1"' });
+});
+
+test("readRemoteManifest: a manifest from a newer format version refuses the pass", async () => {
+  // A bucket written in a format this build does not know must not be synced against, and the
+  // message points at the actual fix (update the plugin) instead of claiming corruption.
+  const { storage } = fakeStorage({ [MANIFEST_KEY]: JSON.stringify({ version: 2, files: [] }) });
+
+  const result = await readRemoteManifest(storage);
+
+  assert.deepEqual(result, {
+    ok: false,
+    message: "remote manifest needs a newer version of geode",
+  });
 });
 
 test("syncOnce: a stale ancestor is ignored on a first sync, so a populated vault is pushed, not wiped", async () => {
@@ -100,7 +124,7 @@ test("syncOnce: a present but empty manifest still trusts the ancestor and pulls
   const reader = fakeReader({ "a.md": "xy" });
   const { writer, files } = fakeLocalWriter();
   files.set("a.md", "xy");
-  const { storage } = fakeStorage({ [MANIFEST_KEY]: JSON.stringify(empty) });
+  const { storage } = fakeStorage({ [MANIFEST_KEY]: encodeSnapshot(empty) });
 
   const outcome = await syncOnce(previous, reader, writer, storage, 1);
 
@@ -130,8 +154,8 @@ test("syncOnce: a manifest overwritten by another device mid sync fails the pass
   // clobbered B's manifest, so b.md read as a remote deletion on B's next sync and was silently
   // deleted. A's conditional upload must instead lose the race and fail the pass.
   const ancestor = snapshot(file("a.md", "h1"));
-  const { storage, objects } = fakeStorage({ [MANIFEST_KEY]: JSON.stringify(ancestor) });
-  const bManifest = JSON.stringify(snapshot(file("a.md", "h1"), file("b.md", "h2")));
+  const { storage, objects } = fakeStorage({ [MANIFEST_KEY]: encodeSnapshot(ancestor) });
+  const bManifest = encodeSnapshot(snapshot(file("a.md", "h1"), file("b.md", "h2")));
   const inner = storage.putObject;
   let raced = false;
   storage.putObject = async (key, body, condition) => {
@@ -176,7 +200,7 @@ test("syncOnce: a manifest overwritten by another device mid sync fails the pass
 test("syncOnce: retry adopts an identical orphaned upload without another file PUT", async () => {
   const ancestor = snapshot({ path: "a.md", size: 4, mtime: 1, hash: await hashOf("base") });
   const { storage, objects } = fakeStorage({
-    [MANIFEST_KEY]: JSON.stringify(ancestor),
+    [MANIFEST_KEY]: encodeSnapshot(ancestor),
     "a.md": "base",
   });
   const inner = storage.putObject;
@@ -188,7 +212,7 @@ test("syncOnce: retry adopts an identical orphaned upload without another file P
     }
     if (key === MANIFEST_KEY && raceManifest) {
       raceManifest = false;
-      await inner(MANIFEST_KEY, new TextEncoder().encode(JSON.stringify(ancestor)));
+      await inner(MANIFEST_KEY, new TextEncoder().encode(encodeSnapshot(ancestor)));
     }
     return inner(key, body, condition);
   };
@@ -218,7 +242,8 @@ test("syncOnce: retry adopts an identical orphaned upload without another file P
     changeCount: 1,
   });
   assert.equal(filePuts, 1, "retry replaced an identical orphaned upload");
-  assert.deepEqual(JSON.parse(objects.get(MANIFEST_KEY) ?? ""), retry.snapshot);
+  assert.ok(retry.ok);
+  assert.equal(objects.get(MANIFEST_KEY), encodeSnapshot(retry.snapshot));
 });
 
 test("syncOnce: losing the manifest race cannot overwrite the winner's file", async () => {
@@ -229,11 +254,11 @@ test("syncOnce: losing the manifest race cannot overwrite the winner's file", as
   const baseHash = await hashOf("base");
   const winnerHash = await hashOf("winner");
   const ancestor = snapshot({ path: "a.md", size: 4, mtime: 1, hash: baseHash });
-  const winnerManifest = JSON.stringify(
+  const winnerManifest = encodeSnapshot(
     snapshot({ path: "a.md", size: 6, mtime: 1, hash: winnerHash }),
   );
   const { storage, objects } = fakeStorage({
-    [MANIFEST_KEY]: JSON.stringify(ancestor),
+    [MANIFEST_KEY]: encodeSnapshot(ancestor),
     "a.md": "base",
   });
   const inner = storage.putObject;
@@ -271,7 +296,7 @@ test("syncOnce: a file changed mid sync is not recorded in the manifest and is p
   // as local changes for the next pass to push.
   const ancestor = snapshot({ path: "a.md", size: 2, mtime: 1, hash: await hashOf("xy") });
   const { storage, objects } = fakeStorage({
-    [MANIFEST_KEY]: JSON.stringify(ancestor),
+    [MANIFEST_KEY]: encodeSnapshot(ancestor),
     "a.md": "xy",
   });
   // a.md matches the ancestor's size and mtime so takeSnapshot reuses its hash and sees no local
@@ -323,7 +348,7 @@ test("syncOnce: a file edited mid sync is never overwritten by a pull, and the r
     { path: "a.md", size: 4, mtime: 1, hash: await hashOf("a v1") },
     { path: "b.md", size: 4, mtime: 1, hash: await hashOf("b v1") },
   );
-  const remoteManifest = JSON.stringify(
+  const remoteManifest = encodeSnapshot(
     snapshot(file("a.md", await hashOf("a v2")), file("b.md", await hashOf("b v2"))),
   );
   const { storage, objects } = fakeStorage({
@@ -445,7 +470,7 @@ test("syncOnce: the failure message counts files, not operation failures", async
   // A conflict whose copy push and pull both fail reports two operation failures for one vault
   // path. The user facing message must count the one file, not the two operations.
   const ancestor = snapshot({ path: "a.md", size: 4, mtime: 1, hash: await hashOf("a v1") });
-  const remoteManifest = JSON.stringify(
+  const remoteManifest = encodeSnapshot(
     snapshot({ path: "a.md", size: 4, mtime: 1, hash: await hashOf("a v2") }),
   );
   // The manifest claims a.md but the object is absent, so the conflict's pull 404s; the copy push
@@ -480,7 +505,7 @@ test("syncOnce: a failed pull records progress without the ancestor ever advanci
   // to the manifest's view the unchanged local copy would read as a fresh local edit on the next
   // pass and be pushed over the newer remote version, quietly undoing the remote edit.
   const ancestor = snapshot({ path: "a.md", size: 4, mtime: 1, hash: await hashOf("a v1") });
-  const remoteManifest = JSON.stringify(
+  const remoteManifest = encodeSnapshot(
     snapshot(
       { path: "a.md", size: 4, mtime: 1, hash: await hashOf("a v2") },
       { path: "b.md", size: 3, mtime: 1, hash: await hashOf("bee") },
@@ -543,7 +568,7 @@ test("syncOnce: two first syncs racing for an empty bucket, the loser fails inst
   // Both devices see no manifest and plan a first sync. The other device's manifest lands while
   // this one is mid pass; the "ifAbsent" conditional upload must lose rather than overwrite it.
   const { storage, objects } = fakeStorage();
-  const otherManifest = JSON.stringify(snapshot(file("b.md", "h2")));
+  const otherManifest = encodeSnapshot(snapshot(file("b.md", "h2")));
   const inner = storage.putObject;
   let raced = false;
   storage.putObject = async (key, body, condition) => {

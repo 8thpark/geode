@@ -1,8 +1,9 @@
 import type { PutCondition, StorageClient } from "../storage/storage.ts";
 import {
   byPath,
+  decodeSnapshot,
+  encodeSnapshot,
   type FileState,
-  isSnapshot,
   type Reader,
   type Snapshot,
   takeSnapshot,
@@ -51,7 +52,10 @@ export function adoptLiveStats(manifest: Snapshot, live: Snapshot): Snapshot {
 // has ever been written, the safe assumption for a first sync against an empty bucket, so that's
 // treated as an empty snapshot flagged firstSync. Any other failure (network, auth, a real 5xx)
 // is reported as an error rather than ever guessed at as "remote is empty" — getting that guess
-// wrong would look exactly like every previously known remote file had just been deleted.
+// wrong would look exactly like every previously known remote file had just been deleted. A
+// manifest carrying a format version this build does not know (#91) also refuses the pass:
+// syncing against a bucket written in a newer format could mangle it, and the fix is updating
+// the plugin, not starting over.
 //
 // firstSync distinguishes "no manifest has ever been written" from "a manifest exists and is
 // genuinely empty": syncOnce must ignore the local ancestor in the former (nothing has ever been
@@ -71,13 +75,11 @@ export async function readRemoteManifest(
   const fetched = await storage.getObject(MANIFEST_KEY);
 
   if (fetched.ok && fetched.body !== null) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(new TextDecoder().decode(fetched.body));
-    } catch {
-      return { ok: false, message: "remote manifest is corrupt" };
-    }
-    if (!isSnapshot(parsed)) {
+    const decoded = decodeSnapshot(new TextDecoder().decode(fetched.body));
+    if (!decoded.ok) {
+      if (decoded.reason === "unsupportedVersion") {
+        return { ok: false, message: "remote manifest needs a newer version of geode" };
+      }
       return { ok: false, message: "remote manifest is corrupt" };
     }
     // Every S3 compatible server returns an ETag on a successful read; without one (a stripping
@@ -87,7 +89,7 @@ export async function readRemoteManifest(
     if (fetched.etag === null) {
       return { ok: false, message: "remote manifest has no etag" };
     }
-    return { ok: true, snapshot: parsed, firstSync: false, etag: fetched.etag };
+    return { ok: true, snapshot: decoded.snapshot, firstSync: false, etag: fetched.etag };
   }
 
   if (fetched.status === "not_found") {
@@ -187,7 +189,7 @@ export async function syncOnce(
   // device (#87).
   const manifest = manifestAfterSync(local, remote.snapshot, executed.completed, now);
   const final = adoptLiveStats(manifest, await takeSnapshot(reader, local));
-  const manifestBody = new TextEncoder().encode(JSON.stringify(final));
+  const manifestBody = new TextEncoder().encode(encodeSnapshot(final));
 
   // The upload is conditional on the remote manifest still being exactly what this pass read at
   // the start (or still absent, on a first sync). An unconditional put would last-writer-win
