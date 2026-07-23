@@ -82,6 +82,26 @@ const normalizeCases: { name: string; input: unknown; want: GeodeSettings }[] = 
     input: { secretId: "foo" },
     want: { ...DEFAULT_SETTINGS, secretId: "foo" },
   },
+  {
+    name: "ignorePatterns missing defaults to empty array",
+    input: {},
+    want: DEFAULT_SETTINGS,
+  },
+  {
+    name: "ignorePatterns non-array coerced to empty array",
+    input: { ignorePatterns: "not-an-array" },
+    want: DEFAULT_SETTINGS,
+  },
+  {
+    name: "ignorePatterns array with non-strings coerced to empty array",
+    input: { ignorePatterns: [1, 2, 3] },
+    want: DEFAULT_SETTINGS,
+  },
+  {
+    name: "ignorePatterns valid array passes through",
+    input: { ignorePatterns: ["private/**", "temp/*"] },
+    want: { ...DEFAULT_SETTINGS, ignorePatterns: ["private/**", "temp/*"] },
+  },
 ];
 
 for (const { name, input, want } of normalizeCases) {
@@ -156,6 +176,18 @@ const settingsEqualCases: { name: string; a: GeodeSettings; b: GeodeSettings; wa
     name: "reverting a change back to the original value is equal again",
     a: DEFAULT_SETTINGS,
     b: { ...{ ...DEFAULT_SETTINGS, provider: "custom" }, provider: "r2" },
+    want: true,
+  },
+  {
+    name: "different ignorePatterns is not equal",
+    a: DEFAULT_SETTINGS,
+    b: { ...DEFAULT_SETTINGS, ignorePatterns: ["private/**"] },
+    want: false,
+  },
+  {
+    name: "same ignorePatterns is equal",
+    a: { ...DEFAULT_SETTINGS, ignorePatterns: ["a/**", "b/*"] },
+    b: { ...DEFAULT_SETTINGS, ignorePatterns: ["a/**", "b/*"] },
     want: true,
   },
 ];

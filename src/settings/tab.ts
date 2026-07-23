@@ -28,6 +28,7 @@ type ConnectionStatus = "unknown" | "checking" | "ok" | "error";
 export function renderSettingsTab(tab: GeodeSettingTab, containerEl: HTMLElement): void {
   renderHeader(containerEl);
   renderStorageSection(tab, containerEl);
+  renderSyncSection(tab, containerEl);
   renderSupportSection(tab, containerEl);
 }
 
@@ -302,6 +303,35 @@ function renderStorageSection(tab: GeodeSettingTab, containerEl: HTMLElement): v
   renderActions(tab, card);
 }
 
+// a note about the built-in local_ prefix convention.
+function renderSyncSection(tab: GeodeSettingTab, containerEl: HTMLElement): void {
+  const heading = new Setting(containerEl).setName("Sync").setHeading();
+  heading.settingEl.addClass("geode-sync-anchor");
+  const card = containerEl.createDiv({ cls: "geode-card" });
+
+  new Setting(card)
+    .setName("Ignore patterns")
+    .setDesc(
+      "Glob patterns for files and folders to exclude from sync, one per line. " +
+        "The local_ prefix is always excluded regardless of these patterns. " +
+        "For example: use private/** to exclude a folder and its contents.",
+    )
+    .addTextArea((text) => {
+      text
+        .setPlaceholder("private/**\n*.tmp")
+        .setValue(tab.draft.ignorePatterns.join("\n"))
+        .onChange((value) => {
+          tab.draft.ignorePatterns = value
+            .split("\n")
+            .map((line) => line.trim())
+            .filter((line) => line.length > 0);
+          onFieldChanged(tab);
+        });
+      text.inputEl.rows = 5;
+      text.inputEl.style.width = "100%";
+    });
+}
+
 // renderSupportSection draws the Support heading and its card of docs, email, and debug info.
 function renderSupportSection(tab: GeodeSettingTab, containerEl: HTMLElement): void {
   const heading = new Setting(containerEl).setName("Support").setHeading();
@@ -345,7 +375,10 @@ function renderSupportSection(tab: GeodeSettingTab, containerEl: HTMLElement): v
     .setName("Debugging info")
     .setDesc("Include this when you contact support or open a GitHub issue.");
 
-  tab.debugInfoEl = card.createEl("pre", { cls: "geode-debug-box", text: debugInfoText(tab) });
+  tab.debugInfoEl = card.createEl("pre", {
+    cls: "geode-debug-box",
+    text: debugInfoText(tab),
+  });
 
   debugSetting.addButton((button) => {
     button.setButtonText("Copy").onClick(async () => {

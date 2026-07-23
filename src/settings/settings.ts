@@ -8,6 +8,7 @@ export const DEFAULT_SETTINGS: GeodeSettings = {
   bucket: "",
   accessKeyId: "",
   secretId: "",
+  ignorePatterns: [],
 };
 
 // GeodeSettings is the persisted shape of a Geode plugin's user configuration.
@@ -24,6 +25,9 @@ export type GeodeSettings = {
   // it does not support forcing new entries onto a fixed ID, so we have to remember whichever
   // one they picked.
   secretId: string;
+  // ignorePatterns is a list of glob patterns for vault paths that should be excluded from sync.
+  // The built-in local_ prefix convention is always applied regardless of this list.
+  ignorePatterns: string[];
 };
 
 // draftForDisplay returns the draft a settings tab should show for a given render.
@@ -80,6 +84,7 @@ export function normalizeSettings(raw: unknown): GeodeSettings {
     bucket: stringOr(source.bucket, DEFAULT_SETTINGS.bucket),
     accessKeyId: stringOr(source.accessKeyId, DEFAULT_SETTINGS.accessKeyId),
     secretId: stringOr(source.secretId, DEFAULT_SETTINGS.secretId),
+    ignorePatterns: stringArrayOr(source.ignorePatterns, DEFAULT_SETTINGS.ignorePatterns),
   };
 }
 
@@ -101,6 +106,19 @@ export function regionFor(settings: GeodeSettings): string {
   return settings.region;
 }
 
+// arraysEqual reports whether two string arrays have the same length and elements in order.
+function arraysEqual(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
 // settingsEqual reports whether two settings values are identical field for field. Used to
 // derive whether a draft has unsaved changes by comparing it to the last saved settings, rather
 // than tracking a dirty flag that can't self-correct when an edit is reverted by hand.
@@ -112,13 +130,22 @@ export function settingsEqual(a: GeodeSettings, b: GeodeSettings): boolean {
     a.region === b.region &&
     a.bucket === b.bucket &&
     a.accessKeyId === b.accessKeyId &&
-    a.secretId === b.secretId
+    a.secretId === b.secretId &&
+    arraysEqual(a.ignorePatterns, b.ignorePatterns)
   );
 }
 
 // stringOr returns v if it is a string, otherwise fallback.
 function stringOr(v: unknown, fallback: string): string {
   if (typeof v === "string") {
+    return v;
+  }
+  return fallback;
+}
+
+// stringArrayOr returns v if it is a string array, otherwise fallback.
+function stringArrayOr(v: unknown, fallback: string[]): string[] {
+  if (Array.isArray(v) && v.every((item) => typeof item === "string")) {
     return v;
   }
   return fallback;

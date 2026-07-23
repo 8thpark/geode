@@ -1,4 +1,5 @@
 import type { DataAdapter, Vault } from "obsidian";
+import { shouldIgnore } from "../ignore.ts";
 import type { LocalWriter } from "../sync/execute.ts";
 import { type FileInfo, isSnapshot, type Reader, type Snapshot, type Store } from "./vault.ts";
 
@@ -32,7 +33,7 @@ export function createObsidianLocalWriter(adapter: DataAdapter): LocalWriter {
 // createObsidianReader returns a Reader backed by the real vault's file tree. Obsidian
 // already excludes .obsidian/** from Vault.getFiles(), so the plugin's own state file (which
 // lives inside .obsidian/plugins/geode/) never shows up as a vault file to snapshot.
-export function createObsidianReader(vault: Vault): Reader {
+export function createObsidianReader(vault: Vault, ignorePatterns: string[]): Reader {
   return {
     fileExists: async (path) => {
       return vault.getFileByPath(path) !== null;
@@ -40,7 +41,13 @@ export function createObsidianReader(vault: Vault): Reader {
     listFiles: async () => {
       const files: FileInfo[] = [];
       for (const file of vault.getFiles()) {
-        files.push({ path: file.path, size: file.stat.size, mtime: file.stat.mtime });
+        if (!shouldIgnore(file.path, ignorePatterns)) {
+          files.push({
+            path: file.path,
+            size: file.stat.size,
+            mtime: file.stat.mtime,
+          });
+        }
       }
       return files;
     },

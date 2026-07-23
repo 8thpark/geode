@@ -35,7 +35,11 @@ const VAULT_STATE_DEBOUNCE_MS = 2000;
 // equivalent) so the Settings command can jump straight to Geode's tab, and opening the log view
 // can close the settings modal out from under itself.
 type AppWithSetting = App & {
-  setting: { open: () => void; close: () => void; openTabById: (id: string) => void };
+  setting: {
+    open: () => void;
+    close: () => void;
+    openTabById: (id: string) => void;
+  };
 };
 
 // SyncStatus is the state the status bar item reflects.
@@ -202,7 +206,7 @@ export default class GeodePlugin extends Plugin {
     const secretAccessKey = this.app.secretStorage.getSecret(this.settings.secretId) ?? "";
     const storage = createS3Client(this.settings, secretAccessKey);
     const stateStore = createObsidianStore(this.app.vault.adapter, `${dir}/state.json`);
-    const reader = createObsidianReader(this.app.vault);
+    const reader = createObsidianReader(this.app.vault, this.settings.ignorePatterns);
     const localWriter = createObsidianLocalWriter(this.app.vault.adapter);
 
     const previous = await stateStore.read();
@@ -285,7 +289,7 @@ export default class GeodePlugin extends Plugin {
     }
 
     const store = createObsidianStore(this.app.vault.adapter, `${dir}/state.json`);
-    const reader = createObsidianReader(this.app.vault);
+    const reader = createObsidianReader(this.app.vault, this.settings.ignorePatterns);
 
     // Both callers fire this and forget (void), so a rejection here would surface as an
     // unhandled promise rejection. takeSnapshot can throw when a file vanishes mid-snapshot
