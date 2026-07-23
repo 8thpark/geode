@@ -204,7 +204,7 @@ export default class GeodePlugin extends Plugin {
   // and status bar bookkeeping around it without this getting lost in indentation.
   private async runSync(dir: string): Promise<void> {
     const secretAccessKey = this.app.secretStorage.getSecret(this.settings.secretId);
-    if (secretAccessKey === null) {
+    if (secretAccessKey === null || secretAccessKey === "") {
       this.logger.error(`sync: secret access key not found for ID "${this.settings.secretId}"`);
       this.setSyncStatus("error", "secret access key not found; open settings to reconfigure");
       return;
