@@ -1,4 +1,9 @@
-const LEVEL_ORDER: Record<LogLevel, number> = { debug: 0, info: 1, warn: 2, error: 3 };
+const LEVEL_ORDER: Record<LogLevel, number> = {
+  debug: 0,
+  info: 1,
+  warn: 2,
+  error: 3,
+};
 
 // LogEntry is one line of geode's log.
 export type LogEntry = {
@@ -70,11 +75,24 @@ export function createMemorySink(maxLines: number): LogSink {
   };
 }
 
+// escapeMessage encodes control characters in a log message so the result is a single physical
+// line. Backslashes are escaped first so a pre-existing literal "\n" (two characters) is not
+// misinterpreted when newlines are escaped next.
+export function escapeMessage(msg: string): string {
+  return msg
+    .split("\\")
+    .join("\\\\")
+    .split("\n")
+    .join("\\n")
+    .split("\r")
+    .join("\\r");
+}
+
 // formatLogLine renders one entry as a single persisted line: an ISO timestamp, the level, then
 // the message, tab separated so parseLogLine can split on the same delimiter without tripping
 // over spaces in either the level or the message.
 export function formatLogLine(entry: LogEntry): string {
-  return `${new Date(entry.time).toISOString()}\t${entry.level}\t${entry.message}`;
+  return `${new Date(entry.time).toISOString()}\t${entry.level}\t${escapeMessage(entry.message)}`;
 }
 
 // levelEnabled reports whether a message at level should be logged when the minimum is minLevel.
@@ -93,7 +111,34 @@ export function parseLogLine(line: string): LogEntry | undefined {
   if (Number.isNaN(time) || !isLogLevel(rawLevel)) {
     return undefined;
   }
-  return { time, level: rawLevel, message: rest.join("\t") };
+  return { time, level: rawLevel, message: unescapeMessage(rest.join("\t")) };
+}
+
+// unescapeMessage reverses escapeMessage. Unlike escape, unescape must
+// scan character by character to avoid matching "\n" inside the stored "\\" sequence.
+export function unescapeMessage(msg: string): string {
+  let result = "";
+  for (let i = 0; i < msg.length; i++) {
+    if (msg[i] === "\\" && i + 1 < msg.length) {
+      const next = msg[i + 1];
+      if (next === "n") {
+        result += "\n";
+        i++;
+      } else if (next === "r") {
+        result += "\r";
+        i++;
+      } else if (next === "\\") {
+        result += "\\";
+        i++;
+      } else {
+        result += msg[i];
+      }
+    } else {
+      result += msg[i];
+    }
+  }
+
+  return result;
 }
 
 // trimLogLines keeps only the last maxLines lines of a log, dropping the oldest. The result keeps
@@ -124,7 +169,12 @@ function consoleFor(level: LogLevel): (message: string) => void {
 }
 
 function isLogLevel(value: string): value is LogLevel {
-  return value === "debug" || value === "info" || value === "warn" || value === "error";
+  return (
+    value === "debug" ||
+    value === "info" ||
+    value === "warn" ||
+    value === "error"
+  );
 }
 
 // linesOf splits a log's text into its lines. Every persisted line ends in "\n", so a naive split
