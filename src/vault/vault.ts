@@ -68,7 +68,9 @@ export function byPath(files: FileState[]): Map<string, FileState> {
 // its format version. A missing version is accepted as version 1, the format every build before
 // the marker existed wrote; any other unknown version is refused rather than guessed at, so this
 // build never misreads a bucket written in a newer format as garbage or, worse, as valid. The
-// returned snapshot carries only the in-memory shape; the version is a wire concern that
+// version check runs before the shape check on purpose: a future format is free to change the
+// shape itself, and its snapshots must still read as "needs a newer build", never as corrupt.
+// The returned snapshot carries only the in-memory shape; the version is a wire concern that
 // encodeSnapshot stamps back on at the next write.
 export function decodeSnapshot(raw: string): DecodedSnapshot {
   let parsed: unknown;
@@ -77,12 +79,15 @@ export function decodeSnapshot(raw: string): DecodedSnapshot {
   } catch {
     return { ok: false, reason: "corrupt" };
   }
-  if (!isSnapshot(parsed)) {
+  if (typeof parsed !== "object" || parsed === null) {
     return { ok: false, reason: "corrupt" };
   }
   const version = (parsed as { version?: unknown }).version;
   if (version !== undefined && version !== SNAPSHOT_VERSION) {
     return { ok: false, reason: "unsupportedVersion" };
+  }
+  if (!isSnapshot(parsed)) {
+    return { ok: false, reason: "corrupt" };
   }
 
   return { ok: true, snapshot: { files: parsed.files } };

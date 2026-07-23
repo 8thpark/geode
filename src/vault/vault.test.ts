@@ -141,6 +141,14 @@ test("decodeSnapshot: version handling accepts the marker, treats absence as ver
       want: { ok: false, reason: "unsupportedVersion" },
     },
     {
+      // The version check must win over the shape check: a future format may change the shape
+      // itself (files as an encrypted blob, say), and it must read as "needs a newer build",
+      // never as corrupt.
+      name: "a newer version whose shape this build does not understand",
+      raw: JSON.stringify({ version: 2, files: "ciphertext" }),
+      want: { ok: false, reason: "unsupportedVersion" },
+    },
+    {
       name: "a version that isn't even a number",
       raw: JSON.stringify({ version: "banana", files }),
       want: { ok: false, reason: "unsupportedVersion" },
