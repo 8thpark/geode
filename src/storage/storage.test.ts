@@ -28,6 +28,40 @@ const missingFieldCases: {
     secretAccessKey: "",
     want: "Fill in secret access key first",
   },
+  {
+    name: "missing account ID for R2",
+    settings: {
+      ...DEFAULT_SETTINGS,
+      bucket: "my-vault",
+      accessKeyId: "AKIA123",
+    },
+    secretAccessKey: "shh",
+    want: "Fill in account ID first",
+  },
+  {
+    name: "missing endpoint for custom",
+    settings: {
+      ...DEFAULT_SETTINGS,
+      provider: "custom",
+      region: "us-east-1",
+      bucket: "my-vault",
+      accessKeyId: "AKIA123",
+    },
+    secretAccessKey: "shh",
+    want: "Fill in endpoint first",
+  },
+  {
+    name: "missing region for custom",
+    settings: {
+      ...DEFAULT_SETTINGS,
+      provider: "custom",
+      endpoint: "https://s3.example.com",
+      bucket: "my-vault",
+      accessKeyId: "AKIA123",
+    },
+    secretAccessKey: "shh",
+    want: "Fill in region first",
+  },
 ];
 
 for (const { name, settings, secretAccessKey, want } of missingFieldCases) {
@@ -38,6 +72,20 @@ for (const { name, settings, secretAccessKey, want } of missingFieldCases) {
     assert.equal(result.message, want);
   });
 }
+
+test("testConnection: R2 with empty endpoint and region passes field check", async () => {
+  const settings: GeodeSettings = {
+    ...DEFAULT_SETTINGS,
+    bucket: "my-vault",
+    accessKeyId: "AKIA123",
+    accountId: "acc123",
+  };
+
+  const result = await testConnection(settings, "shh");
+
+  assert.equal(result.ok, false);
+  assert.notEqual(result.status, "auth");
+});
 
 test("parseListObjectsXml decodes XML entities in object keys", () => {
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
