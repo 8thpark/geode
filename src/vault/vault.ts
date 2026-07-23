@@ -1,8 +1,21 @@
+// SNAPSHOT_VERSION is the format version stamped into every serialized snapshot, remote manifest
+// and local state.json alike, so a future format change (encryption, chunked upload) has
+// something to branch on when it meets an existing bucket (#91). A serialized snapshot with no
+// version field predates the marker and is this same format, version 1.
+export const SNAPSHOT_VERSION = 1;
+
 // Change describes one path whose state differs between two snapshots.
 export type Change = {
   path: string;
   kind: "added" | "modified" | "deleted";
 };
+
+// DecodedSnapshot is the result of parsing a serialized snapshot: the snapshot itself, or why it
+// cannot be used — bytes that don't parse into the expected shape, or a format version this
+// build does not know how to read.
+export type DecodedSnapshot =
+  | { ok: true; snapshot: Snapshot }
+  | { ok: false; reason: "corrupt" | "unsupportedVersion" };
 
 // FileInfo is one file as seen live in the vault, before hashing.
 export type FileInfo = {
@@ -51,6 +64,30 @@ export function byPath(files: FileState[]): Map<string, FileState> {
   return result;
 }
 
+// decodeSnapshot parses a serialized snapshot (a remote manifest, a local state.json) and checks
+// its format version. A missing version is accepted as version 1, the format every build before
+// the marker existed wrote; any other unknown version is refused rather than guessed at, so this
+// build never misreads a bucket written in a newer format as garbage or, worse, as valid. The
+// returned snapshot carries only the in-memory shape; the version is a wire concern that
+// encodeSnapshot stamps back on at the next write.
+export function decodeSnapshot(raw: string): DecodedSnapshot {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { ok: false, reason: "corrupt" };
+  }
+  if (!isSnapshot(parsed)) {
+    return { ok: false, reason: "corrupt" };
+  }
+  const version = (parsed as { version?: unknown }).version;
+  if (version !== undefined && version !== SNAPSHOT_VERSION) {
+    return { ok: false, reason: "unsupportedVersion" };
+  }
+
+  return { ok: true, snapshot: { files: parsed.files } };
+}
+
 // diffSnapshots compares two snapshots and reports every path whose content differs.
 export function diffSnapshots(previous: Snapshot, current: Snapshot): Change[] {
   const previousByPath = byPath(previous.files);
@@ -75,6 +112,12 @@ export function diffSnapshots(previous: Snapshot, current: Snapshot): Change[] {
   }
 
   return changes;
+}
+
+// encodeSnapshot serializes a snapshot for persistence, stamping the format version so every
+// manifest and state.json written from here on carries the marker decodeSnapshot branches on.
+export function encodeSnapshot(snapshot: Snapshot): string {
+  return JSON.stringify({ version: SNAPSHOT_VERSION, files: snapshot.files });
 }
 
 // hashBytes returns the lowercase hex SHA-256 digest of data.

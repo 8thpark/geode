@@ -212,3 +212,24 @@ test("createObsidianStore: a well shaped snapshot round-trips through write and 
 
   assert.deepEqual(await store.read(), snapshot);
 });
+
+test("createObsidianStore: a pre-marker state file with no version field still reads back", async () => {
+  // State written by a build before the format version marker existed (#91) is version 1 by
+  // definition; an upgrader's ancestor must survive the upgrade, not silently reset.
+  const files = [{ path: "a.md", size: 1, mtime: 2, hash: "h" }];
+  const store = createObsidianStore(
+    fakeAdapter({ [STATE_PATH]: JSON.stringify({ files }) }),
+    STATE_PATH,
+  );
+
+  assert.deepEqual(await store.read(), { files });
+});
+
+test("createObsidianStore: a state file from a newer format version reads back as empty", async () => {
+  // A downgraded plugin cannot interpret newer state, so it starts fresh; that is safe because
+  // the matching newer format manifest blocks the sync itself before the ancestor is ever used.
+  const body = JSON.stringify({ version: 2, files: [{ path: "a.md" }] });
+  const store = createObsidianStore(fakeAdapter({ [STATE_PATH]: body }), STATE_PATH);
+
+  assert.deepEqual(await store.read(), empty);
+});

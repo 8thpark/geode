@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  type DecodedSnapshot,
+  decodeSnapshot,
   diffSnapshots,
+  encodeSnapshot,
   type FileInfo,
   isSnapshot,
   type Reader,
+  SNAPSHOT_VERSION,
   type Snapshot,
   takeSnapshot,
 } from "./vault.ts";
@@ -106,6 +110,51 @@ test("isSnapshot: only a non-null object with a files array is accepted", () => 
 
   for (const { name, value, want } of cases) {
     assert.equal(isSnapshot(value), want, name);
+  }
+});
+
+test("encodeSnapshot: the wire format carries the version marker and round-trips", () => {
+  const snapshot: Snapshot = { files: [{ path: "a.md", size: 1, mtime: 2, hash: "h" }] };
+
+  const raw = encodeSnapshot(snapshot);
+
+  assert.equal((JSON.parse(raw) as { version: number }).version, SNAPSHOT_VERSION);
+  assert.deepEqual(decodeSnapshot(raw), { ok: true, snapshot });
+});
+
+test("decodeSnapshot: version handling accepts the marker, treats absence as version 1, and refuses the unknown", () => {
+  const files = [{ path: "a.md", size: 1, mtime: 2, hash: "h" }];
+  const cases: { name: string; raw: string; want: DecodedSnapshot }[] = [
+    {
+      name: "the current versioned format",
+      raw: JSON.stringify({ version: 1, files }),
+      want: { ok: true, snapshot: { files } },
+    },
+    {
+      name: "a pre-marker snapshot with no version field, version 1 by definition",
+      raw: JSON.stringify({ files }),
+      want: { ok: true, snapshot: { files } },
+    },
+    {
+      name: "a version from a newer build",
+      raw: JSON.stringify({ version: 2, files }),
+      want: { ok: false, reason: "unsupportedVersion" },
+    },
+    {
+      name: "a version that isn't even a number",
+      raw: JSON.stringify({ version: "banana", files }),
+      want: { ok: false, reason: "unsupportedVersion" },
+    },
+    { name: "bytes that aren't JSON", raw: "not json", want: { ok: false, reason: "corrupt" } },
+    {
+      name: "JSON of the wrong shape",
+      raw: JSON.stringify({ version: 1 }),
+      want: { ok: false, reason: "corrupt" },
+    },
+  ];
+
+  for (const { name, raw, want } of cases) {
+    assert.deepEqual(decodeSnapshot(raw), want, name);
   }
 });
 
