@@ -2,6 +2,7 @@ import type {
   DeleteResult,
   GetResult,
   ListResult,
+  ObjectMeta,
   PutResult,
   StorageClient,
 } from "../storage/storage.ts";
@@ -116,8 +117,15 @@ export function fakeStorage(objects: Record<string, string> = {}): {
       etags.delete(key);
       return { ok: true, status: "ok", message: "" };
     },
-    listObjects: async (): Promise<ListResult> => {
-      return { ok: true, status: "ok", message: "", objects: [] };
+    listObjects: async (prefix): Promise<ListResult> => {
+      const objects: ObjectMeta[] = [];
+      for (const [key, content] of store) {
+        if (prefix !== undefined && prefix !== "" && !key.startsWith(prefix)) {
+          continue;
+        }
+        objects.push({ key, size: content.length, lastModified: "" });
+      }
+      return { ok: true, status: "ok", message: "", objects };
     },
   };
   return { storage, objects: store };

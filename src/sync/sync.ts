@@ -1,4 +1,4 @@
-import type { PutCondition, StorageClient } from "../storage/storage.ts";
+import type { ObjectMeta, PutCondition, StorageClient } from "../storage/storage.ts";
 import {
   byPath,
   decodeSnapshot,
@@ -46,6 +46,27 @@ export function adoptLiveStats(manifest: Snapshot, live: Snapshot): Snapshot {
   }
 
   return { files };
+}
+
+// orphanedKeys returns the bucket keys a first sync would strand: objects with no local file at
+// their key, which a manifest built purely from local files would never mention, so no device
+// would ever pull, list, or delete them again (#109). The manifest key itself is bookkeeping,
+// never a vault file, and is not counted; if one appears in the listing (another device's first
+// sync landing mid pass) the conditional manifest upload catches it loudly. Exported for its
+// tests; syncOnce is the only production caller.
+export function orphanedKeys(objects: ObjectMeta[], local: Snapshot): string[] {
+  const localByPath = byPath(local.files);
+  const orphans: string[] = [];
+  for (const object of objects) {
+    if (object.key === MANIFEST_KEY) {
+      continue;
+    }
+    if (!localByPath.has(object.key)) {
+      orphans.push(object.key);
+    }
+  }
+
+  return orphans;
 }
 
 // readRemoteManifest fetches and parses the remote manifest. A confirmed 404 means no manifest
@@ -154,6 +175,33 @@ export async function syncOnce(
   }
 
   const local = await takeSnapshot(reader, ancestor);
+
+  // A missing manifest usually means a fresh bucket, but not always: a lifecycle rule, manual
+  // cleanup, or partial restore can remove the manifest while file objects survive (#109). The
+  // pass below would build a manifest purely from local files, leaving every surviving object
+  // invisible: never pulled, never listed, orphaned forever. Refuse loudly instead when the
+  // bucket holds objects no local file accounts for. Objects that do match a local path are safe
+  // to proceed over — an interrupted first sync leaves exactly those, and each push's own
+  // precondition adopts identical bytes and refuses divergent ones.
+  if (remote.firstSync) {
+    const listed = await storage.listObjects();
+    if (!listed.ok) {
+      return { ok: false, message: listed.message, failures: [], snapshot: null };
+    }
+    const orphans = orphanedKeys(listed.objects, local);
+    if (orphans.length > 0) {
+      const failures: SyncFailure[] = [];
+      for (const key of orphans) {
+        failures.push({ path: key, message: "in the bucket but not in the local vault" });
+      }
+      return {
+        ok: false,
+        message: "bucket has files but no manifest; sync would orphan them",
+        failures,
+        snapshot: null,
+      };
+    }
+  }
 
   const actions = planSync(ancestor, local, remote.snapshot);
   const executed = await executeSyncPlan(
