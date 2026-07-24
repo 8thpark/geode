@@ -1,8 +1,23 @@
+import { endpointFor, type GeodeSettings, regionFor } from "../settings/settings.ts";
+
+// SNAPSHOT_VERSION is the format version stamped into every serialized snapshot, remote manifest
+// and local state.json alike, so a future format change (encryption, chunked upload) has
+// something to branch on when it meets an existing bucket (#91). A serialized snapshot with no
+// version field predates the marker and is this same format, version 1.
+export const SNAPSHOT_VERSION = 1;
+
 // Change describes one path whose state differs between two snapshots.
 export type Change = {
   path: string;
   kind: "added" | "modified" | "deleted";
 };
+
+// DecodedSnapshot is the result of parsing a serialized snapshot: the snapshot itself, or why it
+// cannot be used — bytes that don't parse into the expected shape, or a format version this
+// build does not know how to read.
+export type DecodedSnapshot =
+  | { ok: true; snapshot: Snapshot }
+  | { ok: false; reason: "corrupt" | "unsupportedVersion" };
 
 // FileInfo is one file as seen live in the vault, before hashing.
 export type FileInfo = {
@@ -31,6 +46,7 @@ export type Reader = {
 // Snapshot is every file geode saw the last time it took a snapshot.
 export type Snapshot = {
   files: FileState[];
+  settingsFingerprint?: string;
 };
 
 // Store reads and writes the persisted snapshot. The real implementation stores it inside
@@ -49,6 +65,41 @@ export function byPath(files: FileState[]): Map<string, FileState> {
     result.set(file.path, file);
   }
   return result;
+}
+
+// decodeSnapshot parses a serialized snapshot (a remote manifest, a local state.json) and checks
+// its format version. A missing version is accepted as version 1, the format every build before
+// the marker existed wrote; any other unknown version is refused rather than guessed at, so this
+// build never misreads a bucket written in a newer format as garbage or, worse, as valid. The
+// version check runs before the shape check on purpose: a future format is free to change the
+// shape itself, and its snapshots must still read as "needs a newer build", never as corrupt.
+// The returned snapshot carries only the in-memory shape; the version is a wire concern that
+// encodeSnapshot stamps back on at the next write.
+export function decodeSnapshot(raw: string): DecodedSnapshot {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { ok: false, reason: "corrupt" };
+  }
+  if (typeof parsed !== "object" || parsed === null) {
+    return { ok: false, reason: "corrupt" };
+  }
+  const version = (parsed as { version?: unknown }).version;
+  if (version !== undefined && version !== SNAPSHOT_VERSION) {
+    return { ok: false, reason: "unsupportedVersion" };
+  }
+  if (!isSnapshot(parsed)) {
+    return { ok: false, reason: "corrupt" };
+  }
+  const settingsFingerprint = (parsed as { settingsFingerprint?: unknown }).settingsFingerprint;
+  const fingerprintStr = typeof settingsFingerprint === "string" ? settingsFingerprint : undefined;
+  const snapshot: Snapshot = { files: parsed.files };
+  if (fingerprintStr !== undefined) {
+    snapshot.settingsFingerprint = fingerprintStr;
+  }
+
+  return { ok: true, snapshot };
 }
 
 // diffSnapshots compares two snapshots and reports every path whose content differs.
@@ -75,6 +126,34 @@ export function diffSnapshots(previous: Snapshot, current: Snapshot): Change[] {
   }
 
   return changes;
+}
+
+// encodeSnapshot serializes a snapshot for persistence, stamping the format version so every
+// manifest and state.json written from here on carries the marker decodeSnapshot branches on.
+export function encodeSnapshot(snapshot: Snapshot): string {
+  const result: { version: number; files: FileState[]; settingsFingerprint?: string } = {
+    version: SNAPSHOT_VERSION,
+    files: snapshot.files,
+  };
+  if (snapshot.settingsFingerprint !== undefined) {
+    result.settingsFingerprint = snapshot.settingsFingerprint;
+  }
+
+  return JSON.stringify(result);
+}
+
+// fingerprintSettings returns a stable string representation of the connection settings,
+// so we can detect when the sync target changes and invalidate old state.
+export function fingerprintSettings(settings: GeodeSettings): string {
+  return JSON.stringify({
+    provider: settings.provider,
+    accountId: settings.accountId,
+    endpoint: endpointFor(settings),
+    region: regionFor(settings),
+    bucket: settings.bucket,
+    accessKeyId: settings.accessKeyId,
+    secretId: settings.secretId,
+  });
 }
 
 // hashBytes returns the lowercase hex SHA-256 digest of data.

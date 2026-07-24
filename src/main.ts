@@ -35,7 +35,11 @@ const VAULT_STATE_DEBOUNCE_MS = 2000;
 // equivalent) so the Settings command can jump straight to Geode's tab, and opening the log view
 // can close the settings modal out from under itself.
 type AppWithSetting = App & {
-  setting: { open: () => void; close: () => void; openTabById: (id: string) => void };
+  setting: {
+    open: () => void;
+    close: () => void;
+    openTabById: (id: string) => void;
+  };
 };
 
 // SyncStatus is the state the status bar item reflects.
@@ -199,9 +203,19 @@ export default class GeodePlugin extends Plugin {
   // runSync does the actual work of syncNow, split out so syncNow can own the in flight guard
   // and status bar bookkeeping around it without this getting lost in indentation.
   private async runSync(dir: string): Promise<void> {
-    const secretAccessKey = this.app.secretStorage.getSecret(this.settings.secretId) ?? "";
+    const secretAccessKey = this.app.secretStorage.getSecret(this.settings.secretId);
+    if (secretAccessKey === null || secretAccessKey === "") {
+      this.logger.error(`sync: secret access key not found for ID "${this.settings.secretId}"`);
+      this.setSyncStatus("error", "secret access key not found; open settings to reconfigure");
+      return;
+    }
+
     const storage = createS3Client(this.settings, secretAccessKey);
-    const stateStore = createObsidianStore(this.app.vault.adapter, `${dir}/state.json`);
+    const stateStore = createObsidianStore(
+      this.app.vault.adapter,
+      `${dir}/state.json`,
+      this.settings,
+    );
     const reader = createObsidianReader(this.app.vault);
     const localWriter = createObsidianLocalWriter(this.app.vault.adapter);
 
@@ -284,7 +298,7 @@ export default class GeodePlugin extends Plugin {
       return;
     }
 
-    const store = createObsidianStore(this.app.vault.adapter, `${dir}/state.json`);
+    const store = createObsidianStore(this.app.vault.adapter, `${dir}/state.json`, this.settings);
     const reader = createObsidianReader(this.app.vault);
 
     // Both callers fire this and forget (void), so a rejection here would surface as an
