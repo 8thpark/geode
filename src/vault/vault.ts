@@ -142,8 +142,12 @@ export function encodeSnapshot(snapshot: Snapshot): string {
   return JSON.stringify(result);
 }
 
-// fingerprintSettings returns a stable string representation of the connection settings,
-// so we can detect when the sync target changes and invalidate old state.
+// fingerprintSettings returns a stable string identifying the sync target, so we can detect when
+// that target changes and invalidate old state (#89). It covers only where the vault lives, the
+// fields normalized through endpointFor/regionFor to match what a connection actually uses.
+// Credentials (accessKeyId, secretId) are deliberately excluded: they authorize access to a
+// target, they do not identify one, so rotating a key must not invalidate state and force a full
+// re-hash. A genuine target change always moves one of the fields below.
 export function fingerprintSettings(settings: GeodeSettings): string {
   return JSON.stringify({
     provider: settings.provider,
@@ -151,8 +155,6 @@ export function fingerprintSettings(settings: GeodeSettings): string {
     endpoint: endpointFor(settings),
     region: regionFor(settings),
     bucket: settings.bucket,
-    accessKeyId: settings.accessKeyId,
-    secretId: settings.secretId,
   });
 }
 

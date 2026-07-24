@@ -239,6 +239,25 @@ test("createObsidianStore: a fingerprint mismatch reads back as empty", async ()
   assert.deepEqual(await store2.read(), { files: [] });
 });
 
+test("createObsidianStore: rotating credentials keeps state, it does not change the target", async () => {
+  const adapter = fakeAdapter();
+  const store1 = createObsidianStore(adapter, STATE_PATH, DEFAULT_SETTINGS);
+  const snapshot: Snapshot = { files: [{ path: "a.md", size: 1, mtime: 2, hash: "h" }] };
+
+  await store1.write(snapshot);
+
+  const rotated = { ...DEFAULT_SETTINGS, accessKeyId: "new-key", secretId: "new-secret-ref" };
+  // The invariant this test rests on: rotating credentials leaves the target fingerprint
+  // unchanged, which is the only reason store2 accepts the state store1 wrote.
+  assert.equal(fingerprintSettings(rotated), fingerprintSettings(DEFAULT_SETTINGS));
+  const store2 = createObsidianStore(adapter, STATE_PATH, rotated);
+
+  assert.deepEqual(await store2.read(), {
+    ...snapshot,
+    settingsFingerprint: fingerprintSettings(rotated),
+  });
+});
+
 test("createObsidianStore: a pre-marker state file with no version field and no fingerprint reads back as empty", async () => {
   // State written by a build before the format version marker existed (#91) is version 1 by
   // definition; an upgrader's ancestor must survive the upgrade, not silently reset.
