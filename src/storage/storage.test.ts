@@ -84,7 +84,7 @@ test("testConnection: R2 with empty endpoint and region passes field check", asy
   const result = await testConnection(settings, "shh");
 
   assert.equal(result.ok, false);
-  assert.notEqual(result.status, "auth");
+  assert.ok(!result.message.startsWith("Fill in"));
 });
 
 test("parseListObjectsXml decodes XML entities in object keys", () => {
