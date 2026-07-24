@@ -21,11 +21,18 @@ below.
 - [Twine](https://github.com/EnGassa/obsidian-twine)
 - [LiveSync](https://github.com/vrtmrz/obsidian-livesync)
 - [Obsidian Git](https://github.com/Vinzent03/obsidian-git)
+- [Zettlab Sync](https://github.com/wyc7758775/zettlab-sync)
+- [GitHub Gitless Sync](https://github.com/silvanocerza/github-gitless-sync)
+- [YAOS](https://github.com/kavinsood/yaos)
+- [BYOC](https://github.com/winters27/obsidian-byoc)
 
 ## MCP
 
 - [Sync Vault](https://github.com/abcamus/obsidian-sync-vault-ce)
 - [Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api)
+- [MCP Obsidian](https://github.com/MarkusPfundstein/mcp-obsidian)
+- [MCP Vault](https://github.com/bitbonsai/mcpvault)
+- [Vault as MCP](https://github.com/ebullient/obsidian-vault-mcp)
 
 ## API
 

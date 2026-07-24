@@ -12,9 +12,9 @@ The project aims to provide the following to users:
 - Sync you never think about: quiet, boring, trustworthy; silence means everything is fine, and no
   edit is ever lost
 - Security as a first class citizen in the project
-- O11y as a first class citizen in the project
+- Observability as a first class citizen in the project
 - Documentation as a first class citizen in the project
-- Built for agents and agentic workflows in mind
+- Built with agents and agentic workflows in mind
 - Allowing access via MCP, CLI, and API for agents and tools, to allow users the flexibility to both
   access and work on the vault remotely, as well as build automations using their vault
 - One system, one bucket: sync, MCP, and the API all read the same storage and the same long term
