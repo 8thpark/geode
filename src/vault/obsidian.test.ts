@@ -247,11 +247,14 @@ test("createObsidianStore: rotating credentials keeps state, it does not change 
   await store1.write(snapshot);
 
   const rotated = { ...DEFAULT_SETTINGS, accessKeyId: "new-key", secretId: "new-secret-ref" };
+  // The invariant this test rests on: rotating credentials leaves the target fingerprint
+  // unchanged, which is the only reason store2 accepts the state store1 wrote.
+  assert.equal(fingerprintSettings(rotated), fingerprintSettings(DEFAULT_SETTINGS));
   const store2 = createObsidianStore(adapter, STATE_PATH, rotated);
 
   assert.deepEqual(await store2.read(), {
     ...snapshot,
-    settingsFingerprint: fingerprintSettings(DEFAULT_SETTINGS),
+    settingsFingerprint: fingerprintSettings(rotated),
   });
 });
 
