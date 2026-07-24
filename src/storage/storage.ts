@@ -149,7 +149,9 @@ function conditionHeaders(condition: PutCondition | undefined): Record<string, s
 }
 
 // missingFieldFor returns the name of the first field testConnection needs but doesn't have, or
-// "" if everything required is present.
+// "" if everything required is present. The requirements mirror hasConnectionConfig: all providers
+// need bucket, access key, and secret; R2 derives endpoint and region from the account ID, so
+// only custom needs them explicitly.
 function missingFieldFor(settings: GeodeSettings, secretAccessKey: string): string {
   if (settings.bucket === "") {
     return "bucket";
@@ -160,6 +162,20 @@ function missingFieldFor(settings: GeodeSettings, secretAccessKey: string): stri
   if (secretAccessKey === "") {
     return "secret access key";
   }
+
+  if (settings.provider === "r2") {
+    if (settings.accountId === "") {
+      return "account ID";
+    }
+  } else {
+    if (settings.endpoint === "") {
+      return "endpoint";
+    }
+    if (settings.region === "") {
+      return "region";
+    }
+  }
+
   return "";
 }
 
@@ -171,7 +187,9 @@ async function s3DeleteObject(
 ): Promise<DeleteResult> {
   let response: Response;
   try {
-    response = await client.fetch(`${baseUrl}/${encodeKey(key)}`, { method: "DELETE" });
+    response = await client.fetch(`${baseUrl}/${encodeKey(key)}`, {
+      method: "DELETE",
+    });
   } catch (err) {
     return { ok: false, status: "network", message: messageFor(err) };
   }
@@ -190,9 +208,17 @@ async function s3DeleteObject(
 async function s3GetObject(client: AwsClient, baseUrl: string, key: string): Promise<GetResult> {
   let response: Response;
   try {
-    response = await client.fetch(`${baseUrl}/${encodeKey(key)}`, { method: "GET" });
+    response = await client.fetch(`${baseUrl}/${encodeKey(key)}`, {
+      method: "GET",
+    });
   } catch (err) {
-    return { ok: false, status: "network", message: messageFor(err), body: null, etag: null };
+    return {
+      ok: false,
+      status: "network",
+      message: messageFor(err),
+      body: null,
+      etag: null,
+    };
   }
 
   if (!response.ok) {
@@ -238,7 +264,12 @@ async function s3ListObjects(
     try {
       response = await client.fetch(url, { method: "GET" });
     } catch (err) {
-      return { ok: false, status: "network", message: messageFor(err), objects: [] };
+      return {
+        ok: false,
+        status: "network",
+        message: messageFor(err),
+        objects: [],
+      };
     }
 
     if (!response.ok) {
