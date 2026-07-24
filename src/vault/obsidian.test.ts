@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { DataAdapter } from "obsidian";
+import { DEFAULT_SETTINGS } from "../settings/settings.ts";
 import { createObsidianLocalWriter, createObsidianStore } from "./obsidian.ts";
-import type { Snapshot } from "./vault.ts";
+import { fingerprintSettings, type Snapshot } from "./vault.ts";
 
 // fakeAdapter returns a DataAdapter whose exists/read/write operate over one in-memory file map,
 // enough to drive the state store. Only the methods the state store touches are implemented; the
@@ -182,13 +183,17 @@ test("createObsidianLocalWriter: a failed write of the staged bytes leaves the d
 });
 
 test("createObsidianStore: a missing state file reads back as empty", async () => {
-  const store = createObsidianStore(fakeAdapter(), STATE_PATH);
+  const store = createObsidianStore(fakeAdapter(), STATE_PATH, DEFAULT_SETTINGS);
 
   assert.deepEqual(await store.read(), empty);
 });
 
 test("createObsidianStore: unparseable state reads back as empty, never throwing", async () => {
-  const store = createObsidianStore(fakeAdapter({ [STATE_PATH]: "not json" }), STATE_PATH);
+  const store = createObsidianStore(
+    fakeAdapter({ [STATE_PATH]: "not json" }),
+    STATE_PATH,
+    DEFAULT_SETTINGS,
+  );
 
   assert.deepEqual(await store.read(), empty);
 });
@@ -198,7 +203,11 @@ test("createObsidianStore: state that parses but is the wrong shape reads back a
   // array, and before the shape check it flowed into takeSnapshot where byPath(previous.files)
   // threw on the next sync. It must instead fall back to empty and start fresh.
   for (const body of ["{}", "[]", "null", "42"]) {
-    const store = createObsidianStore(fakeAdapter({ [STATE_PATH]: body }), STATE_PATH);
+    const store = createObsidianStore(
+      fakeAdapter({ [STATE_PATH]: body }),
+      STATE_PATH,
+      DEFAULT_SETTINGS,
+    );
 
     assert.deepEqual(await store.read(), empty, body);
   }
@@ -206,30 +215,53 @@ test("createObsidianStore: state that parses but is the wrong shape reads back a
 
 test("createObsidianStore: a well shaped snapshot round-trips through write and read", async () => {
   const snapshot: Snapshot = { files: [{ path: "a.md", size: 1, mtime: 2, hash: "h" }] };
-  const store = createObsidianStore(fakeAdapter(), STATE_PATH);
+  const store = createObsidianStore(fakeAdapter(), STATE_PATH, DEFAULT_SETTINGS);
 
   await store.write(snapshot);
 
-  assert.deepEqual(await store.read(), snapshot);
+  const want: Snapshot = {
+    ...snapshot,
+    settingsFingerprint: fingerprintSettings(DEFAULT_SETTINGS),
+  };
+  assert.deepEqual(await store.read(), want);
 });
 
-test("createObsidianStore: a pre-marker state file with no version field still reads back", async () => {
+test("createObsidianStore: a fingerprint mismatch reads back as empty", async () => {
+  const adapter = fakeAdapter();
+  const store1 = createObsidianStore(adapter, STATE_PATH, DEFAULT_SETTINGS);
+  const snapshot: Snapshot = { files: [{ path: "a.md", size: 1, mtime: 2, hash: "h" }] };
+
+  await store1.write(snapshot);
+
+  const customSettings = { ...DEFAULT_SETTINGS, bucket: "other-bucket" };
+  const store2 = createObsidianStore(adapter, STATE_PATH, customSettings);
+
+  assert.deepEqual(await store2.read(), { files: [] });
+});
+
+test("createObsidianStore: a pre-marker state file with no version field and no fingerprint reads back as empty", async () => {
   // State written by a build before the format version marker existed (#91) is version 1 by
   // definition; an upgrader's ancestor must survive the upgrade, not silently reset.
+  // With fingerprinting added, it does NOT survive unless it has a fingerprint matching current. So it reads back as empty.
   const files = [{ path: "a.md", size: 1, mtime: 2, hash: "h" }];
   const store = createObsidianStore(
     fakeAdapter({ [STATE_PATH]: JSON.stringify({ files }) }),
     STATE_PATH,
+    DEFAULT_SETTINGS,
   );
 
-  assert.deepEqual(await store.read(), { files });
+  assert.deepEqual(await store.read(), { files: [] });
 });
 
 test("createObsidianStore: a state file from a newer format version reads back as empty", async () => {
   // A downgraded plugin cannot interpret newer state, so it starts fresh; that is safe because
   // the matching newer format manifest blocks the sync itself before the ancestor is ever used.
   const body = JSON.stringify({ version: 2, files: [{ path: "a.md" }] });
-  const store = createObsidianStore(fakeAdapter({ [STATE_PATH]: body }), STATE_PATH);
+  const store = createObsidianStore(
+    fakeAdapter({ [STATE_PATH]: body }),
+    STATE_PATH,
+    DEFAULT_SETTINGS,
+  );
 
   assert.deepEqual(await store.read(), empty);
 });

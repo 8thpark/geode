@@ -1,9 +1,11 @@
 import type { DataAdapter, Vault } from "obsidian";
+import type { GeodeSettings } from "../settings/settings.ts";
 import type { LocalWriter } from "../sync/execute.ts";
 import {
   decodeSnapshot,
   encodeSnapshot,
   type FileInfo,
+  fingerprintSettings,
   type Reader,
   type Snapshot,
   type Store,
@@ -68,7 +70,11 @@ export function createObsidianReader(vault: Vault): Reader {
 // to crash sync: an empty ancestor can at worst produce conflict copies, never data loss, and a
 // state.json from a newer format only ever appears alongside a newer format manifest, which
 // readRemoteManifest refuses before the ancestor matters.
-export function createObsidianStore(adapter: DataAdapter, statePath: string): Store {
+export function createObsidianStore(
+  adapter: DataAdapter,
+  statePath: string,
+  settings: GeodeSettings,
+): Store {
   const empty: Snapshot = { files: [] };
 
   return {
@@ -87,11 +93,18 @@ export function createObsidianStore(adapter: DataAdapter, statePath: string): St
       if (!decoded.ok) {
         return empty;
       }
+      if (decoded.snapshot.settingsFingerprint !== fingerprintSettings(settings)) {
+        return empty;
+      }
 
       return decoded.snapshot;
     },
     write: async (snapshot) => {
-      await adapter.write(statePath, encodeSnapshot(snapshot));
+      const withFingerprint: Snapshot = {
+        ...snapshot,
+        settingsFingerprint: fingerprintSettings(settings),
+      };
+      await adapter.write(statePath, encodeSnapshot(withFingerprint));
     },
   };
 }

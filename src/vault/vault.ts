@@ -1,3 +1,5 @@
+import { endpointFor, type GeodeSettings, regionFor } from "../settings/settings.ts";
+
 // SNAPSHOT_VERSION is the format version stamped into every serialized snapshot, remote manifest
 // and local state.json alike, so a future format change (encryption, chunked upload) has
 // something to branch on when it meets an existing bucket (#91). A serialized snapshot with no
@@ -44,6 +46,7 @@ export type Reader = {
 // Snapshot is every file geode saw the last time it took a snapshot.
 export type Snapshot = {
   files: FileState[];
+  settingsFingerprint?: string;
 };
 
 // Store reads and writes the persisted snapshot. The real implementation stores it inside
@@ -89,8 +92,14 @@ export function decodeSnapshot(raw: string): DecodedSnapshot {
   if (!isSnapshot(parsed)) {
     return { ok: false, reason: "corrupt" };
   }
+  const settingsFingerprint = (parsed as { settingsFingerprint?: unknown }).settingsFingerprint;
+  const fingerprintStr = typeof settingsFingerprint === "string" ? settingsFingerprint : undefined;
+  const snapshot: Snapshot = { files: parsed.files };
+  if (fingerprintStr !== undefined) {
+    snapshot.settingsFingerprint = fingerprintStr;
+  }
 
-  return { ok: true, snapshot: { files: parsed.files } };
+  return { ok: true, snapshot };
 }
 
 // diffSnapshots compares two snapshots and reports every path whose content differs.
@@ -122,7 +131,29 @@ export function diffSnapshots(previous: Snapshot, current: Snapshot): Change[] {
 // encodeSnapshot serializes a snapshot for persistence, stamping the format version so every
 // manifest and state.json written from here on carries the marker decodeSnapshot branches on.
 export function encodeSnapshot(snapshot: Snapshot): string {
-  return JSON.stringify({ version: SNAPSHOT_VERSION, files: snapshot.files });
+  const result: { version: number; files: FileState[]; settingsFingerprint?: string } = {
+    version: SNAPSHOT_VERSION,
+    files: snapshot.files,
+  };
+  if (snapshot.settingsFingerprint !== undefined) {
+    result.settingsFingerprint = snapshot.settingsFingerprint;
+  }
+
+  return JSON.stringify(result);
+}
+
+// fingerprintSettings returns a stable string representation of the connection settings,
+// so we can detect when the sync target changes and invalidate old state.
+export function fingerprintSettings(settings: GeodeSettings): string {
+  return JSON.stringify({
+    provider: settings.provider,
+    accountId: settings.accountId,
+    endpoint: endpointFor(settings),
+    region: regionFor(settings),
+    bucket: settings.bucket,
+    accessKeyId: settings.accessKeyId,
+    secretId: settings.secretId,
+  });
 }
 
 // hashBytes returns the lowercase hex SHA-256 digest of data.
