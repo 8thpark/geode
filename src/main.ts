@@ -211,7 +211,7 @@ export default class GeodePlugin extends Plugin {
     }
 
     const storage = createS3Client(this.settings, secretAccessKey);
-    const stateStore = createObsidianStore(this.app.vault.adapter, `${dir}/state.json`);
+    const stateStore = createObsidianStore(this.app.vault.adapter, `${dir}/state.json`, this.settings);
     const reader = createObsidianReader(this.app.vault);
     const localWriter = createObsidianLocalWriter(this.app.vault.adapter);
 
@@ -294,7 +294,7 @@ export default class GeodePlugin extends Plugin {
       return;
     }
 
-    const store = createObsidianStore(this.app.vault.adapter, `${dir}/state.json`);
+    const store = createObsidianStore(this.app.vault.adapter, `${dir}/state.json`, this.settings);
     const reader = createObsidianReader(this.app.vault);
 
     // Both callers fire this and forget (void), so a rejection here would surface as an

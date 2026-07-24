@@ -53,7 +53,7 @@ function newDevice(): Device {
     root,
     reader: createObsidianReader(vault),
     writer: createObsidianLocalWriter(adapter),
-    stateStore: createObsidianStore(adapter, STATE_PATH),
+    stateStore: createObsidianStore(adapter, STATE_PATH, liveSettings),
   };
 }
 
