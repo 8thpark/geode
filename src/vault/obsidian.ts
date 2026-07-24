@@ -1,6 +1,15 @@
 import type { DataAdapter, Vault } from "obsidian";
+import type { GeodeSettings } from "../settings/settings.ts";
 import type { LocalWriter } from "../sync/execute.ts";
-import { type FileInfo, isSnapshot, type Reader, type Snapshot, type Store } from "./vault.ts";
+import {
+  decodeSnapshot,
+  encodeSnapshot,
+  type FileInfo,
+  fingerprintSettings,
+  type Reader,
+  type Snapshot,
+  type Store,
+} from "./vault.ts";
 
 // createObsidianLocalWriter returns a LocalWriter that applies pulled remote changes straight
 // through the low level data adapter, rather than the Vault API, since a path pulled down for
@@ -56,9 +65,16 @@ export function createObsidianReader(vault: Vault): Reader {
 }
 
 // createObsidianStore returns a Store that persists the snapshot at statePath via the
-// vault adapter. A missing or unparseable file is treated as "no snapshot yet" rather than an
-// error, since the safest fallback for corrupt state is to start fresh, not to crash sync.
-export function createObsidianStore(adapter: DataAdapter, statePath: string): Store {
+// vault adapter. A missing, unparseable, or unsupported-version file is treated as "no snapshot
+// yet" rather than an error, since the safest fallback for unusable state is to start fresh, not
+// to crash sync: an empty ancestor can at worst produce conflict copies, never data loss, and a
+// state.json from a newer format only ever appears alongside a newer format manifest, which
+// readRemoteManifest refuses before the ancestor matters.
+export function createObsidianStore(
+  adapter: DataAdapter,
+  statePath: string,
+  settings: GeodeSettings,
+): Store {
   const empty: Snapshot = { files: [] };
 
   return {
@@ -67,18 +83,28 @@ export function createObsidianStore(adapter: DataAdapter, statePath: string): St
       if (!exists) {
         return empty;
       }
+      let raw: string;
       try {
-        const parsed: unknown = JSON.parse(await adapter.read(statePath));
-        if (isSnapshot(parsed)) {
-          return parsed;
-        }
-        return empty;
+        raw = await adapter.read(statePath);
       } catch {
         return empty;
       }
+      const decoded = decodeSnapshot(raw);
+      if (!decoded.ok) {
+        return empty;
+      }
+      if (decoded.snapshot.settingsFingerprint !== fingerprintSettings(settings)) {
+        return empty;
+      }
+
+      return decoded.snapshot;
     },
     write: async (snapshot) => {
-      await adapter.write(statePath, JSON.stringify(snapshot));
+      const withFingerprint: Snapshot = {
+        ...snapshot,
+        settingsFingerprint: fingerprintSettings(settings),
+      };
+      await adapter.write(statePath, encodeSnapshot(withFingerprint));
     },
   };
 }
