@@ -7,6 +7,8 @@ import { conflictCopyPath, type SyncAction } from "./plan.ts";
 const DRIFT_MESSAGE = "changed locally mid sync; sync again to reconcile";
 
 const REMOTE_DRIFT_MESSAGE = "changed remotely mid sync; sync again to reconcile";
+const HASH_MISMATCH_MESSAGE = "fetched bytes do not match manifest hash; sync again to reconcile";
+const MANIFEST_MISSING_HASH_MESSAGE = "manifest missing expected hash for this path";
 const REMOTE_ETAG_MESSAGE = "remote object has no etag";
 
 // ExecuteResult reports what executeSyncPlan carried out: completed holds every action fully
@@ -206,6 +208,10 @@ async function executeAction(
       return failedAction(action.path, result.message, false);
     }
     const body = result.body;
+    const integrity = await verifyFetch(action.path, body, remoteByPath.get(action.path));
+    if (integrity !== null) {
+      return { concurrent: false, failures: [integrity] };
+    }
     const failure = await applyLocalWrite(action.path, () =>
       localWriter.writeFile(action.path, body),
     );
@@ -242,6 +248,10 @@ async function executeAction(
       return failedAction(action.path, result.message, false);
     }
     const body = result.body;
+    const integrity = await verifyFetch(action.path, body, remoteByPath.get(action.path));
+    if (integrity !== null) {
+      return { concurrent: false, failures: [integrity] };
+    }
     const failure = await applyLocalWrite(action.path, () =>
       localWriter.writeFile(action.path, body),
     );
@@ -292,6 +302,11 @@ async function executeAction(
     return { concurrent, failures };
   }
   const body = result.body;
+  const integrity = await verifyFetch(action.path, body, remoteByPath.get(action.path));
+  if (integrity !== null) {
+    failures.push(integrity);
+    return { concurrent, failures };
+  }
   const writeFailure = await applyLocalWrite(action.path, () =>
     localWriter.writeFile(action.path, body),
   );
@@ -384,4 +399,23 @@ function localFailureMessage(err: unknown): string {
     return err.message;
   }
   return "local file operation failed";
+}
+
+// verifyFetch hashes fetched bytes and compares against the expected hash from the remote
+// snapshot. A mismatch means the storage response was truncated, corrupted, or tampered with;
+// writing it to disk would silently propagate damage to every other device on the next sync. A
+// missing expected hash is a programming error — the manifest should always carry an entry for a
+// path the plan decided to pull — surfaced rather than silently bypassed.
+async function verifyFetch(
+  path: string,
+  body: Uint8Array,
+  expected: FileState | undefined,
+): Promise<SyncFailure | null> {
+  if (expected === undefined) {
+    return { path, message: MANIFEST_MISSING_HASH_MESSAGE };
+  }
+  if ((await hashBytes(body)) === expected.hash) {
+    return null;
+  }
+  return { path, message: HASH_MISMATCH_MESSAGE };
 }

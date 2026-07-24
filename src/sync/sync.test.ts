@@ -155,7 +155,7 @@ test("syncOnce: a manifest overwritten by another device mid sync fails the pass
   // deleted. A's conditional upload must instead lose the race and fail the pass.
   const ancestor = snapshot(file("a.md", "h1"));
   const { storage, objects } = fakeStorage({ [MANIFEST_KEY]: encodeSnapshot(ancestor) });
-  const bManifest = encodeSnapshot(snapshot(file("a.md", "h1"), file("b.md", "h2")));
+  const bManifest = encodeSnapshot(snapshot(file("a.md", "h1"), file("b.md", await hashOf("bee"))));
   const inner = storage.putObject;
   let raced = false;
   storage.putObject = async (key, body, condition) => {

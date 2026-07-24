@@ -44,6 +44,7 @@ test("executeSyncPlan: pull fetches the remote object and writes it locally", as
   const reader = fakeReader({});
   const { writer, files } = fakeLocalWriter();
   const { storage } = fakeStorage({ "a.md": "hello" });
+  const remote = snapshot(file("a.md", await hashOf("hello")));
 
   const { failures } = await executeSyncPlan(
     [{ kind: "pull", path: "a.md" }],
@@ -52,6 +53,7 @@ test("executeSyncPlan: pull fetches the remote object and writes it locally", as
     writer,
     storage,
     1,
+    remote,
   );
 
   assert.deepEqual(failures, []);
@@ -64,6 +66,7 @@ test("executeSyncPlan: pull overwrites a local file that still matches the snaps
   files.set("a.md", "unchanged");
   const local = snapshot(file("a.md", await hashOf("unchanged")));
   const { storage } = fakeStorage({ "a.md": "remote edit" });
+  const remote = snapshot(file("a.md", await hashOf("remote edit")));
 
   const { failures } = await executeSyncPlan(
     [{ kind: "pull", path: "a.md" }],
@@ -72,6 +75,7 @@ test("executeSyncPlan: pull overwrites a local file that still matches the snaps
     writer,
     storage,
     1,
+    remote,
   );
 
   assert.deepEqual(failures, []);
@@ -88,12 +92,16 @@ test("executeSyncPlan: pull onto a file edited after the snapshot is refused and
   files.set("a.md", "edited after snapshot");
   const local = snapshot(file("a.md", await hashOf("as snapshotted")));
   const { storage } = fakeStorage({ "a.md": "remote edit", "b.md": "remote b" });
+  const remote = snapshot(
+    file("a.md", await hashOf("remote edit")),
+    file("b.md", await hashOf("remote b")),
+  );
 
   const actions: SyncAction[] = [
     { kind: "pull", path: "a.md" },
     { kind: "pull", path: "b.md" },
   ];
-  const { failures } = await executeSyncPlan(actions, local, reader, writer, storage, 1);
+  const { failures } = await executeSyncPlan(actions, local, reader, writer, storage, 1, remote);
 
   assert.deepEqual(failures, [
     { path: "a.md", message: "changed locally mid sync; sync again to reconcile" },
@@ -195,6 +203,7 @@ test("executeSyncPlan: a conflict renames the local copy, pushes it to storage, 
   const { writer, files } = fakeLocalWriter();
   files.set("a.md", "local edit");
   const { storage, objects } = fakeStorage({ "a.md": "remote edit" });
+  const remote = snapshot(file("a.md", await hashOf("remote edit")));
   const now = Date.parse("2026-07-14T10:00:00.000Z");
 
   const { failures } = await executeSyncPlan(
@@ -204,6 +213,7 @@ test("executeSyncPlan: a conflict renames the local copy, pushes it to storage, 
     writer,
     storage,
     now,
+    remote,
   );
 
   assert.deepEqual(failures, []);
@@ -219,6 +229,7 @@ test("executeSyncPlan: a conflict with nothing local to preserve just pulls the 
   const reader = fakeReader({});
   const { writer, files } = fakeLocalWriter();
   const { storage } = fakeStorage({ "a.md": "remote edit" });
+  const remote = snapshot(file("a.md", await hashOf("remote edit")));
   const now = Date.parse("2026-07-14T10:00:00.000Z");
 
   const { failures } = await executeSyncPlan(
@@ -228,6 +239,7 @@ test("executeSyncPlan: a conflict with nothing local to preserve just pulls the 
     writer,
     storage,
     now,
+    remote,
   );
 
   assert.deepEqual(failures, []);
@@ -366,6 +378,7 @@ test("executeSyncPlan: a conflict whose copy push fails is a failed action, even
   const { writer, files } = fakeLocalWriter();
   files.set("a.md", "local edit");
   const { storage, objects } = fakeStorage({ "a.md": "remote edit" });
+  const remote = snapshot(file("a.md", await hashOf("remote edit")));
   const inner = storage.putObject;
   storage.putObject = async (key, body, condition) => {
     if (key !== "a.md") {
@@ -383,6 +396,7 @@ test("executeSyncPlan: a conflict whose copy push fails is a failed action, even
     writer,
     storage,
     now,
+    remote,
   );
 
   assert.deepEqual(failures, [
@@ -409,12 +423,16 @@ test("executeSyncPlan: a pull whose local write throws is reported and doesn't s
     files.set(path, "pulled");
   };
   const { storage } = fakeStorage({ "a.md": "remote a", "b.md": "remote b" });
+  const remote = snapshot(
+    file("a.md", await hashOf("remote a")),
+    file("b.md", await hashOf("remote b")),
+  );
 
   const actions: SyncAction[] = [
     { kind: "pull", path: "a.md" },
     { kind: "pull", path: "b.md" },
   ];
-  const { failures } = await executeSyncPlan(actions, empty, reader, writer, storage, 1);
+  const { failures } = await executeSyncPlan(actions, empty, reader, writer, storage, 1, remote);
 
   assert.deepEqual(failures, [{ path: "a.md", message: "EACCES: permission denied" }]);
   assert.equal(files.get("b.md"), "pulled");
@@ -446,4 +464,130 @@ test("executeSyncPlan: a conflict whose rename throws is reported and the local 
   // The local edit is untouched and the remote version never overwrote it.
   assert.equal(files.get("a.md"), "local edit");
   assert.equal(objects.has(conflictCopyPath("a.md", now)), false);
+});
+
+test("executeSyncPlan: pull with matching hash writes the file to disk", async () => {
+  const reader = fakeReader({});
+  const { writer, files } = fakeLocalWriter();
+  const { storage } = fakeStorage({ "a.md": "hello" });
+  const remote = snapshot(file("a.md", await hashOf("hello")));
+
+  const { failures } = await executeSyncPlan(
+    [{ kind: "pull", path: "a.md" }],
+    empty,
+    reader,
+    writer,
+    storage,
+    1,
+    remote,
+  );
+
+  assert.deepEqual(failures, []);
+  assert.equal(files.get("a.md"), "hello");
+});
+
+test("executeSyncPlan: pull with hash mismatch is refused and nothing is written to disk", async () => {
+  const reader = fakeReader({});
+  const { writer, files } = fakeLocalWriter();
+  const { storage } = fakeStorage({ "a.md": "wrong content" });
+  const remote = snapshot(file("a.md", await hashOf("correct content")));
+
+  const { failures } = await executeSyncPlan(
+    [{ kind: "pull", path: "a.md" }],
+    empty,
+    reader,
+    writer,
+    storage,
+    1,
+    remote,
+  );
+
+  assert.deepEqual(failures, [
+    {
+      path: "a.md",
+      message: "fetched bytes do not match manifest hash; sync again to reconcile",
+    },
+  ]);
+  assert.equal(files.has("a.md"), false);
+});
+
+test("executeSyncPlan: pull with truncated body is refused and nothing is written to disk", async () => {
+  const reader = fakeReader({});
+  const { writer, files } = fakeLocalWriter();
+  const { storage } = fakeStorage({ "a.md": "hel" });
+  const remote = snapshot(file("a.md", await hashOf("hello")));
+
+  const { failures } = await executeSyncPlan(
+    [{ kind: "pull", path: "a.md" }],
+    empty,
+    reader,
+    writer,
+    storage,
+    1,
+    remote,
+  );
+
+  assert.deepEqual(failures, [
+    {
+      path: "a.md",
+      message: "fetched bytes do not match manifest hash; sync again to reconcile",
+    },
+  ]);
+  assert.equal(files.has("a.md"), false);
+});
+
+test("executeSyncPlan: conflict restore with hash mismatch is refused and nothing is written", async () => {
+  const reader = fakeReader({});
+  const { writer, files } = fakeLocalWriter();
+  const { storage } = fakeStorage({ "a.md": "wrong content" });
+  const remote = snapshot(file("a.md", await hashOf("correct content")));
+  const now = Date.parse("2026-07-14T10:00:00.000Z");
+
+  const { failures } = await executeSyncPlan(
+    [{ kind: "conflict", path: "a.md", deletedSide: "local" }],
+    empty,
+    reader,
+    writer,
+    storage,
+    now,
+    remote,
+  );
+
+  assert.deepEqual(failures, [
+    {
+      path: "a.md",
+      message: "fetched bytes do not match manifest hash; sync again to reconcile",
+    },
+  ]);
+  assert.equal(files.has("a.md"), false);
+});
+
+test("executeSyncPlan: conflict with hash mismatch on remote restore is reported and local edit survives", async () => {
+  const reader = fakeReader({ "a.md": "local edit" });
+  const { writer, files } = fakeLocalWriter();
+  files.set("a.md", "local edit");
+  const { storage, objects } = fakeStorage({ "a.md": "wrong content" });
+  const remote = snapshot(file("a.md", await hashOf("correct content")));
+  const now = Date.parse("2026-07-14T10:00:00.000Z");
+
+  const { failures } = await executeSyncPlan(
+    [{ kind: "conflict", path: "a.md", deletedSide: "none" }],
+    empty,
+    reader,
+    writer,
+    storage,
+    now,
+    remote,
+  );
+
+  assert.deepEqual(failures, [
+    {
+      path: "a.md",
+      message: "fetched bytes do not match manifest hash; sync again to reconcile",
+    },
+  ]);
+  // The local edit was renamed to the conflict copy before the pull was attempted.
+  assert.equal(files.get("a.md"), undefined);
+  assert.equal(files.get(conflictCopyPath("a.md", now)), "local edit");
+  assert.equal(objects.get(conflictCopyPath("a.md", now)), "local edit");
 });
