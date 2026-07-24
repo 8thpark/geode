@@ -1,4 +1,4 @@
-import { endpointFor, regionFor, type GeodeSettings } from "../settings/settings.ts";
+import { endpointFor, type GeodeSettings, regionFor } from "../settings/settings.ts";
 
 // SNAPSHOT_VERSION is the format version stamped into every serialized snapshot, remote manifest
 // and local state.json alike, so a future format change (encryption, chunked upload) has

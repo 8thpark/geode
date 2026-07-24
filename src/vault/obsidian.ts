@@ -4,8 +4,8 @@ import type { LocalWriter } from "../sync/execute.ts";
 import {
   decodeSnapshot,
   encodeSnapshot,
-  fingerprintSettings,
   type FileInfo,
+  fingerprintSettings,
   type Reader,
   type Snapshot,
   type Store,

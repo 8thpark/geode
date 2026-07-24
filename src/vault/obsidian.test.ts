@@ -189,7 +189,11 @@ test("createObsidianStore: a missing state file reads back as empty", async () =
 });
 
 test("createObsidianStore: unparseable state reads back as empty, never throwing", async () => {
-  const store = createObsidianStore(fakeAdapter({ [STATE_PATH]: "not json" }), STATE_PATH, DEFAULT_SETTINGS);
+  const store = createObsidianStore(
+    fakeAdapter({ [STATE_PATH]: "not json" }),
+    STATE_PATH,
+    DEFAULT_SETTINGS,
+  );
 
   assert.deepEqual(await store.read(), empty);
 });
@@ -199,7 +203,11 @@ test("createObsidianStore: state that parses but is the wrong shape reads back a
   // array, and before the shape check it flowed into takeSnapshot where byPath(previous.files)
   // threw on the next sync. It must instead fall back to empty and start fresh.
   for (const body of ["{}", "[]", "null", "42"]) {
-    const store = createObsidianStore(fakeAdapter({ [STATE_PATH]: body }), STATE_PATH, DEFAULT_SETTINGS);
+    const store = createObsidianStore(
+      fakeAdapter({ [STATE_PATH]: body }),
+      STATE_PATH,
+      DEFAULT_SETTINGS,
+    );
 
     assert.deepEqual(await store.read(), empty, body);
   }
@@ -249,7 +257,11 @@ test("createObsidianStore: a state file from a newer format version reads back a
   // A downgraded plugin cannot interpret newer state, so it starts fresh; that is safe because
   // the matching newer format manifest blocks the sync itself before the ancestor is ever used.
   const body = JSON.stringify({ version: 2, files: [{ path: "a.md" }] });
-  const store = createObsidianStore(fakeAdapter({ [STATE_PATH]: body }), STATE_PATH, DEFAULT_SETTINGS);
+  const store = createObsidianStore(
+    fakeAdapter({ [STATE_PATH]: body }),
+    STATE_PATH,
+    DEFAULT_SETTINGS,
+  );
 
   assert.deepEqual(await store.read(), empty);
 });

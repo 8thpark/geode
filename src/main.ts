@@ -211,7 +211,11 @@ export default class GeodePlugin extends Plugin {
     }
 
     const storage = createS3Client(this.settings, secretAccessKey);
-    const stateStore = createObsidianStore(this.app.vault.adapter, `${dir}/state.json`, this.settings);
+    const stateStore = createObsidianStore(
+      this.app.vault.adapter,
+      `${dir}/state.json`,
+      this.settings,
+    );
     const reader = createObsidianReader(this.app.vault);
     const localWriter = createObsidianLocalWriter(this.app.vault.adapter);
 
