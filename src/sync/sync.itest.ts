@@ -102,9 +102,12 @@ async function sync(d: Device, now = Date.now()): Promise<SyncOutcome> {
 
 // resetRemote clears the manifest and every object, so each scenario starts from an empty bucket;
 // the bucket is exclusively this file's, so a full wipe never disturbs another test file's keys.
+// A failed listing fails the scenario here rather than proceeding with a stale bucket, which
+// would surface later as a baffling orphan refusal on the scenario's first sync.
 async function resetRemote(): Promise<void> {
   await storage.deleteObject(MANIFEST_KEY);
   const listed = await storage.listObjects();
+  assert.ok(listed.ok, `resetRemote: listing failed: ${listed.message}`);
   for (const object of listed.objects) {
     await storage.deleteObject(object.key);
   }
