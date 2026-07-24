@@ -28,7 +28,10 @@ const liveSettings: GeodeSettings = {
   provider: "custom",
   endpoint: "http://localhost:4568",
   region: "us-east-1",
-  bucket: "geode-test",
+  // sync.itest has this bucket to itself: syncOnce's first sync path lists the whole bucket
+  // (#109), so sharing geode-test with storage.itest's leftover objects would trip the orphan
+  // refusal in every scenario here.
+  bucket: "geode-sync-test",
   accessKeyId: "geodedev",
 };
 
@@ -97,11 +100,11 @@ async function sync(d: Device, now = Date.now()): Promise<SyncOutcome> {
   return outcome;
 }
 
-// resetRemote clears the manifest and every object under prefix, so each scenario starts from a
-// clean shared bucket without disturbing the other itest files' keys.
-async function resetRemote(prefix: string): Promise<void> {
+// resetRemote clears the manifest and every object, so each scenario starts from an empty bucket;
+// the bucket is exclusively this file's, so a full wipe never disturbs another test file's keys.
+async function resetRemote(): Promise<void> {
   await storage.deleteObject(MANIFEST_KEY);
-  const listed = await storage.listObjects(prefix);
+  const listed = await storage.listObjects();
   for (const object of listed.objects) {
     await storage.deleteObject(object.key);
   }
@@ -115,7 +118,7 @@ function cleanup(...devices: Device[]): void {
 }
 
 test("sync: two devices converge on each other's changes", async () => {
-  await resetRemote("one/");
+  await resetRemote();
   const a = newDevice();
   const b = newDevice();
   try {
@@ -140,7 +143,7 @@ test("sync: two devices converge on each other's changes", async () => {
 });
 
 test("sync: three devices converge through the shared remote", async () => {
-  await resetRemote("two/");
+  await resetRemote();
   const a = newDevice();
   const b = newDevice();
   const c = newDevice();
@@ -168,7 +171,7 @@ test("sync: three devices converge through the shared remote", async () => {
 });
 
 test("sync: a two device conflict pushes the copy so the other device pulls it clean", async () => {
-  await resetRemote("three/");
+  await resetRemote();
   const a = newDevice();
   const b = newDevice();
   const now = Date.parse("2026-07-14T10:00:00.000Z");
@@ -211,7 +214,7 @@ test("sync: a two device conflict pushes the copy so the other device pulls it c
 });
 
 test("sync: a file deleted independently on both devices converges without a conflict", async () => {
-  await resetRemote("four/");
+  await resetRemote();
   const a = newDevice();
   const b = newDevice();
   try {
@@ -245,7 +248,7 @@ test("sync: a file deleted independently on both devices converges without a con
 });
 
 test("sync: a file deleted on one device and edited on another restores the edit, no phantom read of the deleted file", async () => {
-  await resetRemote("five/");
+  await resetRemote();
   const a = newDevice();
   const b = newDevice();
   try {
@@ -274,7 +277,7 @@ test("sync: a file deleted on one device and edited on another restores the edit
 });
 
 test("sync: a stale state.json from an older build never deletes the vault on the first sync", async () => {
-  await resetRemote("seven/");
+  await resetRemote();
   const a = newDevice();
   try {
     // Reproduce an upgrader's poisoned ancestor. The older build wrote state.json on every file
@@ -320,7 +323,7 @@ test("sync: two devices syncing at overlapping times never silently delete a fil
   // reading the manifest and uploading its own, the exact interleaving overlapping automatic
   // syncs produce. Before the fix A's unconditional manifest upload clobbered B's, so B's next
   // sync read from-b.md as a remote deletion and silently deleted it.
-  await resetRemote("eight/");
+  await resetRemote();
   const a = newDevice();
   const b = newDevice();
   try {
@@ -360,8 +363,40 @@ test("sync: two devices syncing at overlapping times never silently delete a fil
   }
 });
 
+test("sync: a deleted manifest with surviving objects refuses a first sync instead of orphaning them", async () => {
+  // Reproduces #109. A syncs a note up, then the manifest alone is deleted (a bucket lifecycle
+  // rule, manual cleanup, a partial restore) while the object survives. B, never synced, then
+  // sees what looks like a first sync; before the fix it pushed its own files and wrote a fresh
+  // manifest that never mentioned A's note, orphaning it forever.
+  await resetRemote();
+  const a = newDevice();
+  const b = newDevice();
+  try {
+    await writeLocal(a, "nine/from-a.md", "a's note");
+    assert.equal((await sync(a)).ok, true);
+
+    await storage.deleteObject(MANIFEST_KEY);
+    await writeLocal(b, "nine/from-b.md", "b's note");
+
+    const outcome = await sync(b);
+    assert.ok(!outcome.ok);
+    assert.equal(outcome.message, "bucket has files but no manifest; sync would orphan them");
+    assert.deepEqual(outcome.failures, [
+      { path: "nine/from-a.md", message: "in the bucket but not in the local vault" },
+    ]);
+
+    // Nothing was pushed and no manifest was written; A's object is untouched.
+    const kept = await storage.getObject("nine/from-a.md");
+    assert.equal(new TextDecoder().decode(kept.body ?? new Uint8Array()), "a's note");
+    assert.equal((await storage.getObject("nine/from-b.md")).ok, false);
+    assert.equal((await storage.getObject(MANIFEST_KEY)).ok, false);
+  } finally {
+    cleanup(a, b);
+  }
+});
+
 test("sync: an edit on one device and a delete on another preserves the edit as a copy, no phantom pull failure", async () => {
-  await resetRemote("six/");
+  await resetRemote();
   const a = newDevice();
   const b = newDevice();
   try {
