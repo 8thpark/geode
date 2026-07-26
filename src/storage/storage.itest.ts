@@ -192,6 +192,32 @@ test("putObject/getObject round-trips a key containing a space and ampersand", a
   assert.deepEqual(getResult.body, body);
 });
 
+test("putObject/getObject round-trips a key with SigV4-sensitive characters ! ' ( ) *", async () => {
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
+  const body = new TextEncoder().encode("sigv4 edge");
+  const key = "encode-test/Don't forget! (draft) *.md";
+
+  const putResult = await client.putObject(key, body);
+  assert.equal(putResult.ok, true);
+
+  const getResult = await client.getObject(key);
+  assert.equal(getResult.ok, true);
+  assert.deepEqual(getResult.body, body);
+
+  // The listing must hand back the exact key the vault knows, or sync would treat the object as
+  // a phantom remote file and the real note as locally new.
+  const listResult = await client.listObjects("encode-test/Don't");
+  assert.equal(listResult.ok, true);
+  const keys: string[] = [];
+  for (const object of listResult.objects) {
+    keys.push(object.key);
+  }
+  assert.deepEqual(keys, [key]);
+
+  const deleteResult = await client.deleteObject(key);
+  assert.equal(deleteResult.ok, true);
+});
+
 test("putObject/getObject round-trips a key containing a hash and percent", async () => {
   const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
   const body = new TextEncoder().encode("edge cases");
