@@ -48,9 +48,11 @@ Two tiers, two commands:
 - `npm run test:integration` — integration tests, real HTTP against a real S3 compatible server
   (MinIO). Brings up `docker-compose.yml` itself if it isn't already running, so there's no
   manual pre-step; safe to run repeatedly regardless of current state. Runs against the
-  `geode-test` bucket (separate from `geode-dev`, so automated runs don't collide with whatever
-  you're doing manually in Obsidian). Still requires Docker installed and Colima (or your
-  alternative) started — it can bring the *stack* up, not the VM underneath it.
+  `geode-test` bucket (storage tests) and `geode-sync-test` (sync tests, which wipe their bucket
+  between scenarios and so need it to themselves), both separate from `geode-dev` so automated
+  runs don't collide with whatever you're doing manually in Obsidian. Still requires Docker
+  installed and Colima (or your alternative) started — it can bring the *stack* up, not the VM
+  underneath it.
 
 Both tiers use the exact same `docker-compose.yml` MinIO setup as interactive dev — one S3
 compatible server, not a second hand-rolled fake to keep in sync.

@@ -4,7 +4,13 @@ import { encodeSnapshot, hashBytes, type Snapshot } from "../vault/vault.ts";
 import type { LocalWriter } from "./execute.ts";
 import { empty, fakeLocalWriter, fakeReader, fakeStorage, file, snapshot } from "./fake.ts";
 import { conflictCopyPath, MANIFEST_KEY } from "./plan.ts";
-import { adoptLiveStats, readRemoteManifest, revertFailedPaths, syncOnce } from "./sync.ts";
+import {
+  adoptLiveStats,
+  orphanedKeys,
+  readRemoteManifest,
+  revertFailedPaths,
+  syncOnce,
+} from "./sync.ts";
 
 // hashOf returns the real content hash of text, for snapshots whose entries executeSyncPlan's
 // drift check will verify against live bytes.
@@ -130,6 +136,78 @@ test("syncOnce: a present but empty manifest still trusts the ancestor and pulls
 
   assert.equal(outcome.ok, true);
   assert.equal(files.has("a.md"), false);
+});
+
+test("syncOnce: a missing manifest with surviving remote objects refuses, never orphans them", async () => {
+  // Reproduces #109. A lifecycle rule or manual cleanup deleted the manifest while file objects
+  // survived. Before the fix this read as a clean first sync: the pass pushed local files and
+  // wrote a manifest that never mentioned the survivors, so no device would ever pull, list, or
+  // delete them again. The pass must refuse instead, naming each stranded key.
+  const { storage, objects } = fakeStorage({ "keep/other-device.md": "not local" });
+  const reader = fakeReader({ "a.md": "alpha" });
+  const { writer } = fakeLocalWriter();
+
+  const outcome = await syncOnce(empty, reader, writer, storage, 1);
+
+  assert.deepEqual(outcome, {
+    ok: false,
+    message: "bucket has files but no manifest; sync would orphan them",
+    failures: [
+      { path: "keep/other-device.md", message: "in the bucket but not in the local vault" },
+    ],
+    snapshot: null,
+  });
+  // Nothing was pushed and no manifest was invented.
+  assert.equal(objects.has("a.md"), false);
+  assert.equal(objects.has(MANIFEST_KEY), false);
+});
+
+test("syncOnce: an interrupted first sync's own uploads never block the retry", async () => {
+  // A first sync that pushed a.md and then died before its manifest upload leaves objects and no
+  // manifest, the same bucket signature as #109's hazard. Every such object matches a local path,
+  // so nothing can be orphaned; the retry must fold them in and complete, not refuse.
+  const { storage, objects } = fakeStorage({ "a.md": "alpha" });
+  const reader = fakeReader({ "a.md": "alpha", "b.md": "beta" });
+  const { writer } = fakeLocalWriter();
+
+  const outcome = await syncOnce(empty, reader, writer, storage, 1);
+
+  assert.equal(outcome.ok, true);
+  assert.equal(objects.get("a.md"), "alpha");
+  assert.equal(objects.get("b.md"), "beta");
+  assert.equal(objects.has(MANIFEST_KEY), true);
+});
+
+test("syncOnce: a failed bucket listing on a first sync is reported, never guessed at as empty", async () => {
+  const { storage } = fakeStorage();
+  storage.listObjects = async () => ({
+    ok: false,
+    status: "server",
+    message: "Storage rejected the list (500)",
+    objects: [],
+  });
+  const reader = fakeReader({ "a.md": "alpha" });
+  const { writer } = fakeLocalWriter();
+
+  const outcome = await syncOnce(empty, reader, writer, storage, 1);
+
+  assert.deepEqual(outcome, {
+    ok: false,
+    message: "Storage rejected the list (500)",
+    failures: [],
+    snapshot: null,
+  });
+});
+
+test("orphanedKeys: keys with no local counterpart are orphans; local matches and the manifest key are not", () => {
+  const objects = [
+    { key: "a.md", size: 5, lastModified: "" },
+    { key: "keep/b.md", size: 5, lastModified: "" },
+    { key: MANIFEST_KEY, size: 5, lastModified: "" },
+  ];
+  const local = snapshot(file("a.md", "h1"));
+
+  assert.deepEqual(orphanedKeys(objects, local), ["keep/b.md"]);
 });
 
 test("readRemoteManifest: a non 404 failure is reported, never guessed at as empty", async () => {

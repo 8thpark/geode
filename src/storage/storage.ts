@@ -1,6 +1,6 @@
 import { AwsClient } from "aws4fetch";
 import { endpointFor, type GeodeSettings, regionFor } from "../settings/settings.ts";
-import { encodeKey } from "./encode.ts";
+import { encodeComponent, encodeKey } from "./encode.ts";
 import { messageFor, statusForHttp } from "./errors.ts";
 import { parseListObjectsXml } from "./xml.ts";
 
@@ -254,10 +254,10 @@ async function s3ListObjects(
   do {
     let url = `${baseUrl}?list-type=2`;
     if (prefix !== undefined && prefix !== "") {
-      url += `&prefix=${encodeURIComponent(prefix)}`;
+      url += `&prefix=${encodeComponent(prefix)}`;
     }
     if (continuationToken !== undefined) {
-      url += `&continuation-token=${encodeURIComponent(continuationToken)}`;
+      url += `&continuation-token=${encodeComponent(continuationToken)}`;
     }
 
     let response: Response;
