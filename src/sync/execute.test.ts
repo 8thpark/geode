@@ -88,6 +88,54 @@ test("executeSyncPlan: pushDelete leaves the live object intact when the trash c
   assert.equal(objects.get("a.md"), "hello");
 });
 
+test("executeSyncPlan: pushDelete removes the object when it still matches the snapshot", async () => {
+  const reader = fakeReader({});
+  const { writer } = fakeLocalWriter();
+  const { storage, objects } = fakeStorage({ "a.md": "hello" });
+  const remote = snapshot(file("a.md", await hashOf("hello")));
+
+  const { completed, failures } = await executeSyncPlan(
+    [{ kind: "pushDelete", path: "a.md" }],
+    empty,
+    reader,
+    writer,
+    storage,
+    0,
+    remote,
+  );
+
+  assert.deepEqual(failures, []);
+  assert.equal(completed.length, 1);
+  assert.equal(objects.has("a.md"), false);
+  assert.equal(objects.get(trashKeyFor("a.md", 0)), "hello");
+});
+
+test("executeSyncPlan: pushDelete aborts as concurrent when the remote object drifted", async () => {
+  const reader = fakeReader({});
+  const { writer } = fakeLocalWriter();
+  // Another device pushed new content to a.md after the manifest this pass planned from was read.
+  const { storage, objects } = fakeStorage({ "a.md": "hello world" });
+  const remote = snapshot(file("a.md", await hashOf("hello")));
+
+  const { concurrent, failed, failures } = await executeSyncPlan(
+    [{ kind: "pushDelete", path: "a.md" }],
+    empty,
+    reader,
+    writer,
+    storage,
+    0,
+    remote,
+  );
+
+  assert.equal(concurrent, true);
+  assert.equal(failed.length, 1);
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0]?.path, "a.md");
+  // The newer bytes survive untouched: nothing deleted, nothing trashed.
+  assert.equal(objects.get("a.md"), "hello world");
+  assert.equal(objects.has(trashKeyFor("a.md", 0)), false);
+});
+
 test("executeSyncPlan: pull fetches the remote object and writes it locally", async () => {
   const reader = fakeReader({});
   const { writer, files } = fakeLocalWriter();
