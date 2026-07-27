@@ -190,6 +190,12 @@ async function executeAction(
   }
 
   if (action.kind === "pushDelete") {
+    // Confirm the remote object still holds the bytes this pass planned to delete before touching
+    // it. A drifted or already absent object is handled without destroying newer content (#133).
+    const drift = await checkRemoteDrift(action.path, remoteByPath.get(action.path), storage);
+    if (drift !== null) {
+      return drift;
+    }
     // Park the object under the reserved trash prefix before removing it from its live key, so a
     // mistaken delete stays recoverable (#53). A copy that 404s means the object is already gone
     // remotely (another device deleted it), which is the end state a pushDelete wants: nothing to
@@ -377,6 +383,42 @@ async function putCondition(
   }
 
   return { ok: true, kind: "put", condition: { kind: "ifMatch", etag: fetched.etag } };
+}
+
+// checkRemoteDrift confirms the object a pushDelete is about to destroy still holds the bytes the
+// plan snapshotted. It returns the result to hand straight back when the delete must not proceed,
+// or null when it is safe. Another device can push new content to this path in the window between
+// the manifest being read and the delete running (#133); an unconditional delete would discard
+// those bytes, and because the manifest CAS then loses without the winner re-uploading, they would
+// not reappear until that file was next edited locally. A remote hash that no longer matches the
+// snapshot is exactly that race, failed as concurrent so the pass abandons its stale manifest and
+// the next sync replans; an object already gone is the end state the delete wants, so it succeeds.
+// Verifying right before the delete shrinks the residual window to the gap between this read and
+// the delete itself, the same shape checkLocalDrift uses for local writes; closing it entirely
+// needs a conditional delete, which awaits provider probing (#108). expected is undefined only for
+// a caller that supplied no remote view (the empty default), which cannot happen through syncOnce
+// where a pushDelete always carries a manifest entry; such a caller keeps the prior unconditional
+// behaviour, its delete still recoverable from the trash copy (#53).
+async function checkRemoteDrift(
+  path: string,
+  expected: FileState | undefined,
+  storage: StorageClient,
+): Promise<ActionResult | null> {
+  if (expected === undefined) {
+    return null;
+  }
+  const fetched = await storage.getObject(path);
+  if (!fetched.ok || fetched.body === null) {
+    if (fetched.status === "not_found") {
+      return successfulAction();
+    }
+    return failedAction(path, fetched.message, false);
+  }
+  if ((await hashBytes(fetched.body)) !== expected.hash) {
+    return failedAction(path, REMOTE_DRIFT_MESSAGE, true);
+  }
+
+  return null;
 }
 
 // remoteMatches reports whether path already holds bytes, making a failed create idempotent. A
