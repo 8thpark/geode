@@ -5,7 +5,7 @@
 // without needing a running Obsidian.
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { DataAdapter, TFile, Vault } from "obsidian";
 
 // nodeVault returns a Vault and DataAdapter both backed by the same temp directory root. Only the
@@ -29,6 +29,16 @@ export function nodeVault(root: string): { vault: Vault; adapter: DataAdapter } 
     },
     remove: async (path: string): Promise<void> => {
       await rm(abs(root, path));
+    },
+    trashSystem: async (): Promise<boolean> => {
+      // A temp-dir harness has no desktop trash, exactly like a headless CI host; returning false
+      // drives the same trashLocal fallback the real adapter takes there.
+      return false;
+    },
+    trashLocal: async (path: string): Promise<void> => {
+      const dest = `.trash/${path}`;
+      await mkdir(dirname(abs(root, dest)), { recursive: true });
+      await rename(abs(root, path), abs(root, dest));
     },
     rename: async (path: string, newPath: string): Promise<void> => {
       await rename(abs(root, path), abs(root, newPath));

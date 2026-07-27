@@ -182,6 +182,67 @@ test("createObsidianLocalWriter: a failed write of the staged bytes leaves the d
   assert.equal(files.get("a.md"), "old content");
 });
 
+// fakeDeleteAdapter returns a DataAdapter for exercising deleteFile: trashSystemAvailable mimics an
+// OS whose system trash works (true) or is unavailable, as on mobile or a headless host (false),
+// and ops logs every trash/remove call so a test can assert a file is only ever trashed, never
+// hard removed.
+function fakeDeleteAdapter(
+  trashSystemAvailable: boolean,
+  seed: Record<string, string> = {},
+): { adapter: DataAdapter; files: Map<string, string>; ops: string[] } {
+  const files = new Map<string, string>(Object.entries(seed));
+  const ops: string[] = [];
+  const adapter = {
+    exists: async (path: string) => files.has(path),
+    remove: async (path: string) => {
+      ops.push(`remove ${path}`);
+      files.delete(path);
+    },
+    trashSystem: async (path: string) => {
+      ops.push(`trashSystem ${path}`);
+      if (!trashSystemAvailable) {
+        return false;
+      }
+      files.delete(path);
+      return true;
+    },
+    trashLocal: async (path: string) => {
+      ops.push(`trashLocal ${path}`);
+      files.delete(path);
+    },
+  };
+  return { adapter: adapter as unknown as DataAdapter, files, ops };
+}
+
+test("createObsidianLocalWriter: deleteFile moves the file to system trash, never hard removing it", async () => {
+  const { adapter, files, ops } = fakeDeleteAdapter(true, { "a.md": "bye" });
+  const writer = createObsidianLocalWriter(adapter);
+
+  await writer.deleteFile("a.md");
+
+  assert.equal(files.has("a.md"), false);
+  assert.deepEqual(ops, ["trashSystem a.md"]);
+});
+
+test("createObsidianLocalWriter: deleteFile falls back to local trash when system trash is unavailable", async () => {
+  const { adapter, files, ops } = fakeDeleteAdapter(false, { "a.md": "bye" });
+  const writer = createObsidianLocalWriter(adapter);
+
+  await writer.deleteFile("a.md");
+
+  assert.equal(files.has("a.md"), false);
+  assert.deepEqual(ops, ["trashSystem a.md", "trashLocal a.md"]);
+});
+
+test("createObsidianLocalWriter: deleteFile of a missing file is a no-op", async () => {
+  const { adapter, ops } = fakeDeleteAdapter(true);
+  const writer = createObsidianLocalWriter(adapter);
+
+  await writer.deleteFile("a.md");
+
+  assert.deepEqual(ops, []);
+});
+
 test("createObsidianStore: a missing state file reads back as empty", async () => {
   const store = createObsidianStore(fakeAdapter(), STATE_PATH, DEFAULT_SETTINGS);
 

@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { empty, file, snapshot } from "./fake.ts";
-import { conflictCopyPath, MANIFEST_KEY, manifestAfterSync, planSync } from "./plan.ts";
+import {
+  conflictCopyPath,
+  MANIFEST_KEY,
+  manifestAfterSync,
+  planSync,
+  trashKeyFor,
+} from "./plan.ts";
 
 test("planSync: a path only changed locally is pushed", () => {
   const previous = empty;
@@ -87,6 +93,21 @@ test("planSync: the manifest's own path is never turned into an action", () => {
   const remote = snapshot(file(MANIFEST_KEY, "h2"));
 
   assert.deepEqual(planSync(previous, local, remote), []);
+});
+
+test("planSync: a trashed copy under the reserved prefix is never turned into an action", () => {
+  const previous = empty;
+  const local = snapshot(file(".geode/trash/2020-01-01/a.md", "h1"));
+  const remote = snapshot(file(".geode/trash/2020-01-01/b.md", "h2"));
+
+  assert.deepEqual(planSync(previous, local, remote), []);
+});
+
+test("trashKeyFor: parks the path under the reserved trash prefix behind a timestamp folder", () => {
+  assert.equal(
+    trashKeyFor("notes/a.md", Date.UTC(2026, 0, 2, 3, 4, 5)),
+    ".geode/trash/2026-01-02T03-04-05-000Z/notes/a.md",
+  );
 });
 
 test("manifestAfterSync: a push records the local snapshot's entry", () => {

@@ -113,6 +113,53 @@ test("deleteObject removes an object", async () => {
   assert.equal(getResult.status, "not_found");
 });
 
+test("copyObject duplicates the bytes under a new key, leaving the source intact", async () => {
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
+  const body = new TextEncoder().encode("copy me");
+  await client.putObject("copy-test/source.md", body);
+
+  const copyResult = await client.copyObject("copy-test/source.md", "copy-test/dest.md");
+  assert.equal(copyResult.ok, true);
+  assert.equal(copyResult.status, "ok");
+
+  const dest = await client.getObject("copy-test/dest.md");
+  assert.equal(dest.ok, true);
+  assert.deepEqual(dest.body, body);
+  const source = await client.getObject("copy-test/source.md");
+  assert.equal(source.ok, true);
+
+  await client.deleteObject("copy-test/source.md");
+  await client.deleteObject("copy-test/dest.md");
+});
+
+test("copyObject round-trips a source key with SigV4-sensitive characters", async () => {
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
+  const key = "copy-test/Don't stop! (really).md";
+  const body = new TextEncoder().encode("tricky source");
+  await client.putObject(key, body);
+
+  const copyResult = await client.copyObject(key, "copy-test/tricky-dest.md");
+  assert.equal(copyResult.ok, true);
+
+  const dest = await client.getObject("copy-test/tricky-dest.md");
+  assert.equal(dest.ok, true);
+  assert.deepEqual(dest.body, body);
+
+  await client.deleteObject(key);
+  await client.deleteObject("copy-test/tricky-dest.md");
+});
+
+test("copyObject of a missing source fails with not_found, never a phantom empty object", async () => {
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
+
+  const copyResult = await client.copyObject("copy-test/does-not-exist.md", "copy-test/nope.md");
+  assert.equal(copyResult.ok, false);
+  assert.equal(copyResult.status, "not_found");
+
+  const dest = await client.getObject("copy-test/nope.md");
+  assert.equal(dest.ok, false);
+});
+
 test("listObjects returns only keys under the given prefix", async () => {
   const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
   await client.putObject("list-test/a.md", new TextEncoder().encode("a"));
