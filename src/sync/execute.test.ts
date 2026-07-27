@@ -88,7 +88,7 @@ test("executeSyncPlan: pushDelete leaves the live object intact when the trash c
   assert.equal(objects.get("a.md"), "hello");
 });
 
-test("executeSyncPlan: pushDelete removes the object when it still matches the snapshot", async () => {
+test("executeSyncPlan: pushDelete removes the object that still matches the snapshot", async () => {
   const reader = fakeReader({});
   const { writer } = fakeLocalWriter();
   const { storage, objects } = fakeStorage({ "a.md": "hello" });
@@ -110,7 +110,7 @@ test("executeSyncPlan: pushDelete removes the object when it still matches the s
   assert.equal(objects.get(trashKeyFor("a.md", 0)), "hello");
 });
 
-test("executeSyncPlan: pushDelete aborts as concurrent when the remote object drifted", async () => {
+test("executeSyncPlan: pushDelete aborts as concurrent when remote object drifted", async () => {
   const reader = fakeReader({});
   const { writer } = fakeLocalWriter();
   // Another device pushed new content to a.md after the manifest this pass planned from was read.
