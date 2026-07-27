@@ -4,6 +4,11 @@ import { encodeComponent, encodeKey } from "./encode.ts";
 import { messageFor, statusForHttp } from "./errors.ts";
 import { parseListObjectsXml } from "./xml.ts";
 
+// PROBE_KEY_PREFIX namespaces testConnection's throwaway probe object under geode's reserved bucket
+// prefix (sync's RESERVED_PREFIX). A probe left behind by a failed cleanup therefore sits where
+// sync ignores it, never pulled to every device as a phantom vault file.
+const PROBE_KEY_PREFIX = ".geode/connection-probe-";
+
 // ConnectionResult reports whether a storage provider accepted a test request. Message is the
 // empty string when ok is true.
 export type ConnectionResult = {
@@ -110,8 +115,60 @@ export function createS3Client(settings: GeodeSettings, secretAccessKey: string)
   };
 }
 
-// testConnection sends a signed HEAD request for the configured bucket and reports whether the
-// provider accepted the credentials.
+// probeConditionalWrites confirms the provider actually honours the compare-and-swap sync is built
+// on, not merely that it accepts the credentials. It writes a throwaway object with If-None-Match:
+// *, then issues a second If-None-Match: * write that must be rejected: a provider with no
+// conditional-write support (Backblaze B2, Wasabi, Garage) fails the first write, and one that
+// accepts the header but ignores it (Google Cloud Storage's S3 interop) lets the second write
+// clobber the first, the exact silent data loss the conditional puts exist to prevent. It also
+// checks the read hands back an ETag, which sync needs to make later updates conditional. The probe
+// object is always deleted, best effort.
+export async function probeConditionalWrites(client: StorageClient): Promise<ConnectionResult> {
+  const key = `${PROBE_KEY_PREFIX}${crypto.randomUUID()}`;
+  const body = new TextEncoder().encode("geode connection probe");
+
+  try {
+    const first = await client.putObject(key, body, { kind: "ifAbsent" });
+    if (!first.ok) {
+      return { ok: false, status: first.status, message: first.message };
+    }
+
+    const second = await client.putObject(key, body, { kind: "ifAbsent" });
+    if (second.ok) {
+      return {
+        ok: false,
+        status: "client",
+        message: "Storage ignored a conditional write, so concurrent edits can be lost",
+      };
+    }
+    if (second.status !== "conflict") {
+      return { ok: false, status: second.status, message: second.message };
+    }
+
+    const read = await client.getObject(key);
+    if (!read.ok) {
+      return { ok: false, status: read.status, message: read.message };
+    }
+    if (read.etag === null) {
+      return {
+        ok: false,
+        status: "client",
+        message: "Storage did not return an ETag, which sync needs for conditional writes",
+      };
+    }
+
+    return { ok: true, status: "ok", message: "" };
+  } finally {
+    // Best effort: the probe already proved what it needed to, and a leftover object lives under
+    // the reserved prefix where sync ignores it, so a failed delete must not change the result.
+    await client.deleteObject(key);
+  }
+}
+
+// testConnection reports whether a storage provider is usable for sync: it accepts the credentials
+// (a signed HEAD for the bucket) and honours the conditional writes sync's compare-and-swap depends
+// on (probeConditionalWrites). Reporting ok on the HEAD alone would green-light providers that
+// authenticate fine but silently lose edits under concurrency.
 export async function testConnection(
   settings: GeodeSettings,
   secretAccessKey: string,
@@ -143,7 +200,8 @@ export async function testConnection(
       message: `Storage rejected the request (${response.status})`,
     };
   }
-  return { ok: true, status: "ok", message: "" };
+
+  return probeConditionalWrites(createS3Client(settings, secretAccessKey));
 }
 
 // conditionHeaders converts a PutCondition into the HTTP precondition headers an S3 compatible

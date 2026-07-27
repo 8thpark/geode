@@ -1,8 +1,40 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DEFAULT_SETTINGS, type GeodeSettings } from "../settings/settings.ts";
-import { testConnection } from "./storage.ts";
+import { probeConditionalWrites, type StorageClient, testConnection } from "./storage.ts";
 import { parseListObjectsXml } from "./xml.ts";
+
+// honouringPut is a putObject that enforces ifAbsent the way a correct S3 server does: the first
+// write to a key lands, a later ifAbsent write to the same key is rejected as a conflict.
+function honouringPut(): StorageClient["putObject"] {
+  const seen = new Set<string>();
+  return async (key, _body, condition) => {
+    if (condition !== undefined && condition.kind === "ifAbsent" && seen.has(key)) {
+      return { ok: false, status: "conflict", message: "Storage rejected the write (412)" };
+    }
+    seen.add(key);
+    return { ok: true, status: "ok", message: "" };
+  };
+}
+
+// probeStub returns a StorageClient whose methods succeed with an etag by default, so each test
+// overrides only the behaviour it exercises.
+function probeStub(over: Partial<StorageClient>): StorageClient {
+  const base: StorageClient = {
+    putObject: async () => ({ ok: true, status: "ok", message: "" }),
+    getObject: async () => ({
+      ok: true,
+      status: "ok",
+      message: "",
+      body: new Uint8Array(),
+      etag: '"probe"',
+    }),
+    copyObject: async () => ({ ok: true, status: "ok", message: "" }),
+    deleteObject: async () => ({ ok: true, status: "ok", message: "" }),
+    listObjects: async () => ({ ok: true, status: "ok", message: "", objects: [] }),
+  };
+  return { ...base, ...over };
+}
 
 const missingFieldCases: {
   name: string;
@@ -85,6 +117,80 @@ test("testConnection: R2 with empty endpoint and region passes field check", asy
 
   assert.equal(result.ok, false);
   assert.ok(!result.message.startsWith("Fill in"));
+});
+
+test("probeConditionalWrites: passes when the provider honours conditional writes", async () => {
+  const client = probeStub({ putObject: honouringPut() });
+
+  const result = await probeConditionalWrites(client);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "ok");
+});
+
+test("probeConditionalWrites: fails when the provider silently ignores the condition", async () => {
+  // Google Cloud Storage's S3 interop accepts If-None-Match: * and does nothing with it, so the
+  // second write clobbers the first instead of conflicting.
+  const client = probeStub({
+    putObject: async () => ({ ok: true, status: "ok", message: "" }),
+  });
+
+  const result = await probeConditionalWrites(client);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "client");
+  assert.match(result.message, /concurrent edits/);
+});
+
+test("probeConditionalWrites: fails when the provider rejects the conditional write", async () => {
+  // Backblaze B2, Wasabi, and Garage reject the precondition outright rather than honour it.
+  const client = probeStub({
+    putObject: async () => ({
+      ok: false,
+      status: "server",
+      message: "Storage rejected the write (501)",
+    }),
+  });
+
+  const result = await probeConditionalWrites(client);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "server");
+  assert.equal(result.message, "Storage rejected the write (501)");
+});
+
+test("probeConditionalWrites: fails when the provider returns no etag", async () => {
+  const client = probeStub({
+    putObject: honouringPut(),
+    getObject: async () => ({
+      ok: true,
+      status: "ok",
+      message: "",
+      body: new Uint8Array(),
+      etag: null,
+    }),
+  });
+
+  const result = await probeConditionalWrites(client);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "client");
+  assert.match(result.message, /ETag/);
+});
+
+test("probeConditionalWrites: deletes its probe object under the reserved prefix", async () => {
+  let deleted = "";
+  const client = probeStub({
+    putObject: honouringPut(),
+    deleteObject: async (key) => {
+      deleted = key;
+      return { ok: true, status: "ok", message: "" };
+    },
+  });
+
+  await probeConditionalWrites(client);
+
+  assert.ok(deleted.startsWith(".geode/"));
 });
 
 test("parseListObjectsXml decodes XML entities in object keys", () => {
