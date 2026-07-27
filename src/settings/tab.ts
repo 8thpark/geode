@@ -198,6 +198,28 @@ function renderProviderFields(tab: GeodeSettingTab, containerEl: HTMLElement): v
     return;
   }
 
+  // Warn users of custom S3-compatible providers that the concurrent sync guard
+  // (issue #83, PR #106) relies on the provider honouring If-Match / If-None-Match
+  // on PUT. R2 and AWS do; many "S3 compatible" endpoints silently ignore
+  // precondition headers and return 200, turning the manifest CAS into a no-op.
+  new Setting(containerEl)
+    .setName("Conditional write support")
+    .setDesc(
+      "Your provider MUST support conditional PUT (If-Match / If-None-Match). "
+      + "Without it the concurrent sync guard is a no-op and overlapping syncs "
+      + "can silently delete files. R2 and AWS S3 support this; many "
+      + "S3-compatible endpoints do not. Verify before using.",
+    )
+    .addButton((button) =>
+      button.setButtonText("How to check?")
+        .onClick(() => {
+          window.open(
+            "https://docs.geodemd.com/troubleshooting#conditional-writes",
+            "_blank",
+          );
+        }),
+    );
+
   new Setting(containerEl)
     .setName("Endpoint")
     .setDesc("The S3 compatible endpoint URL for your storage.")
