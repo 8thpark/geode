@@ -160,8 +160,10 @@ export async function probeConditionalWrites(client: StorageClient): Promise<Con
     return { ok: true, status: "ok", message: "" };
   } finally {
     // Best effort: the probe already proved what it needed to, and a leftover object lives under
-    // the reserved prefix where sync ignores it, so a failed delete must not change the result.
-    await client.deleteObject(key);
+    // the reserved prefix where sync ignores it. A cleanup that rejects would escape the finally
+    // and replace the probe's verdict, so the rejection is swallowed rather than allowed to mask
+    // an otherwise successful test.
+    await client.deleteObject(key).catch(() => undefined);
   }
 }
 

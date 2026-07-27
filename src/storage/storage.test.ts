@@ -193,6 +193,20 @@ test("probeConditionalWrites: deletes its probe object under the reserved prefix
   assert.ok(deleted.startsWith(".geode/"));
 });
 
+test("probeConditionalWrites: a rejecting cleanup does not mask a passing probe", async () => {
+  const client = probeStub({
+    putObject: honouringPut(),
+    deleteObject: async () => {
+      throw new Error("network blip during cleanup");
+    },
+  });
+
+  const result = await probeConditionalWrites(client);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "ok");
+});
+
 test("parseListObjectsXml decodes XML entities in object keys", () => {
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <ListBucketResult>
