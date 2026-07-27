@@ -7,6 +7,7 @@ import {
   encodeSnapshot,
   type FileInfo,
   isSnapshot,
+  normalizeKey,
   type Reader,
   SNAPSHOT_VERSION,
   type Snapshot,
@@ -110,6 +111,61 @@ test("isSnapshot: only a non-null object with a files array is accepted", () => 
 
   for (const { name, value, want } of cases) {
     assert.equal(isSnapshot(value), want, name);
+  }
+});
+
+const normalizeKeyCases: { name: string; key: string; want: string }[] = [
+  {
+    name: "pure ASCII passes through unchanged",
+    key: "notes/hello.md",
+    want: "notes/hello.md",
+  },
+  {
+    name: "empty string passes through",
+    key: "",
+    want: "",
+  },
+  {
+    name: "already NFC passes through unchanged",
+    key: "café.md",
+    want: "café.md",
+  },
+  {
+    name: "NFD e-acute composes to NFC",
+    key: "caf\u0065\u0301.md",
+    want: "caf\u00e9.md",
+  },
+  {
+    name: "NFD u-diaeresis composes to NFC",
+    key: "m\u0075\u0308.md",
+    want: "m\u00fc.md",
+  },
+  {
+    name: "mixed NFC and NFD paths are normalized",
+    key: "notes/café \u0065\u0301.md",
+    want: "notes/café \u00e9.md",
+  },
+];
+
+for (const { name, key, want } of normalizeKeyCases) {
+  test(`normalizeKey: ${name}`, () => {
+    assert.equal(normalizeKey(key), want);
+  });
+}
+
+test("decodeSnapshot: normalizes NFD paths to NFC on read", () => {
+  const nfdPath = "caf\u0065\u0301.md";
+  const nfcPath = "caf\u00e9.md";
+  const raw = JSON.stringify({
+    version: 1,
+    files: [{ path: nfdPath, size: 1, mtime: 2, hash: "h" }],
+  });
+
+  const result = decodeSnapshot(raw);
+
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.snapshot.files[0].path, nfcPath);
   }
 });
 

@@ -6,6 +6,7 @@ import {
   encodeSnapshot,
   type FileInfo,
   fingerprintSettings,
+  normalizeKey,
   type Reader,
   type Snapshot,
   type Store,
@@ -58,7 +59,7 @@ export function createObsidianReader(vault: Vault): Reader {
     listFiles: async () => {
       const files: FileInfo[] = [];
       for (const file of vault.getFiles()) {
-        files.push({ path: file.path, size: file.stat.size, mtime: file.stat.mtime });
+        files.push({ path: normalizeKey(file.path), size: file.stat.size, mtime: file.stat.mtime });
       }
       return files;
     },

@@ -92,9 +92,20 @@ export function decodeSnapshot(raw: string): DecodedSnapshot {
   if (!isSnapshot(parsed)) {
     return { ok: false, reason: "corrupt" };
   }
+
   const settingsFingerprint = (parsed as { settingsFingerprint?: unknown }).settingsFingerprint;
   const fingerprintStr = typeof settingsFingerprint === "string" ? settingsFingerprint : undefined;
-  const snapshot: Snapshot = { files: parsed.files };
+
+  const files: FileState[] = [];
+  for (let i = 0; i < parsed.files.length; i++) {
+    const f = parsed.files[i];
+    files.push({
+      ...f,
+      path: normalizeKey(f.path),
+    });
+  }
+  const snapshot: Snapshot = { files };
+
   if (fingerprintStr !== undefined) {
     snapshot.settingsFingerprint = fingerprintStr;
   }
@@ -131,7 +142,11 @@ export function diffSnapshots(previous: Snapshot, current: Snapshot): Change[] {
 // encodeSnapshot serializes a snapshot for persistence, stamping the format version so every
 // manifest and state.json written from here on carries the marker decodeSnapshot branches on.
 export function encodeSnapshot(snapshot: Snapshot): string {
-  const result: { version: number; files: FileState[]; settingsFingerprint?: string } = {
+  const result: {
+    version: number;
+    files: FileState[];
+    settingsFingerprint?: string;
+  } = {
     version: SNAPSHOT_VERSION,
     files: snapshot.files,
   };
@@ -177,6 +192,13 @@ export async function hashBytes(data: Uint8Array): Promise<string> {
 // check stops at the array itself: a malformed entry degrades rather than crashes downstream.
 export function isSnapshot(value: unknown): value is Snapshot {
   return typeof value === "object" && value !== null && Array.isArray((value as Snapshot).files);
+}
+
+// normalizeKey returns the NFC canonical form of a path so that composed and decomposed
+// representations of the same visible name (e.g. "é.md") always produce the same identity,
+// regardless of the platform that created the file.
+export function normalizeKey(key: string): string {
+  return key.normalize("NFC");
 }
 
 // takeSnapshot walks every file the reader currently sees and returns their content hashes. A

@@ -141,3 +141,17 @@ test("parseListObjectsXml ignores the token on the final page", () => {
 
   assert.equal(parseListObjectsXml(xml).nextContinuationToken, undefined);
 });
+
+test("parseListObjectsXml normalizes NFD keys to NFC", () => {
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult>
+  <Contents>
+    <Key>caf\u0065\u0301.md</Key>
+    <LastModified>2026-07-13T00:00:00.000Z</LastModified>
+    <Size>12</Size>
+  </Contents>
+</ListBucketResult>`;
+
+  const page = parseListObjectsXml(xml);
+  assert.equal(page.objects[0].key, "caf\u00e9.md");
+});

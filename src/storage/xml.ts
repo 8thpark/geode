@@ -1,3 +1,4 @@
+import { normalizeKey } from "../vault/vault.ts";
 import type { ObjectMeta } from "./storage.ts";
 
 // ListPage is one page of a ListObjectsV2 response: the objects it carries and, when the listing
@@ -20,7 +21,7 @@ export function parseListObjectsXml(xml: string): ListPage {
   while (match !== null) {
     const block = match[1];
     objects.push({
-      key: decodeXmlText(fieldFrom(block, "Key")),
+      key: normalizeKey(decodeXmlText(fieldFrom(block, "Key"))),
       size: Number(fieldFrom(block, "Size")),
       lastModified: fieldFrom(block, "LastModified"),
     });
