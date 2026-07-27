@@ -12,6 +12,14 @@ export type ConnectionResult = {
   message: string;
 };
 
+// CopyResult reports whether an object was copied to a new key. Message is the empty string when
+// ok is true.
+export type CopyResult = {
+  ok: boolean;
+  status: ResultStatus;
+  message: string;
+};
+
 // DeleteResult reports whether an object was removed. Message is the empty string when ok is
 // true.
 export type DeleteResult = {
@@ -77,6 +85,7 @@ export type ResultStatus =
 export type StorageClient = {
   putObject: (key: string, body: Uint8Array, condition?: PutCondition) => Promise<PutResult>;
   getObject: (key: string) => Promise<GetResult>;
+  copyObject: (sourceKey: string, destKey: string) => Promise<CopyResult>;
   deleteObject: (key: string) => Promise<DeleteResult>;
   listObjects: (prefix?: string) => Promise<ListResult>;
 };
@@ -94,6 +103,8 @@ export function createS3Client(settings: GeodeSettings, secretAccessKey: string)
   return {
     putObject: (key, body, condition) => s3PutObject(client, baseUrl, key, body, condition),
     getObject: (key) => s3GetObject(client, baseUrl, key),
+    copyObject: (sourceKey, destKey) =>
+      s3CopyObject(client, baseUrl, settings.bucket, sourceKey, destKey),
     deleteObject: (key) => s3DeleteObject(client, baseUrl, key),
     listObjects: (prefix) => s3ListObjects(client, baseUrl, prefix),
   };
@@ -149,7 +160,9 @@ function conditionHeaders(condition: PutCondition | undefined): Record<string, s
 }
 
 // missingFieldFor returns the name of the first field testConnection needs but doesn't have, or
-// "" if everything required is present.
+// "" if everything required is present. The requirements mirror hasConnectionConfig: all providers
+// need bucket, access key, and secret; R2 derives endpoint and region from the account ID, so
+// only custom needs them explicitly.
 function missingFieldFor(settings: GeodeSettings, secretAccessKey: string): string {
   if (settings.bucket === "") {
     return "bucket";
@@ -160,7 +173,60 @@ function missingFieldFor(settings: GeodeSettings, secretAccessKey: string): stri
   if (secretAccessKey === "") {
     return "secret access key";
   }
+
+  if (settings.provider === "r2") {
+    if (settings.accountId === "") {
+      return "account ID";
+    }
+  } else {
+    if (settings.endpoint === "") {
+      return "endpoint";
+    }
+    if (settings.region === "") {
+      return "region";
+    }
+  }
+
   return "";
+}
+
+// s3CopyObject server-side copies sourceKey to destKey within the same bucket, so the bytes never
+// travel through the client. The x-amz-copy-source header names the source as "/bucket/key" with
+// the key percent-encoded exactly as a request path is, so a source containing spaces or SigV4
+// sensitive characters is signed byte for byte the way the server canonicalizes it. S3 has a
+// documented quirk where CopyObject can answer 200 and then carry an <Error> in the body when the
+// copy fails mid-stream; treating that as success would let the caller delete a source it never
+// actually backed up, so the body is inspected and a failure surfaced rather than swallowed.
+async function s3CopyObject(
+  client: AwsClient,
+  baseUrl: string,
+  bucket: string,
+  sourceKey: string,
+  destKey: string,
+): Promise<CopyResult> {
+  const source = `/${bucket}/${encodeKey(sourceKey)}`;
+  let response: Response;
+  try {
+    response = await client.fetch(`${baseUrl}/${encodeKey(destKey)}`, {
+      method: "PUT",
+      headers: { "x-amz-copy-source": source },
+    });
+  } catch (err) {
+    return { ok: false, status: "network", message: messageFor(err) };
+  }
+
+  if (!response.ok) {
+    return {
+      ok: false,
+      status: statusForHttp(response.status),
+      message: `Storage rejected the copy (${response.status})`,
+    };
+  }
+  const body = await response.text();
+  if (body.includes("<Error")) {
+    return { ok: false, status: "server", message: "Storage rejected the copy (200 error body)" };
+  }
+  return { ok: true, status: "ok", message: "" };
 }
 
 // s3DeleteObject removes key from the bucket.
@@ -171,7 +237,9 @@ async function s3DeleteObject(
 ): Promise<DeleteResult> {
   let response: Response;
   try {
-    response = await client.fetch(`${baseUrl}/${encodeKey(key)}`, { method: "DELETE" });
+    response = await client.fetch(`${baseUrl}/${encodeKey(key)}`, {
+      method: "DELETE",
+    });
   } catch (err) {
     return { ok: false, status: "network", message: messageFor(err) };
   }
@@ -190,9 +258,17 @@ async function s3DeleteObject(
 async function s3GetObject(client: AwsClient, baseUrl: string, key: string): Promise<GetResult> {
   let response: Response;
   try {
-    response = await client.fetch(`${baseUrl}/${encodeKey(key)}`, { method: "GET" });
+    response = await client.fetch(`${baseUrl}/${encodeKey(key)}`, {
+      method: "GET",
+    });
   } catch (err) {
-    return { ok: false, status: "network", message: messageFor(err), body: null, etag: null };
+    return {
+      ok: false,
+      status: "network",
+      message: messageFor(err),
+      body: null,
+      etag: null,
+    };
   }
 
   if (!response.ok) {
@@ -238,7 +314,12 @@ async function s3ListObjects(
     try {
       response = await client.fetch(url, { method: "GET" });
     } catch (err) {
-      return { ok: false, status: "network", message: messageFor(err), objects: [] };
+      return {
+        ok: false,
+        status: "network",
+        message: messageFor(err),
+        objects: [],
+      };
     }
 
     if (!response.ok) {

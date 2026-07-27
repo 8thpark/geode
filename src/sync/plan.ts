@@ -5,6 +5,16 @@ import { byPath, type Change, diffSnapshots, type Snapshot } from "../vault/vaul
 // path, on either side, even if a vault happens to contain a file at this exact path.
 export const MANIFEST_KEY = ".geode/manifest.json";
 
+// RESERVED_PREFIX namespaces geode's own bookkeeping in the bucket: the manifest, and the trashed
+// copies of deleted objects. Nothing under it is ever a real vault file to sync, list as an
+// orphan, or diff, on either side, even if a vault happens to hold a file at a colliding path.
+export const RESERVED_PREFIX = ".geode/";
+
+// TRASH_PREFIX is where a pushed deletion parks the object before removing it from its live key,
+// giving a mistaken delete a recovery window instead of destroying the bytes outright (#53). It
+// sits under RESERVED_PREFIX, so trashed copies never re-enter a sync as vault files.
+export const TRASH_PREFIX = ".geode/trash/";
+
 // SyncAction is one thing a sync needs to do to bring local and remote back in step. A conflict
 // carries deletedSide so executeSyncPlan never has to guess, from a failed read, whether a deleted
 // side is why there's nothing there: "local" means there's no local content to preserve, "remote"
@@ -147,6 +157,17 @@ export function planSync(previous: Snapshot, local: Snapshot, remote: Snapshot):
   return actions;
 }
 
+// trashKeyFor returns the reserved key a pushed deletion parks path at before removing the live
+// object, timestamped so a later delete of a recreated path never overwrites an earlier trashed
+// copy. The original path is preserved under the stamped folder, so a recovery can see where the
+// object came from. now is passed in rather than read internally so the key is deterministic under
+// test, matching conflictCopyPath.
+export function trashKeyFor(path: string, now: number): string {
+  const stamp = new Date(now).toISOString().replace(/[:.]/g, "-");
+
+  return `${TRASH_PREFIX}${stamp}/${path}`;
+}
+
 // changesByPath builds a lookup from path to change, for matching a local change against a
 // remote change at that same path.
 function changesByPath(changes: Change[]): Map<string, Change> {
@@ -160,5 +181,5 @@ function changesByPath(changes: Change[]): Map<string, Change> {
 // isReservedPath reports whether path is geode's own bookkeeping, never a real vault file to
 // sync, even if something in the vault happens to collide with it.
 function isReservedPath(path: string): boolean {
-  return path === MANIFEST_KEY;
+  return path.startsWith(RESERVED_PREFIX);
 }

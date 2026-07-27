@@ -199,11 +199,12 @@ test("syncOnce: a failed bucket listing on a first sync is reported, never guess
   });
 });
 
-test("orphanedKeys: keys with no local counterpart are orphans; local matches and the manifest key are not", () => {
+test("orphanedKeys: keys with no local counterpart are orphans; local matches and reserved keys are not", () => {
   const objects = [
     { key: "a.md", size: 5, lastModified: "" },
     { key: "keep/b.md", size: 5, lastModified: "" },
     { key: MANIFEST_KEY, size: 5, lastModified: "" },
+    { key: ".geode/trash/2020-01-01/gone.md", size: 5, lastModified: "" },
   ];
   const local = snapshot(file("a.md", "h1"));
 
