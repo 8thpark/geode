@@ -29,7 +29,16 @@ export function createObsidianLocalWriter(adapter: DataAdapter): LocalWriter {
       if (!exists) {
         return;
       }
-      await adapter.remove(path);
+      // A pulled deletion is moved to trash, never hard removed, so a delete that turns out to be
+      // a mistake stays recoverable on this device (#53), mirroring what Obsidian does for a
+      // manual delete. System trash is tried first and the vault-local .trash folder is the
+      // fallback when the OS has no trash (mobile, a headless host), so the file is always
+      // recoverable somewhere rather than gone.
+      const trashed = await adapter.trashSystem(path);
+      if (trashed) {
+        return;
+      }
+      await adapter.trashLocal(path);
     },
     renameFile: async (path, newPath) => {
       await ensureParentDir(adapter, newPath);

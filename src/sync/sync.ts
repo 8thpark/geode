@@ -9,7 +9,13 @@ import {
   takeSnapshot,
 } from "../vault/vault.ts";
 import { executeSyncPlan, type LocalWriter, type SyncFailure } from "./execute.ts";
-import { MANIFEST_KEY, manifestAfterSync, planSync, type SyncAction } from "./plan.ts";
+import {
+  MANIFEST_KEY,
+  manifestAfterSync,
+  planSync,
+  RESERVED_PREFIX,
+  type SyncAction,
+} from "./plan.ts";
 
 // SyncOutcome is the result of a single sync pass. On success it carries the new snapshot to
 // persist as the next sync's starting point and how many actions were applied; on failure it
@@ -50,15 +56,16 @@ export function adoptLiveStats(manifest: Snapshot, live: Snapshot): Snapshot {
 
 // orphanedKeys returns the bucket keys a first sync would strand: objects with no local file at
 // their key, which a manifest built purely from local files would never mention, so no device
-// would ever pull, list, or delete them again (#109). The manifest key itself is bookkeeping,
-// never a vault file, and is not counted; if one appears in the listing (another device's first
-// sync landing mid pass) the conditional manifest upload catches it loudly. Exported for its
-// tests; syncOnce is the only production caller.
+// would ever pull, list, or delete them again (#109). Keys under the reserved prefix are geode's
+// own bookkeeping (the manifest, trashed deletions), never vault files, and are not counted; if
+// the manifest appears in the listing (another device's first sync landing mid pass) the
+// conditional manifest upload catches it loudly. Exported for its tests; syncOnce is the only
+// production caller.
 export function orphanedKeys(objects: ObjectMeta[], local: Snapshot): string[] {
   const localByPath = byPath(local.files);
   const orphans: string[] = [];
   for (const object of objects) {
-    if (object.key === MANIFEST_KEY) {
+    if (object.key.startsWith(RESERVED_PREFIX)) {
       continue;
     }
     if (!localByPath.has(object.key)) {

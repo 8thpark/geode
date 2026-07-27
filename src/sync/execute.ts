@@ -1,6 +1,6 @@
 import type { PutCondition, StorageClient } from "../storage/storage.ts";
 import { byPath, type FileState, hashBytes, type Reader, type Snapshot } from "../vault/vault.ts";
-import { conflictCopyPath, type SyncAction } from "./plan.ts";
+import { conflictCopyPath, type SyncAction, trashKeyFor } from "./plan.ts";
 
 // DRIFT_MESSAGE is the failure reported when a local file changed after the snapshot an action
 // was planned from; the next sync re-snapshots and replans the path as a conflict.
@@ -190,6 +190,18 @@ async function executeAction(
   }
 
   if (action.kind === "pushDelete") {
+    // Park the object under the reserved trash prefix before removing it from its live key, so a
+    // mistaken delete stays recoverable (#53). A copy that 404s means the object is already gone
+    // remotely (another device deleted it), which is the end state a pushDelete wants: nothing to
+    // trash, nothing to delete. Any other copy failure aborts before the delete, so the live
+    // object is never destroyed without a backup sitting beside it.
+    const copied = await storage.copyObject(action.path, trashKeyFor(action.path, now));
+    if (!copied.ok) {
+      if (copied.status === "not_found") {
+        return successfulAction();
+      }
+      return failedAction(action.path, copied.message, false);
+    }
     const result = await storage.deleteObject(action.path);
     if (!result.ok) {
       return failedAction(action.path, result.message, false);

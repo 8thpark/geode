@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { hashBytes } from "../vault/vault.ts";
 import { executeSyncPlan } from "./execute.ts";
 import { empty, fakeLocalWriter, fakeReader, fakeStorage, file, snapshot } from "./fake.ts";
-import { conflictCopyPath, type SyncAction } from "./plan.ts";
+import { conflictCopyPath, type SyncAction, trashKeyFor } from "./plan.ts";
 
 // hashOf returns the real content hash of text, for building local snapshots whose entries
 // executeSyncPlan's drift check can verify against a fake reader's live bytes.
@@ -30,14 +30,62 @@ test("executeSyncPlan: push reads the local file and puts it remotely", async ()
   assert.equal(files.size, 0);
 });
 
-test("executeSyncPlan: pushDelete removes the remote object", async () => {
+test("executeSyncPlan: pushDelete trashes the remote object before removing its live key", async () => {
   const reader = fakeReader({});
   const { writer } = fakeLocalWriter();
   const { storage, objects } = fakeStorage({ "a.md": "hello" });
 
-  await executeSyncPlan([{ kind: "pushDelete", path: "a.md" }], empty, reader, writer, storage, 1);
+  const { failures } = await executeSyncPlan(
+    [{ kind: "pushDelete", path: "a.md" }],
+    empty,
+    reader,
+    writer,
+    storage,
+    0,
+  );
 
+  assert.deepEqual(failures, []);
   assert.equal(objects.has("a.md"), false);
+  assert.equal(objects.get(trashKeyFor("a.md", 0)), "hello");
+});
+
+test("executeSyncPlan: pushDelete of an already absent remote object succeeds without trashing", async () => {
+  const reader = fakeReader({});
+  const { writer } = fakeLocalWriter();
+  const { storage, objects } = fakeStorage({});
+
+  const { completed, failures } = await executeSyncPlan(
+    [{ kind: "pushDelete", path: "a.md" }],
+    empty,
+    reader,
+    writer,
+    storage,
+    0,
+  );
+
+  assert.deepEqual(failures, []);
+  assert.equal(completed.length, 1);
+  assert.equal(objects.size, 0);
+});
+
+test("executeSyncPlan: pushDelete leaves the live object intact when the trash copy fails", async () => {
+  const reader = fakeReader({});
+  const { writer } = fakeLocalWriter();
+  const { storage, objects } = fakeStorage({ "a.md": "hello" });
+  storage.copyObject = async () => ({ ok: false, status: "server", message: "copy boom" });
+
+  const { failed, failures } = await executeSyncPlan(
+    [{ kind: "pushDelete", path: "a.md" }],
+    empty,
+    reader,
+    writer,
+    storage,
+    0,
+  );
+
+  assert.deepEqual(failures, [{ path: "a.md", message: "copy boom" }]);
+  assert.equal(failed.length, 1);
+  assert.equal(objects.get("a.md"), "hello");
 });
 
 test("executeSyncPlan: pull fetches the remote object and writes it locally", async () => {
