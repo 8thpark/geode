@@ -17,7 +17,7 @@ export type Change = {
 // build does not know how to read.
 export type DecodedSnapshot =
   | { ok: true; snapshot: Snapshot }
-  | { ok: false; reason: "corrupt" | "unsupportedVersion" };
+  | { ok: false; reason: "corrupt" | "duplicatePaths" | "unsupportedVersion" };
 
 // FileInfo is one file as seen live in the vault, before hashing.
 export type FileInfo = {
@@ -94,7 +94,16 @@ export function decodeSnapshot(raw: string): DecodedSnapshot {
   }
   const settingsFingerprint = (parsed as { settingsFingerprint?: unknown }).settingsFingerprint;
   const fingerprintStr = typeof settingsFingerprint === "string" ? settingsFingerprint : undefined;
-  const files = parsed.files.map((f: FileState) => ({ ...f, path: normalizePath(f.path) }));
+  const files: FileState[] = [];
+  const seen = new Set<string>();
+  for (const f of parsed.files) {
+    const normalizedPath = normalizePath(f.path);
+    if (seen.has(normalizedPath)) {
+      return { ok: false, reason: "duplicatePaths" };
+    }
+    seen.add(normalizedPath);
+    files.push({ ...f, path: normalizedPath });
+  }
   const snapshot: Snapshot = { files };
   if (fingerprintStr !== undefined) {
     snapshot.settingsFingerprint = fingerprintStr;

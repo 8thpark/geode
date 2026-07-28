@@ -6,6 +6,7 @@ import { empty, fakeLocalWriter, fakeReader, fakeStorage, file, snapshot } from 
 import { conflictCopyPath, MANIFEST_KEY } from "./plan.ts";
 import {
   adoptLiveStats,
+  legacyNFDKeys,
   orphanedKeys,
   readRemoteManifest,
   revertFailedPaths,
@@ -274,6 +275,59 @@ test("orphanedKeys: NFD S3 keys matching NFC local paths are not orphans", () =>
   const local = snapshot(file("café.md", "h1"));
 
   assert.deepEqual(orphanedKeys(objects, local), []);
+});
+
+test("legacyNFDKeys: returns keys where raw key differs from normalized form", () => {
+  const objects = [
+    { key: "a.md", size: 5, lastModified: "" },
+    { key: "caf\u0065\u0301.md", size: 5, lastModified: "" },
+    { key: "n\u006f\u0303t\u0065\u0301s/b.md", size: 5, lastModified: "" },
+  ];
+
+  assert.deepEqual(legacyNFDKeys(objects), [
+    "caf\u0065\u0301.md",
+    "n\u006f\u0303t\u0065\u0301s/b.md",
+  ]);
+});
+
+test("legacyNFDKeys: returns empty when all keys are already NFC", () => {
+  const objects = [
+    { key: "a.md", size: 5, lastModified: "" },
+    { key: "café.md", size: 5, lastModified: "" },
+  ];
+
+  assert.deepEqual(legacyNFDKeys(objects), []);
+});
+
+test("syncOnce: legacy NFD keys are migrated to NFC on first sync", async () => {
+  const nfdKey = "caf\u0065\u0301.md";
+  const { storage, objects } = fakeStorage({ [nfdKey]: "coffee" });
+  const reader = fakeReader({ "café.md": "coffee" });
+  const { writer } = fakeLocalWriter();
+
+  const outcome = await syncOnce(empty, reader, writer, storage, 1);
+
+  assert.equal(outcome.ok, true);
+  // The NFD key was deleted and the NFC key now holds the content.
+  assert.equal(objects.has(nfdKey), false);
+  assert.equal(objects.get("café.md"), "coffee");
+  assert.equal(objects.has(MANIFEST_KEY), true);
+});
+
+test("syncOnce: legacy NFD key is deleted when NFC version already exists in bucket", async () => {
+  const nfdKey = "caf\u0065\u0301.md";
+  const { storage, objects } = fakeStorage({
+    [nfdKey]: "coffee-nfd",
+    "café.md": "coffee-nfc",
+  });
+  const reader = fakeReader({ "café.md": "coffee-nfc" });
+  const { writer } = fakeLocalWriter();
+
+  const outcome = await syncOnce(empty, reader, writer, storage, 1);
+
+  assert.equal(outcome.ok, true);
+  assert.equal(objects.has(nfdKey), false);
+  assert.equal(objects.get("café.md"), "coffee-nfc");
 });
 
 test("readRemoteManifest: a non 404 failure is reported, never guessed at as empty", async () => {

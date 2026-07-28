@@ -78,6 +78,22 @@ export function orphanedKeys(objects: ObjectMeta[], local: Snapshot): string[] {
   return orphans;
 }
 
+// legacyNFDKeys returns S3 objects whose key is not in NFC form. When such an object exists at an
+// NFD key while the local vault has the same file at the NFC path, the NFD object is a legacy
+// artifact that must be migrated: copied to the NFC key and deleted from the NFD key, so future
+// syncs never see two representations of the same file. Exported for its tests; syncOnce is the
+// only production caller.
+export function legacyNFDKeys(objects: ObjectMeta[]): string[] {
+  const keys: string[] = [];
+  for (const object of objects) {
+    if (object.key !== normalizePath(object.key)) {
+      keys.push(object.key);
+    }
+  }
+
+  return keys;
+}
+
 // readRemoteManifest fetches and parses the remote manifest. A confirmed 404 means no manifest
 // has ever been written, the safe assumption for a first sync against an empty bucket, so that's
 // treated as an empty snapshot flagged firstSync. Any other failure (network, auth, a real 5xx)
@@ -108,7 +124,17 @@ export async function readRemoteManifest(
     const decoded = decodeSnapshot(new TextDecoder().decode(fetched.body));
     if (!decoded.ok) {
       if (decoded.reason === "unsupportedVersion") {
-        return { ok: false, message: "remote manifest needs a newer version of geode" };
+        return {
+          ok: false,
+          message: "remote manifest needs a newer version of geode",
+        };
+      }
+      if (decoded.reason === "duplicatePaths") {
+        return {
+          ok: false,
+          message:
+            "remote manifest has duplicate paths after normalization; rename one file locally and retry",
+        };
       }
       return { ok: false, message: "remote manifest is corrupt" };
     }
@@ -119,7 +145,12 @@ export async function readRemoteManifest(
     if (fetched.etag === null) {
       return { ok: false, message: "remote manifest has no etag" };
     }
-    return { ok: true, snapshot: decoded.snapshot, firstSync: false, etag: fetched.etag };
+    return {
+      ok: true,
+      snapshot: decoded.snapshot,
+      firstSync: false,
+      etag: fetched.etag,
+    };
   }
 
   if (fetched.status === "not_found") {
@@ -195,13 +226,21 @@ export async function syncOnce(
   if (remote.firstSync) {
     const listed = await storage.listObjects();
     if (!listed.ok) {
-      return { ok: false, message: listed.message, failures: [], snapshot: null };
+      return {
+        ok: false,
+        message: listed.message,
+        failures: [],
+        snapshot: null,
+      };
     }
     const orphans = orphanedKeys(listed.objects, local);
     if (orphans.length > 0) {
       const failures: SyncFailure[] = [];
       for (const key of orphans) {
-        failures.push({ path: key, message: "in the bucket but not in the local vault" });
+        failures.push({
+          path: key,
+          message: "in the bucket but not in the local vault",
+        });
       }
       return {
         ok: false,
@@ -209,6 +248,21 @@ export async function syncOnce(
         failures,
         snapshot: null,
       };
+    }
+
+    // Migrate legacy NFD keys to NFC so every object in the bucket uses the canonical form and
+    // future syncs never see two representations of the same file.
+    const listedKeys = new Set();
+    for (const obj of listed.objects) {
+      listedKeys.add(obj.key);
+    }
+
+    for (const nfdKey of legacyNFDKeys(listed.objects)) {
+      const nfcKey = normalizePath(nfdKey);
+      if (!listedKeys.has(nfcKey)) {
+        await storage.copyObject(nfdKey, nfcKey);
+      }
+      await storage.deleteObject(nfdKey);
     }
   }
 

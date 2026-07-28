@@ -275,3 +275,23 @@ test("decodeSnapshot: NFD paths in manifest are normalized to NFC on decode", ()
     assert.equal(decoded.snapshot.files[0].path, "café.md");
   }
 });
+
+test("decodeSnapshot: NFC and NFD entries for the same path return duplicatePaths", () => {
+  const nfcFile = { path: "café.md", size: 5, mtime: 1, hash: "abc" };
+  const nfdFile = { path: "caf\u0065\u0301.md", size: 5, mtime: 1, hash: "def" };
+  const raw = JSON.stringify({ version: SNAPSHOT_VERSION, files: [nfcFile, nfdFile] });
+
+  const decoded = decodeSnapshot(raw);
+
+  assert.deepEqual(decoded, { ok: false, reason: "duplicatePaths" });
+});
+
+test("decodeSnapshot: duplicate paths with same hash also return duplicatePaths", () => {
+  const nfcFile = { path: "café.md", size: 5, mtime: 1, hash: "abc" };
+  const nfdFile = { path: "caf\u0065\u0301.md", size: 5, mtime: 1, hash: "abc" };
+  const raw = JSON.stringify({ version: SNAPSHOT_VERSION, files: [nfcFile, nfdFile] });
+
+  const decoded = decodeSnapshot(raw);
+
+  assert.deepEqual(decoded, { ok: false, reason: "duplicatePaths" });
+});
