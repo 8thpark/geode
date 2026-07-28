@@ -14,15 +14,19 @@
   <a href="https://github.com/8thpark/geode/stargazers"><img src="https://img.shields.io/github/stars/8thpark/geode?style=social" alt="GitHub Repo Stars"></a>
 </p>
 
-> **[Obsidian](https://obsidian.md) plugin** for remote sync, MCP, and an API for your vault.
+> **The easiest, most secure way to reach your [Obsidian](https://obsidian.md) vault from anywhere,
+> as a human or agent.** Seamless remote sync, plus MCP and API, so every device/agent reads and
+> writes from the same encrypted vault, even when your laptop is closed.
 
-- [Why?](#why)
-- [Changelog](#changelog)
-- [Contributing](#contributing)
+---
+
+- [What?](#what)
+- [Quick Start](#quick-start)
 - [Security](#security)
+- [Contributing](#contributing)
 - [License](#license)
 
-## Why?
+## What?
 
 **Geode** is a free [Obsidian](https://obsidian.md) plugin that syncs your vault across multiple
 devices (including iOS) through storage that you own, and encrypted before anything leaves your
@@ -32,22 +36,16 @@ Our aim is to build the best remote sync plugin available for Obsidian users; Ap
 quality bar, something that just always works and you don't even think about.
 
 Whilst also offering a remote MCP server and API to your vault, so that any agent (e.g. Claude,
-Codex) can read/write to the same vault, using it as memory. As we believe the full power of
-Obsidian is unlocked via agents.
+Codex) can read/write to the same vault, using it as memory and helping to build/maintain your
+notes. As we believe the full power of Obsidian is unlocked via agents..
 
-**TL;DR** → Remote sync, using storage you own, encrypted, with MCP/API for your agents to use
-Obsidian as memory.
+## Quick Start
 
-## Changelog
+> [!IMPORTANT]
+> _The project is currently in **beta**._
 
 We are working hard to get to our first `v0.1.0` release, see
 [progress](https://github.com/8thpark/geode/milestones).
-
-## Contributing
-
-PRs are very welcome in the project, check out issues with the
-[`"Good First Issue"`](https://github.com/8thpark/geode/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22good%20first%20issue%22)
-label and [CONTRIBUTING.md](./CONTRIBUTING.md) for more details.
 
 ## Security
 
@@ -59,6 +57,12 @@ our
 [OpenSSF Scorecard](https://scorecard.dev/viewer/?uri=github.com/8thpark/geode&sort_by=check-score&sort_direction=desc)
 updates on every change. Please see [SECURITY.md](./SECURITY.md) if you think you have found a
 vulnerability or have questions.
+
+## Contributing
+
+PRs are very welcome in the project, check out issues with the
+[`"Good First Issue"`](https://github.com/8thpark/geode/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22good%20first%20issue%22)
+label and [CONTRIBUTING.md](./CONTRIBUTING.md) for more details.
 
 ## License
 
