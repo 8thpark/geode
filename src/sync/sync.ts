@@ -1,4 +1,8 @@
-import type { ObjectMeta, PutCondition, StorageClient } from "../storage/storage.ts";
+import type {
+  ObjectMeta,
+  PutCondition,
+  StorageClient,
+} from "../storage/storage.ts";
 import {
   byPath,
   decodeSnapshot,
@@ -10,7 +14,11 @@ import {
   type Snapshot,
   takeSnapshot,
 } from "../vault/vault.ts";
-import { executeSyncPlan, type LocalWriter, type SyncFailure } from "./execute.ts";
+import {
+  executeSyncPlan,
+  type LocalWriter,
+  type SyncFailure,
+} from "./execute.ts";
 import {
   MANIFEST_KEY,
   manifestAfterSync,
@@ -252,57 +260,69 @@ export async function syncOnce(
     }
 
     // Migrate legacy NFD keys to NFC so every object in the bucket uses the canonical form and
-    // future syncs never see two representations of the same file. Three cases:
-    //   A: NFD-only — copy to NFC, then delete NFD
-    //   B: NFC exists with same content — safe to delete NFD
-    //   C: NFC exists with different content — conflict, fail the sync
-    const listedByKey = new Map<string, ObjectMeta>();
+    // future syncs never see two representations of the same file. Objects are grouped by the NFC
+    // path they'd collapse onto — a group can hold more than one source key when multiple NFD
+    // variants (or an NFD variant and the real NFC object) normalize to the same path. A failed
+    // byte comparison or a failed delete both fail the whole sync rather than being silently
+    // ignored, since this migration only runs on first sync and won't be retried once a manifest
+    // exists.
+    const groups = new Map<string, ObjectMeta[]>();
     for (const obj of listed.objects) {
-      listedByKey.set(obj.key, obj);
+      const nfcKey = normalizePath(obj.key);
+      const arr = groups.get(nfcKey) ?? [];
+      arr.push(obj);
+      groups.set(nfcKey, arr);
     }
 
-    const toCopy: string[] = [];
-    const toDelete: string[] = [];
     const conflicts: SyncFailure[] = [];
+    const toDelete: string[] = [];
+    const toCopy: { from: string; to: string }[] = [];
 
-    for (const nfdKey of legacyNFDKeys(listed.objects)) {
-      const nfcKey = normalizePath(nfdKey);
-      const nfcObj = listedByKey.get(nfcKey);
-      if (nfcObj === undefined) {
-        toCopy.push(nfdKey);
-        continue;
+    for (const [nfcKey, members] of groups) {
+      if (members.length === 1 && members[0].key === nfcKey) {
+        continue; // already canonical, nothing to migrate
       }
 
-      const nfdObj = listedByKey.get(nfdKey);
-      if (nfdObj !== undefined && nfcObj.size !== nfdObj.size) {
-        conflicts.push({
-          path: nfcKey,
-          message: "NFC and NFD keys contain different content; resolve locally and retry",
-        });
-        continue;
+      if (members.length > 1) {
+        // More than one object would land on this path. Only safe to collapse them if every
+        // member is byte-identical; picking a "winner" otherwise would silently discard data.
+        const bodies: Uint8Array[] = [];
+        let readFailed = false;
+        for (const member of members) {
+          const got = await storage.getObject(member.key);
+          if (!got.ok || got.body === null) {
+            readFailed = true;
+            break;
+          }
+          bodies.push(got.body);
+        }
+        if (readFailed) {
+          conflicts.push({
+            path: nfcKey,
+            message: "could not read remote objects to compare content; retry",
+          });
+          continue;
+        }
+        const hashes = await Promise.all(bodies.map((b) => hashBytes(b)));
+        if (!hashes.every((h) => h === hashes[0])) {
+          conflicts.push({
+            path: nfcKey,
+            message:
+              "multiple keys normalize to the same path with different content; resolve locally and retry",
+          });
+          continue;
+        }
       }
 
-      const nfdGet = await storage.getObject(nfdKey);
-      const nfcGet = await storage.getObject(nfcKey);
-      if (!nfdGet.ok || nfdGet.body === null || !nfcGet.ok || nfcGet.body === null) {
-        conflicts.push({
-          path: nfcKey,
-          message: "could not read remote objects to compare content; retry",
-        });
-        continue;
+      const canonical = members.find((m) => m.key === nfcKey);
+      if (canonical === undefined) {
+        toCopy.push({ from: members[0].key, to: nfcKey });
       }
-
-      const nfdHash = await hashBytes(nfdGet.body);
-      const nfcHash = await hashBytes(nfcGet.body);
-      if (nfdHash !== nfcHash) {
-        conflicts.push({
-          path: nfcKey,
-          message: "NFC and NFD keys contain different content; resolve locally and retry",
-        });
-        continue;
+      for (const member of members) {
+        if (member.key !== nfcKey) {
+          toDelete.push(member.key);
+        }
       }
-
-      toDelete.push(nfdKey);
     }
 
     if (conflicts.length > 0) {
@@ -314,22 +334,28 @@ export async function syncOnce(
       };
     }
 
-    for (const nfdKey of toCopy) {
-      const nfcKey = normalizePath(nfdKey);
-      const copied = await storage.copyObject(nfdKey, nfcKey);
+    for (const { from, to } of toCopy) {
+      const copied = await storage.copyObject(from, to);
       if (!copied.ok) {
         return {
           ok: false,
-          message: `failed to migrate ${nfdKey} to NFC: ${copied.message}`,
+          message: `failed to migrate ${from} to NFC: ${copied.message}`,
           failures: [],
           snapshot: null,
         };
       }
-      toDelete.push(nfdKey);
     }
 
     for (const nfdKey of toDelete) {
-      await storage.deleteObject(nfdKey);
+      const deleted = await storage.deleteObject(nfdKey);
+      if (!deleted.ok) {
+        return {
+          ok: false,
+          message: `failed to delete legacy key ${nfdKey} after migration: ${deleted.message}`,
+          failures: [],
+          snapshot: null,
+        };
+      }
     }
   }
 
@@ -365,7 +391,12 @@ export async function syncOnce(
   // keeps the entry the bucket really holds; the manifest is uploaded even when some actions
   // failed, so one bad file never leaves the rest of the pass's pushes invisible to every other
   // device (#87).
-  const manifest = manifestAfterSync(local, remote.snapshot, executed.completed, now);
+  const manifest = manifestAfterSync(
+    local,
+    remote.snapshot,
+    executed.completed,
+    now,
+  );
   const final = adoptLiveStats(manifest, await takeSnapshot(reader, local));
   const manifestBody = new TextEncoder().encode(encodeSnapshot(final));
 
@@ -379,7 +410,11 @@ export async function syncOnce(
   if (!remote.firstSync) {
     condition = { kind: "ifMatch", etag: remote.etag };
   }
-  const uploaded = await storage.putObject(MANIFEST_KEY, manifestBody, condition);
+  const uploaded = await storage.putObject(
+    MANIFEST_KEY,
+    manifestBody,
+    condition,
+  );
   if (!uploaded.ok) {
     if (uploaded.status === "conflict") {
       return {
