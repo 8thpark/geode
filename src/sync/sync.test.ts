@@ -95,6 +95,61 @@ test("readRemoteManifest: a manifest from a newer format version refuses the pas
   });
 });
 
+test("syncOnce: a newer manifest version halts the pass before any sync work", async () => {
+  const reader = fakeReader({ "local.md": "local" });
+  reader.fileExists = async () => {
+    throw new Error("unexpected local existence check");
+  };
+  reader.listFiles = async () => {
+    throw new Error("unexpected local listing");
+  };
+  reader.readFile = async () => {
+    throw new Error("unexpected local read");
+  };
+
+  const { writer } = fakeLocalWriter();
+  writer.deleteFile = async () => {
+    throw new Error("unexpected local delete");
+  };
+  writer.renameFile = async () => {
+    throw new Error("unexpected local rename");
+  };
+  writer.writeFile = async () => {
+    throw new Error("unexpected local write");
+  };
+
+  const { storage } = fakeStorage({
+    [MANIFEST_KEY]: JSON.stringify({ version: 2, files: [] }),
+    "remote.md": "remote",
+  });
+  const getObject = storage.getObject;
+  storage.getObject = async (key) => {
+    assert.equal(key, MANIFEST_KEY);
+    return getObject(key);
+  };
+  storage.copyObject = async () => {
+    throw new Error("unexpected remote copy");
+  };
+  storage.deleteObject = async () => {
+    throw new Error("unexpected remote delete");
+  };
+  storage.listObjects = async () => {
+    throw new Error("unexpected remote listing");
+  };
+  storage.putObject = async () => {
+    throw new Error("unexpected remote write");
+  };
+
+  const outcome = await syncOnce(empty, reader, writer, storage, 1);
+
+  assert.deepEqual(outcome, {
+    ok: false,
+    message: "remote manifest needs a newer version of geode",
+    failures: [],
+    snapshot: null,
+  });
+});
+
 test("syncOnce: a stale ancestor is ignored on a first sync, so a populated vault is pushed, not wiped", async () => {
   // An older build wrote state.json on every file event rather than only on completed syncs, so an
   // upgrader carries a `previous` snapshot describing their whole vault even though nothing ever
