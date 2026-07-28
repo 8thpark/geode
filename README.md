@@ -20,7 +20,7 @@
   <a href="https://nodejs.org/en/about/previous-releases">
     <img src="https://img.shields.io/badge/node-24%2B-339933?style=flat-square" alt="Node Minimum Version">
   </a>
-  <a href="./LICENSE.md">
+  <a href="./LICENSE">
     <img src="https://img.shields.io/badge/license-GPL--3.0-blue.svg?style=flat-square" alt="License">
   </a>
   <a href="https://github.com/8thpark/geode/stargazers">
