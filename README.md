@@ -5,27 +5,13 @@
 <h1 align="center">Geode</h1>
 
 <p align="center">
-  <a href="https://github.com/8thpark/geode/actions/workflows/ci.yml?query=branch%3Amain">
-    <img src="https://img.shields.io/github/check-runs/8thpark/geode/main?style=flat-square&amp;label=ci" alt="GitHub Branch Check Runs">
-  </a>
-  <a href="https://scorecard.dev/viewer/?uri=github.com/8thpark/geode&amp;sort_by=check-score&amp;sort_direction=desc">
-    <img src="https://img.shields.io/ossf-scorecard/github.com/8thpark/geode?style=flat-square&amp;label=OSSF" alt="OSSF Scorecard Score">
-  </a>
-  <a href="https://github.com/8thpark/geode/releases">
-    <img src="https://img.shields.io/github/package-json/version/8thpark/geode?style=flat-square" alt="Plugin Version">
-  </a>
-  <a href="https://obsidian.md/changelog/">
-    <img src="https://img.shields.io/badge/obsidian-1.11.4%2B-7C3AED?style=flat-square" alt="Obsidian Minimum Version">
-  </a>
-  <a href="https://nodejs.org/en/about/previous-releases">
-    <img src="https://img.shields.io/badge/node-24%2B-339933?style=flat-square" alt="Node Minimum Version">
-  </a>
-  <a href="./LICENSE">
-    <img src="https://img.shields.io/badge/license-GPL--3.0-blue.svg?style=flat-square" alt="License">
-  </a>
-  <a href="https://github.com/8thpark/geode/stargazers">
-    <img src="https://img.shields.io/github/stars/8thpark/geode?style=social" alt="GitHub Repo Stars">
-  </a>
+  <a href="https://github.com/8thpark/geode/actions/workflows/ci.yml?query=branch%3Amain"><img src="https://img.shields.io/github/check-runs/8thpark/geode/main?style=flat-square&amp;label=ci" alt="GitHub Branch Check Runs"></a>
+  <a href="https://scorecard.dev/viewer/?uri=github.com/8thpark/geode&amp;sort_by=check-score&amp;sort_direction=desc"><img src="https://img.shields.io/ossf-scorecard/github.com/8thpark/geode?style=flat-square&amp;label=OSSF" alt="OSSF Scorecard Score"></a>
+  <a href="https://github.com/8thpark/geode/releases"><img src="https://img.shields.io/github/package-json/version/8thpark/geode?style=flat-square" alt="Plugin Version"></a>
+  <a href="https://obsidian.md/changelog/"><img src="https://img.shields.io/badge/obsidian-1.11.4%2B-7C3AED?style=flat-square" alt="Obsidian Minimum Version"></a>
+  <a href="https://nodejs.org/en/about/previous-releases"><img src="https://img.shields.io/badge/node-24%2B-339933?style=flat-square" alt="Node Minimum Version"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-blue.svg?style=flat-square" alt="License"></a>
+  <a href="https://github.com/8thpark/geode/stargazers"><img src="https://img.shields.io/github/stars/8thpark/geode?style=social" alt="GitHub Repo Stars"></a>
 </p>
 
 > **[Obsidian](https://obsidian.md) plugin** for remote sync, MCP, and an API for your vault.
