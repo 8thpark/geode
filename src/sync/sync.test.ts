@@ -211,6 +211,16 @@ test("orphanedKeys: keys with no local counterpart are orphans; local matches an
   assert.deepEqual(orphanedKeys(objects, local), ["keep/b.md"]);
 });
 
+test("orphanedKeys: NFD S3 keys matching NFC local paths are not orphans", () => {
+  // macOS stores filenames as NFD; S3 may hold objects at those NFD keys. The local snapshot
+  // normalizes to NFC, so the orphan check must also normalize to avoid false positives.
+  const nfdKey = "caf\u0065\u0301.md";
+  const objects = [{ key: nfdKey, size: 5, lastModified: "" }];
+  const local = snapshot(file("café.md", "h1"));
+
+  assert.deepEqual(orphanedKeys(objects, local), []);
+});
+
 test("readRemoteManifest: a non 404 failure is reported, never guessed at as empty", async () => {
   const { storage } = fakeStorage();
   storage.getObject = async () => ({

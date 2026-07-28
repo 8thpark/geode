@@ -6,6 +6,7 @@ import {
   encodeSnapshot,
   type FileInfo,
   fingerprintSettings,
+  normalizePath,
   type Reader,
   type Snapshot,
   type Store,
@@ -20,12 +21,14 @@ import {
 export function createObsidianLocalWriter(adapter: DataAdapter): LocalWriter {
   return {
     writeFile: async (path, data) => {
-      await ensureParentDir(adapter, path);
+      const normalized = normalizePath(path);
+      await ensureParentDir(adapter, normalized);
       const buffer = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
-      await writeThroughTemp(adapter, path, buffer as ArrayBuffer);
+      await writeThroughTemp(adapter, normalized, buffer as ArrayBuffer);
     },
     deleteFile: async (path) => {
-      const exists = await adapter.exists(path);
+      const normalized = normalizePath(path);
+      const exists = await adapter.exists(normalized);
       if (!exists) {
         return;
       }
@@ -34,15 +37,17 @@ export function createObsidianLocalWriter(adapter: DataAdapter): LocalWriter {
       // manual delete. System trash is tried first and the vault-local .trash folder is the
       // fallback when the OS has no trash (mobile, a headless host), so the file is always
       // recoverable somewhere rather than gone.
-      const trashed = await adapter.trashSystem(path);
+      const trashed = await adapter.trashSystem(normalized);
       if (trashed) {
         return;
       }
-      await adapter.trashLocal(path);
+      await adapter.trashLocal(normalized);
     },
     renameFile: async (path, newPath) => {
-      await ensureParentDir(adapter, newPath);
-      await adapter.rename(path, newPath);
+      const normalizedOld = normalizePath(path);
+      const normalizedNew = normalizePath(newPath);
+      await ensureParentDir(adapter, normalizedNew);
+      await adapter.rename(normalizedOld, normalizedNew);
     },
   };
 }
@@ -53,19 +58,24 @@ export function createObsidianLocalWriter(adapter: DataAdapter): LocalWriter {
 export function createObsidianReader(vault: Vault): Reader {
   return {
     fileExists: async (path) => {
-      return vault.getFileByPath(path) !== null;
+      return vault.getFileByPath(normalizePath(path)) !== null;
     },
     listFiles: async () => {
       const files: FileInfo[] = [];
       for (const file of vault.getFiles()) {
-        files.push({ path: file.path, size: file.stat.size, mtime: file.stat.mtime });
+        files.push({
+          path: normalizePath(file.path),
+          size: file.stat.size,
+          mtime: file.stat.mtime,
+        });
       }
       return files;
     },
     readFile: async (path) => {
-      const file = vault.getFileByPath(path);
+      const normalized = normalizePath(path);
+      const file = vault.getFileByPath(normalized);
       if (file === null) {
-        throw new Error(`file disappeared during snapshot: ${path}`);
+        throw new Error(`file disappeared during snapshot: ${normalized}`);
       }
       const buffer = await vault.readBinary(file);
       return new Uint8Array(buffer);

@@ -7,6 +7,7 @@ import {
   encodeSnapshot,
   type FileInfo,
   isSnapshot,
+  normalizePath,
   type Reader,
   SNAPSHOT_VERSION,
   type Snapshot,
@@ -205,4 +206,72 @@ test("takeSnapshot: concurrency is bounded by the limit", async () => {
 
   assert.equal(snapshot.files.length, 10);
   assert.ok(peakInflight <= 2, `expected at most 2 concurrent reads, got ${peakInflight}`);
+});
+
+const normalizePathCases: { name: string; input: string; want: string }[] = [
+  { name: "NFC string passes through unchanged", input: "café.md", want: "café.md" },
+  {
+    name: "NFD accented filename is normalized to NFC",
+    input: "caf\u0065\u0301.md",
+    want: "café.md",
+  },
+  {
+    name: "path with accented directory and file",
+    input: "n\u00f5t\u00e9s/cafe\u0301.md",
+    want: "nõtés/café.md",
+  },
+  { name: "ASCII-only path is unchanged", input: "hello.md", want: "hello.md" },
+  { name: "empty string returns empty string", input: "", want: "" },
+];
+
+for (const { name, input, want } of normalizePathCases) {
+  test(`normalizePath: ${name}`, () => {
+    assert.equal(normalizePath(input), want);
+  });
+}
+
+test("takeSnapshot: NFD paths from reader are stored as NFC", async () => {
+  // macOS decomposes filenames to NFD; the reader returns NFD, but the snapshot must store NFC
+  // so every platform sees the same identity.
+  const nfdPath = "caf\u0065\u0301.md";
+  const reader: Reader = {
+    fileExists: async () => true,
+    listFiles: async () => [{ path: nfdPath, size: 5, mtime: 1 }],
+    readFile: async () => new TextEncoder().encode("hello"),
+  };
+
+  const snapshot = await takeSnapshot(reader, empty);
+
+  assert.equal(snapshot.files.length, 1);
+  assert.equal(snapshot.files[0].path, "café.md");
+});
+
+test("diffSnapshots: NFC and NFD variants of the same path are not reported as changes", async () => {
+  const nfcReader: Reader = {
+    fileExists: async () => true,
+    listFiles: async () => [{ path: "café.md", size: 5, mtime: 1 }],
+    readFile: async () => new TextEncoder().encode("hello"),
+  };
+  const previous = await takeSnapshot(nfcReader, empty);
+
+  const nfdReader: Reader = {
+    fileExists: async () => true,
+    listFiles: async () => [{ path: "caf\u0065\u0301.md", size: 5, mtime: 1 }],
+    readFile: async () => new TextEncoder().encode("hello"),
+  };
+  const current = await takeSnapshot(nfdReader, previous);
+
+  assert.deepEqual(diffSnapshots(previous, current), []);
+});
+
+test("decodeSnapshot: NFD paths in manifest are normalized to NFC on decode", () => {
+  const nfdFile = { path: "caf\u0065\u0301.md", size: 5, mtime: 1, hash: "abc" };
+  const raw = JSON.stringify({ version: SNAPSHOT_VERSION, files: [nfdFile] });
+
+  const decoded = decodeSnapshot(raw);
+
+  assert.equal(decoded.ok, true);
+  if (decoded.ok) {
+    assert.equal(decoded.snapshot.files[0].path, "café.md");
+  }
 });

@@ -4,6 +4,7 @@ import {
   decodeSnapshot,
   encodeSnapshot,
   type FileState,
+  normalizePath,
   type Reader,
   type Snapshot,
   takeSnapshot,
@@ -65,11 +66,12 @@ export function orphanedKeys(objects: ObjectMeta[], local: Snapshot): string[] {
   const localByPath = byPath(local.files);
   const orphans: string[] = [];
   for (const object of objects) {
-    if (object.key.startsWith(RESERVED_PREFIX)) {
+    const key = normalizePath(object.key);
+    if (key.startsWith(RESERVED_PREFIX)) {
       continue;
     }
-    if (!localByPath.has(object.key)) {
-      orphans.push(object.key);
+    if (!localByPath.has(key)) {
+      orphans.push(key);
     }
   }
 

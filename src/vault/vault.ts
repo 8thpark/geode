@@ -94,7 +94,8 @@ export function decodeSnapshot(raw: string): DecodedSnapshot {
   }
   const settingsFingerprint = (parsed as { settingsFingerprint?: unknown }).settingsFingerprint;
   const fingerprintStr = typeof settingsFingerprint === "string" ? settingsFingerprint : undefined;
-  const snapshot: Snapshot = { files: parsed.files };
+  const files = parsed.files.map((f: FileState) => ({ ...f, path: normalizePath(f.path) }));
+  const snapshot: Snapshot = { files };
   if (fingerprintStr !== undefined) {
     snapshot.settingsFingerprint = fingerprintStr;
   }
@@ -179,6 +180,14 @@ export function isSnapshot(value: unknown): value is Snapshot {
   return typeof value === "object" && value !== null && Array.isArray((value as Snapshot).files);
 }
 
+// normalizePath returns path with Unicode NFC normalization applied, so the same visible filename
+// is always the same byte sequence regardless of which platform composed it. macOS and iOS
+// decompose (NFD) by default; Linux and Android compose (NFC). Without this, the same note
+// produces two distinct S3 keys and manifest identities when synced across platforms.
+export function normalizePath(path: string): string {
+  return path.normalize("NFC");
+}
+
 // takeSnapshot walks every file the reader currently sees and returns their content hashes. A
 // file whose size and mtime both match the previous snapshot reuses that hash instead of
 // rereading content — the same stat gated hashing rsync, git, and Syncthing all use, since mtime
@@ -194,13 +203,14 @@ export async function takeSnapshot(
   const liveFiles = await reader.listFiles();
 
   const files = await mapWithConcurrency(liveFiles, concurrency, async (file) => {
-    const known = previousByPath.get(file.path);
+    const normalizedPath = normalizePath(file.path);
+    const known = previousByPath.get(normalizedPath);
     if (known !== undefined && known.size === file.size && known.mtime === file.mtime) {
       return known;
     }
     const bytes = await reader.readFile(file.path);
     return {
-      path: file.path,
+      path: normalizedPath,
       size: file.size,
       mtime: file.mtime,
       hash: await hashBytes(bytes),
