@@ -4,6 +4,7 @@ import {
   decodeSnapshot,
   encodeSnapshot,
   type FileState,
+  hashBytes,
   normalizePath,
   type Reader,
   type Snapshot,
@@ -251,17 +252,83 @@ export async function syncOnce(
     }
 
     // Migrate legacy NFD keys to NFC so every object in the bucket uses the canonical form and
-    // future syncs never see two representations of the same file.
-    const listedKeys = new Set();
+    // future syncs never see two representations of the same file. Three cases:
+    //   A: NFD-only — copy to NFC, then delete NFD
+    //   B: NFC exists with same content — safe to delete NFD
+    //   C: NFC exists with different content — conflict, fail the sync
+    const listedByKey = new Map<string, ObjectMeta>();
     for (const obj of listed.objects) {
-      listedKeys.add(obj.key);
+      listedByKey.set(obj.key, obj);
     }
+
+    const toCopy: string[] = [];
+    const toDelete: string[] = [];
+    const conflicts: SyncFailure[] = [];
 
     for (const nfdKey of legacyNFDKeys(listed.objects)) {
       const nfcKey = normalizePath(nfdKey);
-      if (!listedKeys.has(nfcKey)) {
-        await storage.copyObject(nfdKey, nfcKey);
+      const nfcObj = listedByKey.get(nfcKey);
+      if (nfcObj === undefined) {
+        toCopy.push(nfdKey);
+        continue;
       }
+
+      const nfdObj = listedByKey.get(nfdKey);
+      if (nfdObj !== undefined && nfcObj.size !== nfdObj.size) {
+        conflicts.push({
+          path: nfcKey,
+          message: "NFC and NFD keys contain different content; resolve locally and retry",
+        });
+        continue;
+      }
+
+      const nfdGet = await storage.getObject(nfdKey);
+      const nfcGet = await storage.getObject(nfcKey);
+      if (!nfdGet.ok || nfdGet.body === null || !nfcGet.ok || nfcGet.body === null) {
+        conflicts.push({
+          path: nfcKey,
+          message: "could not read remote objects to compare content; retry",
+        });
+        continue;
+      }
+
+      const nfdHash = await hashBytes(nfdGet.body);
+      const nfcHash = await hashBytes(nfcGet.body);
+      if (nfdHash !== nfcHash) {
+        conflicts.push({
+          path: nfcKey,
+          message: "NFC and NFD keys contain different content; resolve locally and retry",
+        });
+        continue;
+      }
+
+      toDelete.push(nfdKey);
+    }
+
+    if (conflicts.length > 0) {
+      return {
+        ok: false,
+        message: "bucket has conflicting NFD and NFC versions of the same file",
+        failures: conflicts,
+        snapshot: null,
+      };
+    }
+
+    for (const nfdKey of toCopy) {
+      const nfcKey = normalizePath(nfdKey);
+      const copied = await storage.copyObject(nfdKey, nfcKey);
+      if (!copied.ok) {
+        return {
+          ok: false,
+          message: `failed to migrate ${nfdKey} to NFC: ${copied.message}`,
+          failures: [],
+          snapshot: null,
+        };
+      }
+      toDelete.push(nfdKey);
+    }
+
+    for (const nfdKey of toDelete) {
       await storage.deleteObject(nfdKey);
     }
   }

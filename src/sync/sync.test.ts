@@ -314,7 +314,23 @@ test("syncOnce: legacy NFD keys are migrated to NFC on first sync", async () => 
   assert.equal(objects.has(MANIFEST_KEY), true);
 });
 
-test("syncOnce: legacy NFD key is deleted when NFC version already exists in bucket", async () => {
+test("syncOnce: legacy NFD key is deleted when NFC version already exists with same content", async () => {
+  const nfdKey = "caf\u0065\u0301.md";
+  const { storage, objects } = fakeStorage({
+    [nfdKey]: "coffee",
+    "café.md": "coffee",
+  });
+  const reader = fakeReader({ "café.md": "coffee" });
+  const { writer } = fakeLocalWriter();
+
+  const outcome = await syncOnce(empty, reader, writer, storage, 1);
+
+  assert.equal(outcome.ok, true);
+  assert.equal(objects.has(nfdKey), false);
+  assert.equal(objects.get("café.md"), "coffee");
+});
+
+test("syncOnce: colliding NFD and NFC with different content fails instead of deleting", async () => {
   const nfdKey = "caf\u0065\u0301.md";
   const { storage, objects } = fakeStorage({
     [nfdKey]: "coffee-nfd",
@@ -325,9 +341,30 @@ test("syncOnce: legacy NFD key is deleted when NFC version already exists in buc
 
   const outcome = await syncOnce(empty, reader, writer, storage, 1);
 
-  assert.equal(outcome.ok, true);
-  assert.equal(objects.has(nfdKey), false);
-  assert.equal(objects.get("café.md"), "coffee-nfc");
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.message, "bucket has conflicting NFD and NFC versions of the same file");
+  assert.equal(objects.has(nfdKey), true);
+  assert.equal(objects.has("café.md"), true);
+});
+
+test("syncOnce: failed copy during NFD migration does not delete the source", async () => {
+  const nfdKey = "caf\u0065\u0301.md";
+  const { storage, objects } = fakeStorage({ [nfdKey]: "coffee" });
+  const reader = fakeReader({ "café.md": "coffee" });
+  const { writer } = fakeLocalWriter();
+  storage.copyObject = async () => ({
+    ok: false,
+    status: "server",
+    message: "Storage rejected the copy (500)",
+  });
+
+  const outcome = await syncOnce(empty, reader, writer, storage, 1);
+
+  assert.equal(outcome.ok, false);
+  assert.ok(outcome.message.includes("failed to migrate"));
+  assert.equal(objects.has(nfdKey), true);
+  assert.equal(objects.has("café.md"), false);
+  assert.equal(objects.has(MANIFEST_KEY), false);
 });
 
 test("readRemoteManifest: a non 404 failure is reported, never guessed at as empty", async () => {
