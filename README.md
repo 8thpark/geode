@@ -37,7 +37,7 @@ quality bar, something that just always works and you don't even think about.
 
 Whilst also offering a remote MCP server and API to your vault, so that any agent (e.g. Claude,
 Codex) can read/write to the same vault, using it as memory and helping to build/maintain your
-notes. As we believe the full power of Obsidian is unlocked via agents..
+notes. As we believe the full power of Obsidian is unlocked via agents.
 
 ## Quick Start
 
