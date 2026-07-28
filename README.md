@@ -18,8 +18,6 @@
 > as a human or agent.** Seamless remote sync, plus MCP and API, so every device/agent reads and
 > writes from the same encrypted vault, even when your laptop is closed.
 
----
-
 - [What?](#what)
 - [Quick Start](#quick-start)
 - [Security](#security)
