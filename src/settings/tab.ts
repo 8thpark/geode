@@ -176,7 +176,7 @@ function renderHeader(containerEl: HTMLElement): void {
     .setButtonText("Docs")
     .setCta()
     .onClick(() => {
-      window.open("https://docs.geodemd.com", "_blank");
+      window.open("https://geode.so/docs", "_blank");
     });
 }
 
@@ -313,17 +313,17 @@ function renderSupportSection(tab: GeodeSettingTab, containerEl: HTMLElement): v
     .setDesc("Guides for connecting storage, syncing, and troubleshooting.")
     .addButton((button) =>
       button.setButtonText("Open").onClick(() => {
-        window.open("https://docs.geodemd.com", "_blank");
+        window.open("https://geode.so/docs", "_blank");
       }),
     );
 
   new Setting(card)
     .setName("Email support")
-    .setDesc("help@geodemd.com")
+    .setDesc("help@geode.so")
     .addButton((button) =>
       button.setButtonText("Copy").onClick(async () => {
         try {
-          await navigator.clipboard.writeText("help@geodemd.com");
+          await navigator.clipboard.writeText("help@geode.so");
           flashButtonText(button, "Copy", "Copied");
         } catch (err) {
           tab.plugin.logger.error(`could not copy support email: ${err}`);

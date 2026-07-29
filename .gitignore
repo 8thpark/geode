@@ -1,5 +1,6 @@
 # Build output
 main.js
+/dist/
 
 # Dev vault (created by `make create-dev-vault`)
 /dev-vault/
