@@ -17,11 +17,15 @@ if (!tag) {
 const manifest = JSON.parse(readFileSync("manifest.json", "utf8"));
 const version = manifest.version;
 
-// Compared as plain strings rather than a regex built from `version`, so the manifest value is never
-// interpreted as a pattern. Valid tags are exactly `version`, or `version-beta.N` with N a run of
-// digits.
+// Compared as plain strings rather than a regex built from `version`, so the manifest value is
+// never interpreted as a pattern. Valid tags are exactly `version`, or `version-beta.N` with N a
+// run of digits.
 const betaPrefix = `${version}-beta.`;
-const betaN = tag.startsWith(betaPrefix) ? tag.slice(betaPrefix.length) : "";
+let betaN = "";
+if (tag.startsWith(betaPrefix)) {
+  betaN = tag.slice(betaPrefix.length);
+}
+
 const matches = tag === version || (betaN !== "" && /^\d+$/.test(betaN));
 
 if (!matches) {
@@ -42,8 +46,8 @@ for (const file of ["manifest.json", "main.js", "styles.css"]) {
 }
 
 // Scan the exact files being shipped for leaked secrets. The glob is passed literally so secretlint
-// (not the shell) expands it. --no-gitignore is required because dist/ is gitignored, and secretlint
-// silently skips gitignored paths otherwise. A non-zero exit throws here, aborting before any upload.
+// (not the shell) expands it. --no-gitignore is required because dist/ is gitignored, which
+// secretlint would otherwise skip. A non-zero exit throws here, aborting before any upload.
 try {
   execFileSync("npx", ["--no-install", "secretlint", "--no-gitignore", `${outDir}/**/*`], {
     stdio: "inherit",
