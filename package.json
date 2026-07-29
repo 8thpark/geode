@@ -23,10 +23,12 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.5",
+    "@secretlint/secretlint-rule-preset-recommend": "13.x.x",
     "@types/node": "24.x.x",
     "concurrently": "10.x.x",
     "esbuild": "0.x.x",
     "obsidian": "1.x.x",
+    "secretlint": "13.x.x",
     "typescript": "7.x.x"
   }
 }
