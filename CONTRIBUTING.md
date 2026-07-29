@@ -127,10 +127,11 @@ licensing changes possible without tracking down every past contributor.
 
 ## Versioning
 
-- The project uses [Semantic Versioning](https://semver.org/) for all releases
-- Tags are never prefixed with `v`, following Obsidian
-  [Manifest](https://docs.obsidian.md/Reference/Manifest) specification
-- Release candidates before an official release use the `vMAJOR.MINOR.PATCH-beta.N` format, e.g.
-  `v0.1.0-beta.1`
-- We aim to avoid this, but before `v1.0.0` anything may change in the project, and the public API
-  should not be considered stable
+The project follows [Semantic Versioning](https://semver.org/). Release tags are never prefixed
+with `v` (e.g. `0.1.0`), matching Obsidian's
+[manifest](https://docs.obsidian.md/Reference/Manifest) specification. Pre-releases before an
+official version carry a `-beta.N` suffix, e.g. `0.1.0-beta.1`. Before `1.0.0` anything may change
+and the public API should not be considered stable; we aim to avoid churn, but early is early.
+
+The version number is duplicated in `package.json` and `manifest.json`; bump both together for
+every release. The README's version badge reads `package.json`, and Obsidian reads `manifest.json`.
