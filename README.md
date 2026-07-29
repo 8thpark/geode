@@ -74,4 +74,4 @@ GPL-3.0.
 To the [Greptile](https://greptile.com) team for creating an awesome product, and giving the project
 monthly credits as part of their OSS program.
 
-<img src="https://www.greptile.com/badge.svg" width="300px" alt="Greptile: The War on Bugs">
+<a href="https://www.greptile.com/?utm_source=oss_badge&utm_medium=readme&utm_campaign=greptile_for_open_source"><img src="https://www.greptile.com/badge.svg" width="300px" alt="Greptile: The War on Bugs"></a>
