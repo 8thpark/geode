@@ -86,6 +86,7 @@ With `npm run dev` running:
 5. Run `Geode: Sync` from the command palette, or click the status bar icon bottom right, to
    push and pull against the storage server. Check the result either in the `Geode: Logs` pane or
    directly in the bucket:
+
    ```bash
    docker compose run --rm --entrypoint sh create-bucket -c \
      "mc alias set local http://minio:9000 geodedev geodedev && mc ls local/geode-dev"
@@ -123,3 +124,14 @@ valid from the Linux side.
 By contributing, you agree your contribution is licensed under this repository's
 [LICENSE](./LICENSE) and that the project may relicense it as Geode evolves. This keeps future
 licensing changes possible without tracking down every past contributor.
+
+## Versioning
+
+The project follows [Semantic Versioning](https://semver.org/). Release tags are never prefixed
+with `v` (e.g. `0.1.0`), matching Obsidian's
+[manifest](https://docs.obsidian.md/Reference/Manifest) specification. Pre-releases before an
+official version carry a `-beta.N` suffix, e.g. `0.1.0-beta.1`. Before `1.0.0` anything may change
+and the public API should not be considered stable; we aim to avoid churn, but early is early.
+
+The version number is duplicated in `package.json` and `manifest.json`; bump both together for
+every release. The README's version badge reads `package.json`, and Obsidian reads `manifest.json`.
