@@ -16,9 +16,15 @@ if (!tag) {
 
 const manifest = JSON.parse(readFileSync("manifest.json", "utf8"));
 const version = manifest.version;
-const wanted = new RegExp(`^${version.replace(/\./g, "\\.")}(-beta\\.\\d+)?$`);
 
-if (!wanted.test(tag)) {
+// Compared as plain strings rather than a regex built from `version`, so the manifest value is never
+// interpreted as a pattern. Valid tags are exactly `version`, or `version-beta.N` with N a run of
+// digits.
+const betaPrefix = `${version}-beta.`;
+const betaN = tag.startsWith(betaPrefix) ? tag.slice(betaPrefix.length) : "";
+const matches = tag === version || (betaN !== "" && /^\d+$/.test(betaN));
+
+if (!matches) {
   console.error(
     `tag ${tag} does not match manifest.json version ${version} ` +
       `(expected ${version} or ${version}-beta.N, no "v" prefix)`,
