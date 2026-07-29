@@ -1,7 +1,7 @@
 import type { App } from "obsidian";
 import { Plugin, setIcon, setTooltip } from "obsidian";
 import { createLogSink } from "./log/adapter";
-import { createLogger, type Logger, type LogSink } from "./log/log";
+import { createLogBus, createLogger, type LogBus, type Logger, type LogSink } from "./log/log";
 import { GeodeLogView, LOG_VIEW_TYPE } from "./log/view";
 import {
   DEFAULT_SETTINGS,
@@ -72,6 +72,7 @@ export default class GeodePlugin extends Plugin {
   settings: GeodeSettings = DEFAULT_SETTINGS;
   // Assigned in onload, which Obsidian always runs before any other plugin method.
   logger!: Logger;
+  private logBus!: LogBus;
   private logSink!: LogSink;
   private statusBarEl!: HTMLElement;
   private refreshTimer: number | undefined;
@@ -89,9 +90,13 @@ export default class GeodePlugin extends Plugin {
     await this.loadSettings();
 
     this.logSink = createLogSink(this.app.vault.adapter, this.manifest.dir, MAX_LOG_LINES);
-    this.logger = createLogger(this.logSink, LOG_MIN_LEVEL);
+    this.logBus = createLogBus();
+    this.logger = createLogger(this.logSink, LOG_MIN_LEVEL, this.logBus.emit);
 
-    this.registerView(LOG_VIEW_TYPE, (leaf) => new GeodeLogView(leaf, this.logSink));
+    this.registerView(
+      LOG_VIEW_TYPE,
+      (leaf) => new GeodeLogView(leaf, this.logSink, this.logBus, MAX_LOG_LINES),
+    );
     this.addCommand({
       id: "logs",
       name: "Logs",
