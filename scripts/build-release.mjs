@@ -36,18 +36,27 @@ if (!matches) {
   process.exit(1);
 }
 
+console.log(`building release ${tag}`);
+console.log(`→ tag matches manifest version ${version}`);
+
+console.log("→ cleaning dist/");
 rmSync("dist", { recursive: true, force: true });
-execFileSync("npm", ["run", "build"], { stdio: "inherit" });
+
+console.log("→ compiling and bundling plugin");
+execFileSync("npm", ["run", "--silent", "build"], { stdio: "inherit" });
 
 const outDir = `dist/${tag}`;
+console.log(`→ staging assets in ${outDir}/`);
 mkdirSync(outDir, { recursive: true });
 for (const file of ["manifest.json", "main.js", "styles.css"]) {
   copyFileSync(file, `${outDir}/${file}`);
+  console.log(`    ${file}`);
 }
 
 // Scan the exact files being shipped for leaked secrets. The glob is passed literally so secretlint
 // (not the shell) expands it. --no-gitignore is required because dist/ is gitignored, which
 // secretlint would otherwise skip. A non-zero exit throws here, aborting before any upload.
+console.log(`→ scanning ${outDir}/ for secrets`);
 try {
   execFileSync("npx", ["--no-install", "secretlint", "--no-gitignore", `${outDir}/**/*`], {
     stdio: "inherit",
@@ -57,4 +66,4 @@ try {
   process.exit(1);
 }
 
-console.log(`built release ${tag} -> ${outDir}/{manifest.json,main.js,styles.css}`);
+console.log(`✓ release ${tag} ready in ${outDir}/`);
