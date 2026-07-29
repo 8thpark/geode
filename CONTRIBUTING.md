@@ -128,7 +128,8 @@ licensing changes possible without tracking down every past contributor.
 ## Versioning
 
 - The project uses [Semantic Versioning](https://semver.org/) for all releases
-- Tags are prefixed with `v`, e.g. `v0.1.0`
+- Tags are never prefixed with `v`, following Obsidian
+  [Manifest](https://docs.obsidian.md/Reference/Manifest) specification
 - Release candidates before an official release use the `vMAJOR.MINOR.PATCH-beta.N` format, e.g.
   `v0.1.0-beta.1`
 - We aim to avoid this, but before `v1.0.0` anything may change in the project, and the public API
