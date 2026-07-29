@@ -10,6 +10,9 @@ export const DEFAULT_SETTINGS: GeodeSettings = {
   secretId: "",
 };
 
+// ConnectionStatus is the current in-memory state of a Test Connection check.
+export type ConnectionStatus = "unknown" | "checking" | "ok" | "error";
+
 // GeodeSettings is the persisted shape of a Geode plugin's user configuration.
 export type GeodeSettings = {
   version: number;
@@ -25,6 +28,24 @@ export type GeodeSettings = {
   // one they picked.
   secretId: string;
 };
+
+// SaveTarget is the narrow persistence surface needed to save a settings draft.
+export type SaveTarget = {
+  logger: {
+    info(message: string): void;
+  };
+  settings: GeodeSettings;
+  saveSettings(): Promise<void>;
+};
+
+// canSave reports whether the current draft may be persisted.
+export function canSave(dirty: boolean, connectionStatus: ConnectionStatus): boolean {
+  if (!dirty) {
+    return false;
+  }
+
+  return connectionStatus === "unknown" || connectionStatus === "ok";
+}
 
 // draftForDisplay returns the draft a settings tab should show for a given render.
 // When auto is true (Obsidian is opening the tab), the draft is re-seeded from saved
@@ -60,6 +81,20 @@ export function hasConnectionConfig(settings: GeodeSettings): boolean {
     return settings.accountId !== "";
   }
   return settings.endpoint !== "" && settings.region !== "";
+}
+
+// isCurrentConnectionResult reports whether a completed test still describes the current draft.
+export function isCurrentConnectionResult(
+  checkId: number,
+  currentCheckId: number,
+  testedSettings: GeodeSettings,
+  currentSettings: GeodeSettings,
+): boolean {
+  if (checkId !== currentCheckId) {
+    return false;
+  }
+
+  return settingsEqual(testedSettings, currentSettings);
 }
 
 // normalizeSettings returns a complete GeodeSettings from whatever loadData produced,
@@ -99,6 +134,21 @@ export function regionFor(settings: GeodeSettings): string {
   }
 
   return settings.region;
+}
+
+// saveDraft persists a copy of draft when the current connection state allows it.
+export async function saveDraft(
+  target: SaveTarget,
+  draft: GeodeSettings,
+  connectionStatus: ConnectionStatus,
+): Promise<void> {
+  if (!canSave(!settingsEqual(draft, target.settings), connectionStatus)) {
+    return;
+  }
+
+  target.logger.info(`saving settings (provider=${draft.provider})`);
+  target.settings = { ...draft };
+  await target.saveSettings();
 }
 
 // settingsEqual reports whether two settings values are identical field for field. Used to
