@@ -7,6 +7,7 @@ import {
   type GeodeSettings,
   hasConnectionConfig,
   normalizeSettings,
+  providerOptions,
   regionFor,
   settingsEqual,
 } from "./settings.ts";
@@ -48,9 +49,9 @@ const normalizeCases: { name: string; input: unknown; want: GeodeSettings }[] = 
     want: { ...DEFAULT_SETTINGS, bucket: "my-bucket" },
   },
   {
-    name: "provider s3 coerced to r2",
-    input: { provider: "s3" },
-    want: DEFAULT_SETTINGS,
+    name: "provider s3 preserved",
+    input: { provider: "s3", region: "eu-west-2" },
+    want: { ...DEFAULT_SETTINGS, provider: "s3", region: "eu-west-2" },
   },
   {
     name: "provider 42 coerced to r2",
@@ -102,6 +103,11 @@ const endpointCases: { name: string; input: GeodeSettings; want: string }[] = [
     want: "https://abc123.r2.cloudflarestorage.com",
   },
   {
+    name: "amazon s3",
+    input: { ...DEFAULT_SETTINGS, provider: "s3", region: "eu-west-2" },
+    want: "https://s3.eu-west-2.amazonaws.com",
+  },
+  {
     name: "custom",
     input: { ...DEFAULT_SETTINGS, provider: "custom", endpoint: "https://s3.example.com" },
     want: "https://s3.example.com",
@@ -132,6 +138,21 @@ for (const { name, input, want } of regionCases) {
     assert.strictEqual(regionFor(input), want);
   });
 }
+
+test("providerOptions: production excludes the custom provider", () => {
+  assert.deepStrictEqual(providerOptions(false), {
+    r2: "Cloudflare R2",
+    s3: "Amazon S3",
+  });
+});
+
+test("providerOptions: local development includes the custom provider", () => {
+  assert.deepStrictEqual(providerOptions(true), {
+    r2: "Cloudflare R2",
+    s3: "Amazon S3",
+    custom: "Custom",
+  });
+});
 
 const settingsEqualCases: { name: string; a: GeodeSettings; b: GeodeSettings; want: boolean }[] = [
   {
@@ -187,6 +208,29 @@ const hasConnectionConfigCases: { name: string; input: GeodeSettings; want: bool
     name: "r2 missing account ID is incomplete",
     input: { ...DEFAULT_SETTINGS, bucket: "b", accessKeyId: "a", secretId: "s" },
     want: false,
+  },
+  {
+    name: "s3 missing region is incomplete",
+    input: {
+      ...DEFAULT_SETTINGS,
+      provider: "s3",
+      bucket: "b",
+      accessKeyId: "a",
+      secretId: "s",
+    },
+    want: false,
+  },
+  {
+    name: "s3 with all fields is complete",
+    input: {
+      ...DEFAULT_SETTINGS,
+      provider: "s3",
+      region: "us-east-1",
+      bucket: "b",
+      accessKeyId: "a",
+      secretId: "s",
+    },
+    want: true,
   },
   {
     name: "custom missing region is incomplete",

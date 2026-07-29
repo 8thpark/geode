@@ -71,6 +71,17 @@ const missingFieldCases: {
     want: "Fill in account ID first",
   },
   {
+    name: "missing region for Amazon S3",
+    settings: {
+      ...DEFAULT_SETTINGS,
+      provider: "s3",
+      bucket: "my-vault",
+      accessKeyId: "AKIA123",
+    },
+    secretAccessKey: "shh",
+    want: "Fill in region first",
+  },
+  {
     name: "missing endpoint for custom",
     settings: {
       ...DEFAULT_SETTINGS,

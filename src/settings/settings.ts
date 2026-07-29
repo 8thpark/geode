@@ -10,10 +10,13 @@ export const DEFAULT_SETTINGS: GeodeSettings = {
   secretId: "",
 };
 
+// Provider identifies a supported S3 compatible storage configuration.
+export type Provider = "r2" | "s3" | "custom";
+
 // GeodeSettings is the persisted shape of a Geode plugin's user configuration.
 export type GeodeSettings = {
   version: number;
-  provider: "r2" | "custom";
+  provider: Provider;
   accountId: string;
   endpoint: string;
   region: string;
@@ -47,6 +50,9 @@ export function endpointFor(settings: GeodeSettings): string {
   if (settings.provider === "r2") {
     return `https://${settings.accountId}.r2.cloudflarestorage.com`;
   }
+  if (settings.provider === "s3") {
+    return `https://s3.${settings.region}.amazonaws.com`;
+  }
 
   return settings.endpoint;
 }
@@ -58,6 +64,9 @@ export function hasConnectionConfig(settings: GeodeSettings): boolean {
   }
   if (settings.provider === "r2") {
     return settings.accountId !== "";
+  }
+  if (settings.provider === "s3") {
+    return settings.region !== "";
   }
   return settings.endpoint !== "" && settings.region !== "";
 }
@@ -83,12 +92,23 @@ export function normalizeSettings(raw: unknown): GeodeSettings {
   };
 }
 
-// providerOr returns "custom" if v is "custom", otherwise "r2".
-export function providerOr(v: unknown): "r2" | "custom" {
-  if (v === "custom") {
-    return "custom";
+// providerOr returns a known provider, defaulting unknown values to "r2".
+export function providerOr(v: unknown): Provider {
+  if (v === "s3" || v === "custom") {
+    return v;
   }
   return "r2";
+}
+
+// providerOptions returns user-facing providers, including Custom only for local development.
+export function providerOptions(
+  localDev: boolean,
+): Record<Provider, string> | Record<"r2" | "s3", string> {
+  if (localDev) {
+    return { r2: "Cloudflare R2", s3: "Amazon S3", custom: "Custom" };
+  }
+
+  return { r2: "Cloudflare R2", s3: "Amazon S3" };
 }
 
 // regionFor returns the signing region to use for the given settings. R2 always signs with

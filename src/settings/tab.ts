@@ -13,6 +13,7 @@ import {
   draftForDisplay,
   type GeodeSettings,
   hasConnectionConfig,
+  providerOptions,
   providerOr,
   settingsEqual,
 } from "./settings";
@@ -198,6 +199,22 @@ function renderProviderFields(tab: GeodeSettingTab, containerEl: HTMLElement): v
     return;
   }
 
+  if (tab.draft.provider === "s3") {
+    new Setting(containerEl)
+      .setName("Region")
+      .setDesc("The AWS region your bucket lives in.")
+      .addText((text) =>
+        text
+          .setPlaceholder("us-east-1")
+          .setValue(tab.draft.region)
+          .onChange((value) => {
+            tab.draft.region = value;
+            onFieldChanged(tab);
+          }),
+      );
+    return;
+  }
+
   new Setting(containerEl)
     .setName("Endpoint")
     .setDesc("The S3 compatible endpoint URL for your storage.")
@@ -260,7 +277,7 @@ function renderStorageSection(tab: GeodeSettingTab, containerEl: HTMLElement): v
     .setDesc("Where your vault is synced to.")
     .addDropdown((dropdown) =>
       dropdown
-        .addOptions({ r2: "Cloudflare R2", custom: "Custom" })
+        .addOptions(providerOptions(process.env.NODE_ENV !== "production"))
         .setValue(tab.draft.provider)
         .onChange((value) => {
           tab.draft.provider = providerOr(value);
