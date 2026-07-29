@@ -86,6 +86,7 @@ With `npm run dev` running:
 5. Run `Geode: Sync` from the command palette, or click the status bar icon bottom right, to
    push and pull against the storage server. Check the result either in the `Geode: Logs` pane or
    directly in the bucket:
+
    ```bash
    docker compose run --rm --entrypoint sh create-bucket -c \
      "mc alias set local http://minio:9000 geodedev geodedev && mc ls local/geode-dev"
@@ -123,3 +124,12 @@ valid from the Linux side.
 By contributing, you agree your contribution is licensed under this repository's
 [LICENSE](./LICENSE) and that the project may relicense it as Geode evolves. This keeps future
 licensing changes possible without tracking down every past contributor.
+
+## Versioning
+
+- The project uses [Semantic Versioning](https://semver.org/) for all releases
+- Tags are prefixed with `v`, e.g. `v0.1.0`
+- Release candidates before an official release use the `vMAJOR.MINOR.PATCH-beta.N` format, e.g.
+  `v0.1.0-beta.1`
+- We aim to avoid this, but before `v1.0.0` anything may change in the project, and the public API
+  should not be considered stable
