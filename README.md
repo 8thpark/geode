@@ -23,6 +23,7 @@
 - [Security](#security)
 - [Contributing](#contributing)
 - [License](#license)
+- [Thanks](#thanks)
 
 ## What?
 
@@ -42,7 +43,7 @@ notes. As we believe the full power of Obsidian is unlocked via agents.
 > [!IMPORTANT]
 > _The project is currently in **beta**._
 
-We are working hard to get to our first `v0.1.0` release, see
+We are working hard to get to our first `0.1.0` release, see
 [progress](https://github.com/8thpark/geode/milestones).
 
 ## Security
@@ -67,3 +68,10 @@ label and [CONTRIBUTING.md](./CONTRIBUTING.md) for more details.
 **Geode** is available under the [GNU General Public License v3.0](./LICENSE). You are free to use,
 modify, and distribute it, provided any derivative work you distribute is also released under the
 GPL-3.0.
+
+## Thanks
+
+To the [Greptile](https://greptile.com) team for creating an awesome product, and giving the project
+monthly credits as part of their OSS program.
+
+<img src="https://www.greptile.com/badge.svg" width="300px" alt="Greptile: The War on Bugs">
