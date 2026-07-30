@@ -1,8 +1,20 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DEFAULT_SETTINGS, type GeodeSettings } from "../settings/settings.ts";
-import { probeConditionalWrites, type StorageClient, testConnection } from "./storage.ts";
+import {
+  probeConditionalWrites,
+  type StorageClient,
+  type Transport,
+  testConnection,
+} from "./storage.ts";
 import { parseListObjectsXml } from "./xml.ts";
+
+// stubTransport stands in for a real dispatcher in tests that only need testConnection to reach the
+// network step; it always fails as if the endpoint were unreachable, so no unit test touches the
+// network.
+const stubTransport: Transport = async () => {
+  throw new Error("unreachable in tests");
+};
 
 // honouringPut is a putObject that enforces ifAbsent the way a correct S3 server does: the first
 // write to a key lands, a later ifAbsent write to the same key is rejected as a conflict.
@@ -98,7 +110,7 @@ const missingFieldCases: {
 
 for (const { name, settings, secretAccessKey, want } of missingFieldCases) {
   test(`testConnection: ${name}`, async () => {
-    const result = await testConnection(settings, secretAccessKey);
+    const result = await testConnection(settings, secretAccessKey, stubTransport);
     assert.equal(result.ok, false);
     assert.equal(result.status, "auth");
     assert.equal(result.message, want);
@@ -113,7 +125,7 @@ test("testConnection: R2 with empty endpoint and region passes field check", asy
     accountId: "acc123",
   };
 
-  const result = await testConnection(settings, "shh");
+  const result = await testConnection(settings, "shh", stubTransport);
 
   assert.equal(result.ok, false);
   assert.ok(!result.message.startsWith("Fill in"));

@@ -8,6 +8,7 @@ import {
   Setting,
 } from "obsidian";
 import type GeodePlugin from "../main";
+import { obsidianTransport } from "../storage/obsidian";
 import { testConnection } from "../storage/storage";
 import {
   type ConnectionStatus,
@@ -476,7 +477,7 @@ export class GeodeSettingTab extends PluginSettingTab {
       this.plugin.logger.warn(`no secret found for ID "${testedSettings.secretId}"`);
     }
 
-    const result = await testConnection(testedSettings, secretAccessKey);
+    const result = await testConnection(testedSettings, secretAccessKey, obsidianTransport);
 
     if (!isCurrentConnectionResult(id, this.checkId, testedSettings, this.draft)) {
       return;
