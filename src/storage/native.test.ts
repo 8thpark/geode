@@ -1,6 +1,39 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { nativeRequest, nativeResponse } from "./native.ts";
+import type { RequestUrlParam } from "obsidian";
+import { nativeRequest, nativeResponse, nativeTransport } from "./native.ts";
+
+test("nativeTransport: converts the request, dispatches it, and converts the response back", async () => {
+  const body = new Uint8Array([1, 2, 3]);
+  let seen: RequestUrlParam | undefined;
+  const dispatch = async (param: RequestUrlParam) => {
+    seen = param;
+    return {
+      status: 200,
+      arrayBuffer: body.buffer,
+      headers: { etag: '"v1"' },
+      json: null,
+      text: "",
+    };
+  };
+
+  const transport = nativeTransport(dispatch);
+  const response = await transport(
+    new Request("https://s3.example.com/vault/k", {
+      method: "PUT",
+      headers: { authorization: "sig" },
+      body,
+    }),
+  );
+
+  assert.equal(seen?.method, "PUT");
+  assert.equal(seen?.throw, false);
+  assert.equal(seen?.headers?.authorization, "sig");
+  assert.deepEqual(new Uint8Array(seen?.body as ArrayBuffer), body);
+  assert.equal(response.ok, true);
+  assert.deepEqual(response.body, body);
+  assert.equal(response.header("ETag"), '"v1"');
+});
 
 test("nativeRequest: carries the url, method, and every signed header, and disables throw", async () => {
   const request = new Request("https://acc.r2.cloudflarestorage.com/vault/notes/a.md", {

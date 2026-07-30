@@ -1,5 +1,10 @@
 import type { RequestUrlParam, RequestUrlResponse } from "obsidian";
-import type { HttpResponse } from "./storage.ts";
+import type { HttpResponse, Transport } from "./storage.ts";
+
+// Dispatch sends a native request parameter and resolves its response. Obsidian's requestUrl
+// satisfies this shape; a test supplies a fake so the whole conversion, dispatch, and response
+// mapping can be exercised without a running Obsidian.
+export type Dispatch = (param: RequestUrlParam) => Promise<RequestUrlResponse>;
 
 // nativeRequest converts a signed request into the parameters for Obsidian's requestUrl, carrying
 // the SigV4 Authorization and x-amz-* headers through unchanged so the signature stays valid. throw
@@ -26,6 +31,14 @@ export function nativeResponse(
     body: new Uint8Array(response.arrayBuffer),
     header: (name) => headerOf(response.headers, name),
   };
+}
+
+// nativeTransport builds a Transport from a dispatcher: it converts the signed request, hands the
+// parameter to dispatch, and converts the response back. All of the transport's logic lives here so
+// a fake dispatch can exercise it without a running Obsidian; the plugin binds dispatch to
+// Obsidian's requestUrl.
+export function nativeTransport(dispatch: Dispatch): Transport {
+  return async (request) => nativeResponse(await dispatch(await nativeRequest(request)));
 }
 
 // bodyOf reads a signed request's body as an ArrayBuffer for requestUrl, returning undefined for
