@@ -42,13 +42,33 @@ export function draftForDisplay(
   return currentDraft;
 }
 
+// normalizeEndpoint ensures the endpoint has an explicit scheme and no trailing slash.
+export function normalizeEndpoint(endpoint: string): string {
+  let normalized = endpoint.trim();
+  if (!normalized) {
+    return "";
+  }
+
+  // Require an explicit scheme to prevent generic network errors
+  if (!normalized.startsWith("http://") && !normalized.startsWith("https://")) {
+    normalized = `https://${normalized}`;
+  }
+
+  // Strip trailing slashes to prevent double-slash SigV4 canonical path issues
+  while (normalized.endsWith("/")) {
+    normalized = normalized.slice(0, -1);
+  }
+
+  return normalized;
+}
+
 // endpointFor returns the storage endpoint URL to use for the given settings.
 export function endpointFor(settings: GeodeSettings): string {
   if (settings.provider === "r2") {
     return `https://${settings.accountId}.r2.cloudflarestorage.com`;
   }
 
-  return settings.endpoint;
+  return normalizeEndpoint(settings.endpoint);
 }
 
 // hasConnectionConfig reports whether settings have enough filled in to attempt a connection.
