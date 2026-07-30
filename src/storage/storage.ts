@@ -1,5 +1,6 @@
 import { AwsClient } from "aws4fetch";
 import { endpointFor, type GeodeSettings, regionFor } from "../settings/settings.ts";
+import { timeoutFor, withDeadline } from "./deadline.ts";
 import { encodeComponent, encodeKey } from "./encode.ts";
 import { messageFor, statusForHttp } from "./errors.ts";
 import { parseListObjectsXml } from "./xml.ts";
@@ -107,9 +108,11 @@ export type StorageClient = {
 };
 
 // Transport sends an already signed request and returns its response, rejecting only when the
-// request never completes (offline, a failed DNS lookup, a refused connection). The plugin injects
-// a transport backed by Obsidian's requestUrl, which issues a native request and so is never
-// subject to CORS; tests and any non Obsidian caller inject fetchTransport.
+// request never completes (offline, a failed DNS lookup, a refused connection). A transport need
+// not bound its own runtime: send dispatches every request under a deadline, so a stalled
+// connection rejects there rather than hanging forever. The plugin injects a transport backed by
+// Obsidian's requestUrl, which issues a native request and so is never subject to CORS; tests and
+// any non Obsidian caller inject fetchTransport.
 export type Transport = (request: Request) => Promise<HttpResponse>;
 
 // createS3Client returns a StorageClient backed by the S3 compatible endpoint in settings, sending
@@ -243,6 +246,16 @@ export async function testConnection(
   }
 
   return probeConditionalWrites(createS3Client(settings, secretAccessKey, transport));
+}
+
+// bytesOf reports the size of a request body so its deadline can scale with it. Only a put carries
+// one, and it is always the Uint8Array s3PutObject passes through.
+function bytesOf(init: RequestInit): number {
+  if (init.body instanceof Uint8Array) {
+    return init.body.byteLength;
+  }
+
+  return 0;
 }
 
 // conditionHeaders converts a PutCondition into the HTTP precondition headers an S3 compatible
@@ -480,8 +493,11 @@ async function s3PutObject(
 }
 
 // send signs the request with the client's credentials, then hands the signed request to the
-// transport. Signing is environment agnostic (aws4fetch uses WebCrypto); only the transport, and
-// so whether the request is subject to CORS, differs between the plugin runtime and tests.
+// transport under a deadline. Signing is environment agnostic (aws4fetch uses WebCrypto); only the
+// transport, and so whether the request is subject to CORS, differs between the plugin runtime and
+// tests. The deadline is applied here rather than at each transport binding because this is the one
+// dispatch point every storage operation goes through, so no future transport can be injected
+// without one.
 async function send(
   client: AwsClient,
   transport: Transport,
@@ -490,5 +506,5 @@ async function send(
 ): Promise<HttpResponse> {
   const signed = await client.sign(url, init);
 
-  return transport(signed);
+  return withDeadline(transport, signed, timeoutFor(bytesOf(init)));
 }
