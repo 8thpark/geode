@@ -148,8 +148,9 @@ launch. The steps:
 3. The tag push triggers [`release.yml`](./.github/workflows/release.yml), which rebuilds the
    artifacts from the tagged commit (validating the tag against `manifest.json` and secret-scanning
    the exact bytes), signs them with keyless [build provenance](https://docs.github.com/actions/security-guides/using-artifact-attestations-to-establish-provenance-for-builds),
-   and creates a **draft** GitHub release with the assets attached and generated notes as a
-   skeleton. A `-beta.N` tag is marked pre-release automatically.
+   and creates a **draft** GitHub release with the assets, the signed provenance bundle
+   (`geode-<version>.sigstore.json`), and generated notes as a skeleton attached. A `-beta.N` tag is
+   marked pre-release automatically.
 4. Open the draft, rewrite the generated notes into real release notes, then publish. Editing notes
    and publishing is metadata only, so it never invalidates the signature over the asset bytes.
 
