@@ -135,3 +135,24 @@ and the public API should not be considered stable; we aim to avoid churn, but e
 
 The version number is duplicated in `package.json` and `manifest.json`; bump both together for
 every release. The README's version badge reads `package.json`, and Obsidian reads `manifest.json`.
+
+## Releasing
+
+Releases are cut by pushing a tag; a workflow does the mechanical work and leaves you a draft to
+launch. The steps:
+
+1. Bump `package.json` and `manifest.json` to the new version (they must agree, `check-versions`
+   enforces it), open a PR, merge to `main`.
+2. Tag the merged commit and push it, no `v` prefix: `git tag 0.1.0 && git push origin 0.1.0`.
+   A `-beta.N` suffix marks a pre-release, e.g. `0.1.0-beta.2`.
+3. The tag push triggers [`release.yml`](./.github/workflows/release.yml), which rebuilds the
+   artifacts from the tagged commit (validating the tag against `manifest.json` and secret-scanning
+   the exact bytes), signs them with keyless [build provenance](https://docs.github.com/actions/security-guides/using-artifact-attestations-to-establish-provenance-for-builds),
+   and creates a **draft** GitHub release with the assets attached and generated notes as a
+   skeleton. A `-beta.N` tag is marked pre-release automatically.
+4. Open the draft, rewrite the generated notes into real release notes, then publish. Editing notes
+   and publishing is metadata only, so it never invalidates the signature over the asset bytes.
+
+There is no long-lived signing key: provenance is signed keylessly against the workflow's GitHub
+identity and recorded in a public transparency log. See [SECURITY.md](./SECURITY.md) for how anyone
+verifies a downloaded release.
