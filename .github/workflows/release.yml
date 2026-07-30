@@ -9,17 +9,20 @@ on:
     tags:
       - "*.*.*"
 
-# id-token + attestations are what keyless Sigstore signing needs; contents lets us create the
-# release. No long-lived signing key exists to leak.
+# Least privilege at the top: read only. The single job below elevates to exactly what it needs.
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
+  contents: read
 
 jobs:
   release:
     name: Release
     runs-on: ubuntu-latest
+    # id-token + attestations are what keyless Sigstore signing needs; contents lets us create the
+    # release. Scoped to the job, not the workflow. No long-lived signing key exists to leak.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
@@ -35,12 +38,23 @@ jobs:
       # Keyless provenance over the three shipped files, recorded in the public transparency log.
       # Anyone can verify with: gh attestation verify main.js --repo 8thpark/geode
       - name: Attest build provenance
+        id: attest
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-path: |
             dist/${{ github.ref_name }}/manifest.json
             dist/${{ github.ref_name }}/main.js
             dist/${{ github.ref_name }}/styles.css
+
+      # Ship the Sigstore bundle (the signed provenance for all three artifacts) as a release asset,
+      # not just in GitHub's attestation store. It lets anyone verify the release offline, and OSSF
+      # Scorecard's Signed-Releases check reads release assets rather than the attestation store, so
+      # the `.sigstore.json` asset is what earns that check.
+      - name: Stage provenance bundle
+        env:
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+          TAG: ${{ github.ref_name }}
+        run: cp "$BUNDLE" "dist/$TAG/geode-$TAG.sigstore.json"
 
       # Draft, not published: the generated notes are a skeleton for a human to rewrite before
       # launching. A -beta.N tag is marked pre-release so it never becomes "Latest" (BRAT still
@@ -62,4 +76,5 @@ jobs:
             $prerelease \
             "dist/$TAG/manifest.json" \
             "dist/$TAG/main.js" \
-            "dist/$TAG/styles.css"
+            "dist/$TAG/styles.css" \
+            "dist/$TAG/geode-$TAG.sigstore.json"
