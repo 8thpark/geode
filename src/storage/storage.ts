@@ -1,5 +1,6 @@
 import { AwsClient } from "aws4fetch";
 import { endpointFor, type GeodeSettings, regionFor } from "../settings/settings.ts";
+import { timeoutFor, withDeadline } from "./deadline.ts";
 import { encodeComponent, encodeKey } from "./encode.ts";
 import { messageFor, statusForHttp } from "./errors.ts";
 import { parseListObjectsXml } from "./xml.ts";
@@ -100,16 +101,18 @@ export type ResultStatus =
 // client can satisfy this same shape without changing anything that depends on it.
 export type StorageClient = {
   putObject: (key: string, body: Uint8Array, condition?: PutCondition) => Promise<PutResult>;
-  getObject: (key: string) => Promise<GetResult>;
+  getObject: (key: string, expectedBytes?: number) => Promise<GetResult>;
   copyObject: (sourceKey: string, destKey: string) => Promise<CopyResult>;
   deleteObject: (key: string) => Promise<DeleteResult>;
   listObjects: (prefix?: string) => Promise<ListResult>;
 };
 
 // Transport sends an already signed request and returns its response, rejecting only when the
-// request never completes (offline, a failed DNS lookup, a refused connection). The plugin injects
-// a transport backed by Obsidian's requestUrl, which issues a native request and so is never
-// subject to CORS; tests and any non Obsidian caller inject fetchTransport.
+// request never completes (offline, a failed DNS lookup, a refused connection). A transport need
+// not bound its own runtime: send dispatches every request under a deadline, so a stalled
+// connection rejects there rather than hanging forever. The plugin injects a transport backed by
+// Obsidian's requestUrl, which issues a native request and so is never subject to CORS; tests and
+// any non Obsidian caller inject fetchTransport.
 export type Transport = (request: Request) => Promise<HttpResponse>;
 
 // createS3Client returns a StorageClient backed by the S3 compatible endpoint in settings, sending
@@ -130,7 +133,7 @@ export function createS3Client(
   return {
     putObject: (key, body, condition) =>
       s3PutObject(client, transport, baseUrl, key, body, condition),
-    getObject: (key) => s3GetObject(client, transport, baseUrl, key),
+    getObject: (key, expectedBytes) => s3GetObject(client, transport, baseUrl, key, expectedBytes),
     copyObject: (sourceKey, destKey) =>
       s3CopyObject(client, transport, baseUrl, settings.bucket, sourceKey, destKey),
     deleteObject: (key) => s3DeleteObject(client, transport, baseUrl, key),
@@ -245,6 +248,16 @@ export async function testConnection(
   return probeConditionalWrites(createS3Client(settings, secretAccessKey, transport));
 }
 
+// bytesOf reports the size of a request body so its deadline can scale with it. Only a put carries
+// one, and it is always the Uint8Array s3PutObject passes through.
+function bytesOf(init: RequestInit): number {
+  if (init.body instanceof Uint8Array) {
+    return init.body.byteLength;
+  }
+
+  return 0;
+}
+
 // conditionHeaders converts a PutCondition into the HTTP precondition headers an S3 compatible
 // server evaluates before accepting a write.
 function conditionHeaders(condition: PutCondition | undefined): Record<string, string> {
@@ -355,18 +368,27 @@ async function s3DeleteObject(
   return { ok: true, status: "ok", message: "" };
 }
 
-// s3GetObject reads the bytes stored at key.
+// s3GetObject reads the bytes stored at key. expectedBytes is the object's known size from the
+// manifest entry the caller is reading against; it scales the deadline the same way a put's body
+// does, so a large attachment on a slow link is not cut off part way through the download. It
+// defaults to zero for the few reads with no size to hand (the manifest itself), which get the base
+// budget.
 async function s3GetObject(
   client: AwsClient,
   transport: Transport,
   baseUrl: string,
   key: string,
+  expectedBytes = 0,
 ): Promise<GetResult> {
   let response: HttpResponse;
   try {
-    response = await send(client, transport, `${baseUrl}/${encodeKey(key)}`, {
-      method: "GET",
-    });
+    response = await send(
+      client,
+      transport,
+      `${baseUrl}/${encodeKey(key)}`,
+      { method: "GET" },
+      expectedBytes,
+    );
   } catch (err) {
     return {
       ok: false,
@@ -480,15 +502,24 @@ async function s3PutObject(
 }
 
 // send signs the request with the client's credentials, then hands the signed request to the
-// transport. Signing is environment agnostic (aws4fetch uses WebCrypto); only the transport, and
-// so whether the request is subject to CORS, differs between the plugin runtime and tests.
+// transport under a deadline. Signing is environment agnostic (aws4fetch uses WebCrypto); only the
+// transport, and so whether the request is subject to CORS, differs between the plugin runtime and
+// tests. The deadline is applied here rather than at each transport binding because this is the one
+// dispatch point every storage operation goes through, so no future transport can be injected
+// without one.
 async function send(
   client: AwsClient,
   transport: Transport,
   url: string,
   init: RequestInit,
+  expectedResponseBytes = 0,
 ): Promise<HttpResponse> {
   const signed = await client.sign(url, init);
 
-  return transport(signed);
+  // Only one direction ever carries bytes here: a put streams its body up, a get streams the object
+  // back down, a copy moves nothing through the client. The deadline scales with whichever transfer
+  // is non-empty so neither a large upload nor a large download is cut off mid-flight.
+  const transferBytes = Math.max(bytesOf(init), expectedResponseBytes);
+
+  return withDeadline(transport, signed, timeoutFor(transferBytes));
 }

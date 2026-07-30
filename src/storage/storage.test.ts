@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DEFAULT_SETTINGS, type GeodeSettings } from "../settings/settings.ts";
 import {
+  createS3Client,
+  type HttpResponse,
   probeConditionalWrites,
   type StorageClient,
   type Transport,
@@ -217,6 +219,78 @@ test("probeConditionalWrites: a rejecting cleanup does not mask a passing probe"
 
   assert.equal(result.ok, true);
   assert.equal(result.status, "ok");
+});
+
+// deadlineSettings are just enough config for createS3Client to sign and dispatch; no request in
+// these tests ever reaches a network, they only exercise how long the deadline waits.
+const deadlineSettings: GeodeSettings = {
+  ...DEFAULT_SETTINGS,
+  provider: "custom",
+  endpoint: "https://s3.example.com",
+  region: "us-east-1",
+  bucket: "vault",
+  accessKeyId: "AKIA123",
+};
+
+// stallingTransport never settles and resolves dispatched the moment it is called, which is right
+// after the request is signed and the deadline timer is already scheduled. Awaiting dispatched is
+// how a test knows the (mocked) timer exists before it ticks the clock.
+function stallingTransport(): { transport: Transport; dispatched: Promise<void> } {
+  let signal: () => void = () => {};
+  const dispatched = new Promise<void>((resolve) => {
+    signal = resolve;
+  });
+  const transport: Transport = () => {
+    signal();
+    return new Promise<HttpResponse>(() => {});
+  };
+  return { transport, dispatched };
+}
+
+test("getObject: a large object's read deadline scales past the base budget", async (t) => {
+  // A 10 MB read earns 60s base + 10 allowances = 160s. Before the fix it got the bare 60s because
+  // a GET carries no request body, so a slow attachment download was cut off part way through.
+  const { transport, dispatched } = stallingTransport();
+  const client = createS3Client(deadlineSettings, "shh", transport);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+
+  let settled = false;
+  const read = client.getObject("big.bin", 10_000_000);
+  read.then(() => {
+    settled = true;
+  });
+  await dispatched;
+
+  t.mock.timers.tick(60_000);
+  await Promise.resolve();
+  assert.equal(settled, false, "a 10 MB read must outlast the 60s base budget");
+
+  t.mock.timers.tick(100_000);
+  const result = await read;
+  assert.equal(result.ok, false);
+  assert.match(result.message, /timed out/);
+});
+
+test("getObject: a read with no known size falls back to the base budget", async (t) => {
+  const { transport, dispatched } = stallingTransport();
+  const client = createS3Client(deadlineSettings, "shh", transport);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+
+  let settled = false;
+  const read = client.getObject("small.md");
+  read.then(() => {
+    settled = true;
+  });
+  await dispatched;
+
+  t.mock.timers.tick(59_999);
+  await Promise.resolve();
+  assert.equal(settled, false, "the base budget has not elapsed yet");
+
+  t.mock.timers.tick(1);
+  const result = await read;
+  assert.equal(result.ok, false);
+  assert.match(result.message, /timed out/);
 });
 
 test("parseListObjectsXml decodes XML entities in object keys", () => {

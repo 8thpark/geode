@@ -221,7 +221,7 @@ async function executeAction(
     if (drift !== null) {
       return { concurrent: false, failures: [drift] };
     }
-    const result = await storage.getObject(action.path);
+    const result = await storage.getObject(action.path, remoteByPath.get(action.path)?.size);
     if (!result.ok || result.body === null) {
       return failedAction(action.path, result.message, false);
     }
@@ -261,7 +261,7 @@ async function executeAction(
     if (drift !== null) {
       return { concurrent: false, failures: [drift] };
     }
-    const result = await storage.getObject(action.path);
+    const result = await storage.getObject(action.path, remoteByPath.get(action.path)?.size);
     if (!result.ok || result.body === null) {
       return failedAction(action.path, result.message, false);
     }
@@ -314,7 +314,7 @@ async function executeAction(
     return { concurrent, failures };
   }
 
-  const result = await storage.getObject(action.path);
+  const result = await storage.getObject(action.path, remoteByPath.get(action.path)?.size);
   if (!result.ok || result.body === null) {
     failures.push({ path: action.path, message: result.message });
     return { concurrent, failures };
@@ -352,7 +352,7 @@ async function putCondition(
   if (expected === undefined) {
     return { ok: true, kind: "put", condition: { kind: "ifAbsent" } };
   }
-  const fetched = await storage.getObject(path);
+  const fetched = await storage.getObject(path, expected.size);
   if (!fetched.ok || fetched.body === null) {
     if (fetched.status === "not_found") {
       return { ok: true, kind: "put", condition: { kind: "ifAbsent" } };
@@ -407,7 +407,7 @@ async function checkRemoteDrift(
   if (expected === undefined) {
     return null;
   }
-  const fetched = await storage.getObject(path);
+  const fetched = await storage.getObject(path, expected.size);
   if (!fetched.ok || fetched.body === null) {
     if (fetched.status === "not_found") {
       return successfulAction();
@@ -429,7 +429,9 @@ async function remoteMatches(
   bytes: Uint8Array,
   storage: StorageClient,
 ): Promise<boolean> {
-  const fetched = await storage.getObject(path);
+  // The local bytes are the best estimate of the remote object's size for the deadline: a match
+  // means they are identical, and a mismatch still budgets close enough to bound the download.
+  const fetched = await storage.getObject(path, bytes.byteLength);
   if (!fetched.ok || fetched.body === null) {
     return false;
   }
