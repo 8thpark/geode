@@ -330,7 +330,7 @@ async function bucketView(
     if (object.key.startsWith(RESERVED_PREFIX) || !localByPath.has(object.key)) {
       continue;
     }
-    const fetched = await storage.getObject(object.key);
+    const fetched = await storage.getObject(object.key, object.size);
     if (!fetched.ok || fetched.body === null) {
       // Listed a moment ago and gone now means another device deleted it in between, which is
       // exactly the absence the missing manifest already implied; anything else is a real failure

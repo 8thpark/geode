@@ -7,13 +7,15 @@ const BASE_TIMEOUT_MS = 60_000;
 
 const BYTES_PER_MB = 1_000_000;
 
-// TIMEOUT_MS_PER_MB extends the budget by a megabyte's worth of upload time so a large attachment
-// on a slow uplink is not cut off part way through a transfer that was going to succeed. The
-// implied floor is roughly 0.1 MB/s. A single put carries the whole object today, so the allowance
-// is what keeps big files syncable until they are uploaded in chunks (#55).
+// TIMEOUT_MS_PER_MB extends the budget by a megabyte's worth of transfer time so a large attachment
+// on a slow link is not cut off part way through a transfer that was going to succeed, whether it is
+// a put streaming up or a get streaming down. The implied floor is roughly 0.1 MB/s. A single
+// request carries the whole object today, so the allowance is what keeps big files syncable until
+// they move in chunks (#55).
 const TIMEOUT_MS_PER_MB = 10_000;
 
-// timeoutFor returns how long a request carrying bytes of body is allowed to take.
+// timeoutFor returns how long a request moving bytes of body, in either direction, is allowed to
+// take.
 export function timeoutFor(bytes: number): number {
   return BASE_TIMEOUT_MS + Math.ceil(bytes / BYTES_PER_MB) * TIMEOUT_MS_PER_MB;
 }

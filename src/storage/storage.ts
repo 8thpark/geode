@@ -101,7 +101,7 @@ export type ResultStatus =
 // client can satisfy this same shape without changing anything that depends on it.
 export type StorageClient = {
   putObject: (key: string, body: Uint8Array, condition?: PutCondition) => Promise<PutResult>;
-  getObject: (key: string) => Promise<GetResult>;
+  getObject: (key: string, expectedBytes?: number) => Promise<GetResult>;
   copyObject: (sourceKey: string, destKey: string) => Promise<CopyResult>;
   deleteObject: (key: string) => Promise<DeleteResult>;
   listObjects: (prefix?: string) => Promise<ListResult>;
@@ -133,7 +133,7 @@ export function createS3Client(
   return {
     putObject: (key, body, condition) =>
       s3PutObject(client, transport, baseUrl, key, body, condition),
-    getObject: (key) => s3GetObject(client, transport, baseUrl, key),
+    getObject: (key, expectedBytes) => s3GetObject(client, transport, baseUrl, key, expectedBytes),
     copyObject: (sourceKey, destKey) =>
       s3CopyObject(client, transport, baseUrl, settings.bucket, sourceKey, destKey),
     deleteObject: (key) => s3DeleteObject(client, transport, baseUrl, key),
@@ -368,18 +368,27 @@ async function s3DeleteObject(
   return { ok: true, status: "ok", message: "" };
 }
 
-// s3GetObject reads the bytes stored at key.
+// s3GetObject reads the bytes stored at key. expectedBytes is the object's known size from the
+// manifest entry the caller is reading against; it scales the deadline the same way a put's body
+// does, so a large attachment on a slow link is not cut off part way through the download. It
+// defaults to zero for the few reads with no size to hand (the manifest itself), which get the base
+// budget.
 async function s3GetObject(
   client: AwsClient,
   transport: Transport,
   baseUrl: string,
   key: string,
+  expectedBytes = 0,
 ): Promise<GetResult> {
   let response: HttpResponse;
   try {
-    response = await send(client, transport, `${baseUrl}/${encodeKey(key)}`, {
-      method: "GET",
-    });
+    response = await send(
+      client,
+      transport,
+      `${baseUrl}/${encodeKey(key)}`,
+      { method: "GET" },
+      expectedBytes,
+    );
   } catch (err) {
     return {
       ok: false,
@@ -503,8 +512,14 @@ async function send(
   transport: Transport,
   url: string,
   init: RequestInit,
+  expectedResponseBytes = 0,
 ): Promise<HttpResponse> {
   const signed = await client.sign(url, init);
 
-  return withDeadline(transport, signed, timeoutFor(bytesOf(init)));
+  // Only one direction ever carries bytes here: a put streams its body up, a get streams the object
+  // back down, a copy moves nothing through the client. The deadline scales with whichever transfer
+  // is non-empty so neither a large upload nor a large download is cut off mid-flight.
+  const transferBytes = Math.max(bytesOf(init), expectedResponseBytes);
+
+  return withDeadline(transport, signed, timeoutFor(transferBytes));
 }
