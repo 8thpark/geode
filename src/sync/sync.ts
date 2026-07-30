@@ -351,6 +351,40 @@ export async function syncOnce(
     }
 
     for (const nfdKey of toDelete) {
+      const nfcKey = normalizePath(nfdKey);
+
+      // Re-verify content immediately before deleting, rather than trusting the earlier group comparison
+      const nfcGet = await storage.getObject(nfcKey);
+      if (!nfcGet.ok || nfcGet.body === null) {
+        return {
+          ok: false,
+          message: `could not re-verify ${nfcKey} before deleting legacy key ${nfdKey}; retry`,
+          failures: [],
+          snapshot: null,
+        };
+      }
+      const nfdGet = await storage.getObject(nfdKey);
+      if (!nfdGet.ok || nfdGet.body === null) {
+        return {
+          ok: false,
+          message: `could not re-verify ${nfdKey} before deletion; retry`,
+          failures: [],
+          snapshot: null,
+        };
+      }
+      const [nfcHash, nfdHash] = await Promise.all([
+        hashBytes(nfcGet.body),
+        hashBytes(nfdGet.body),
+      ]);
+      if (nfcHash !== nfdHash) {
+        return {
+          ok: false,
+          message: `${nfcKey} changed remotely during migration; sync again`,
+          failures: [],
+          snapshot: null,
+        };
+      }
+
       const deleted = await storage.deleteObject(nfdKey);
       if (!deleted.ok) {
         return {
