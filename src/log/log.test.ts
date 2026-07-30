@@ -11,6 +11,12 @@ import {
   trimLogLines,
 } from "./log.ts";
 
+// settle lets the fire-and-forget append promises, and the onEntry notifications chained off
+// them, run to completion before an assertion inspects what a listener saw.
+function settle(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 test("formatLogLine and parseLogLine round trip", () => {
   const entry: LogEntry = {
     time: Date.parse("2026-07-14T10:00:00.000Z"),
@@ -225,18 +231,19 @@ test("createLogger: debug messages persist once minLevel is debug", async () => 
   assert.deepEqual(messages, ["verbose detail"]);
 });
 
-test("createLogger: onEntry receives each persisted entry", () => {
+test("createLogger: onEntry receives each persisted entry once the append settles", async () => {
   const sink = createMemorySink(10);
   const seen: string[] = [];
   const logger = createLogger(sink, "debug", (entry) => seen.push(entry.message));
 
   logger.info("first");
   logger.warn("second");
+  await settle();
 
   assert.deepEqual(seen, ["first", "second"]);
 });
 
-test("createLogger: onEntry is not called for entries below minLevel", () => {
+test("createLogger: onEntry is not called for entries below minLevel", async () => {
   const sink = createMemorySink(10);
   const seen: string[] = [];
   const logger = createLogger(sink, "warn", (entry) => seen.push(entry.message));
@@ -244,6 +251,7 @@ test("createLogger: onEntry is not called for entries below minLevel", () => {
   logger.debug("noisy");
   logger.info("still noisy");
   logger.warn("worth keeping");
+  await settle();
 
   assert.deepEqual(seen, ["worth keeping"]);
 });
@@ -255,6 +263,7 @@ test("createLogger: a throwing onEntry does not break logging or persistence", a
   });
 
   logger.info("still logged");
+  await settle();
 
   const messages: string[] = [];
   for (const entry of await sink.read()) {

@@ -78,21 +78,17 @@ export function createLogger(sink: LogSink, minLevel: LogLevel, onEntry?: LogLis
     }
     consoleFor(level)(`geode: ${message}`);
     const entry: LogEntry = { time: Date.now(), level, message };
-    // Fire and forget: the Logger API is synchronous, so append can't be awaited. Report a
-    // failed persist to the console rather than leaving it as an unhandled rejection, and never
-    // back into sink, which would recurse if the sink itself is what's failing.
-    sink.append(entry).catch((err) => {
-      console.error(`geode: log sink append failed: ${err}`);
-    });
-    // Notify live listeners separately from persistence: logging must not break if a listener
-    // throws, and a listener shouldn't wait on the disk write to see the entry.
-    if (onEntry !== undefined) {
-      try {
-        onEntry(entry);
-      } catch (err) {
-        console.error(`geode: log listener failed: ${err}`);
-      }
-    }
+    // Fire and forget: the Logger API is synchronous, so append can't be awaited. Notify listeners
+    // only once the append has persisted, so a listener that re-reads the sink is guaranteed to
+    // see this entry rather than racing the write. A failed persist is reported to the console
+    // rather than left as an unhandled rejection, and never logged back into sink, which would
+    // recurse if the sink itself is what's failing.
+    sink
+      .append(entry)
+      .then(() => notify(onEntry, entry))
+      .catch((err) => {
+        console.error(`geode: log sink append failed: ${err}`);
+      });
   };
 
   return {
@@ -225,4 +221,17 @@ function linesOf(text: string): string[] {
     return parts.slice(0, -1);
   }
   return parts;
+}
+
+// notify hands entry to listener, isolating a throwing listener so it can neither reject the
+// append promise it runs inside nor stop the next log call.
+function notify(listener: LogListener | undefined, entry: LogEntry): void {
+  if (listener === undefined) {
+    return;
+  }
+  try {
+    listener(entry);
+  } catch (err) {
+    console.error(`geode: log listener failed: ${err}`);
+  }
 }

@@ -93,10 +93,7 @@ export default class GeodePlugin extends Plugin {
     this.logBus = createLogBus();
     this.logger = createLogger(this.logSink, LOG_MIN_LEVEL, this.logBus.emit);
 
-    this.registerView(
-      LOG_VIEW_TYPE,
-      (leaf) => new GeodeLogView(leaf, this.logSink, this.logBus, MAX_LOG_LINES),
-    );
+    this.registerView(LOG_VIEW_TYPE, (leaf) => new GeodeLogView(leaf, this.logSink, this.logBus));
     this.addCommand({
       id: "logs",
       name: "Logs",
