@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { DEFAULT_SETTINGS, type GeodeSettings } from "../settings/settings.ts";
-import { createS3Client, type StorageClient } from "../storage/storage.ts";
+import { createS3Client, fetchTransport, type StorageClient } from "../storage/storage.ts";
 import { nodeVault } from "../vault/fs.ts";
 import {
   createObsidianLocalWriter,
@@ -35,7 +35,7 @@ const liveSettings: GeodeSettings = {
   accessKeyId: "geodedev",
 };
 
-const storage = createS3Client(liveSettings, SECRET);
+const storage = createS3Client(liveSettings, SECRET, fetchTransport);
 
 const STATE_PATH = ".obsidian/plugins/geode/state.json";
 

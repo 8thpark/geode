@@ -8,21 +8,22 @@ import {
   Setting,
 } from "obsidian";
 import type GeodePlugin from "../main";
+import { obsidianTransport } from "../storage/obsidian";
 import { testConnection } from "../storage/storage";
 import {
+  type ConnectionStatus,
+  canSave,
   draftForDisplay,
   type GeodeSettings,
   hasConnectionConfig,
+  isCurrentConnectionResult,
   providerOr,
+  saveDraft,
   settingsEqual,
 } from "./settings";
 
 // DEBUG_LABEL_WIDTH is the column width debug info labels are padded to, so values line up.
 const DEBUG_LABEL_WIDTH = 12;
-
-// ConnectionStatus is the last known state of a Test Connection check. It lives only in memory;
-// it is never persisted and resets to "unknown" whenever the draft changes.
-type ConnectionStatus = "unknown" | "checking" | "ok" | "error";
 
 // renderSettingsTab draws every section into containerEl from the tab's current draft state.
 export function renderSettingsTab(tab: GeodeSettingTab, containerEl: HTMLElement): void {
@@ -176,7 +177,7 @@ function renderHeader(containerEl: HTMLElement): void {
     .setButtonText("Docs")
     .setCta()
     .onClick(() => {
-      window.open("https://docs.geodemd.com", "_blank");
+      window.open("https://geode.so/docs", "_blank");
     });
 }
 
@@ -313,17 +314,17 @@ function renderSupportSection(tab: GeodeSettingTab, containerEl: HTMLElement): v
     .setDesc("Guides for connecting storage, syncing, and troubleshooting.")
     .addButton((button) =>
       button.setButtonText("Open").onClick(() => {
-        window.open("https://docs.geodemd.com", "_blank");
+        window.open("https://geode.so/docs", "_blank");
       }),
     );
 
   new Setting(card)
     .setName("Email support")
-    .setDesc("help@geodemd.com")
+    .setDesc("help@geode.so")
     .addButton((button) =>
       button.setButtonText("Copy").onClick(async () => {
         try {
-          await navigator.clipboard.writeText("help@geodemd.com");
+          await navigator.clipboard.writeText("help@geode.so");
           flashButtonText(button, "Copy", "Copied");
         } catch (err) {
           tab.plugin.logger.error(`could not copy support email: ${err}`);
@@ -417,7 +418,7 @@ export class GeodeSettingTab extends PluginSettingTab {
   // dirty reminder never inherits the connection status colour.
   refreshActionsUI(): void {
     if (this.saveButtonEl !== null) {
-      this.saveButtonEl.setDisabled(!this.dirty);
+      this.saveButtonEl.setDisabled(!canSave(this.dirty, this.connectionStatus));
     }
 
     if (this.statusDotEl !== null) {
@@ -451,35 +452,34 @@ export class GeodeSettingTab extends PluginSettingTab {
   }
 
   async save(): Promise<void> {
-    this.plugin.logger.info(`saving settings (provider=${this.draft.provider})`);
-    this.plugin.settings = { ...this.draft };
-    await this.plugin.saveSettings();
+    await saveDraft(this.plugin, this.draft, this.connectionStatus);
     this.refreshActionsUI();
   }
 
   async checkConnection(): Promise<void> {
     this.checkId += 1;
     const id = this.checkId;
+    const testedSettings = { ...this.draft };
 
     this.plugin.logger.info(
-      `testing connection (provider=${this.draft.provider}, bucket=${this.draft.bucket})`,
+      `testing connection (provider=${testedSettings.provider}, bucket=${testedSettings.bucket})`,
     );
     this.connectionStatus = "checking";
     this.connectionMessage = "";
     this.refreshActionsUI();
 
-    const rawSecret = this.app.secretStorage.getSecret(this.draft.secretId);
+    const rawSecret = this.app.secretStorage.getSecret(testedSettings.secretId);
     let secretAccessKey = "";
     if (rawSecret !== null) {
       secretAccessKey = rawSecret;
     }
     if (secretAccessKey === "") {
-      this.plugin.logger.warn(`no secret found for ID "${this.draft.secretId}"`);
+      this.plugin.logger.warn(`no secret found for ID "${testedSettings.secretId}"`);
     }
 
-    const result = await testConnection(this.draft, secretAccessKey);
+    const result = await testConnection(testedSettings, secretAccessKey, obsidianTransport);
 
-    if (id !== this.checkId) {
+    if (!isCurrentConnectionResult(id, this.checkId, testedSettings, this.draft)) {
       return;
     }
 

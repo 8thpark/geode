@@ -5,6 +5,14 @@ const LEVEL_ORDER: Record<LogLevel, number> = {
   error: 3,
 };
 
+// LogBus fans each logged entry out to any number of listeners, so an open log view can update
+// live instead of polling the sink. In-memory only: it carries entries to whoever is listening
+// right now and keeps no history, the sink remains the source of truth for that.
+export type LogBus = {
+  emit: LogListener;
+  subscribe: (listener: LogListener) => () => void;
+};
+
 // LogEntry is one line of geode's log.
 export type LogEntry = {
   time: number;
@@ -23,6 +31,9 @@ export type Logger = {
 // LogLevel orders from least to most severe.
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
+// LogListener receives each entry as it is logged, for a live view of the log.
+export type LogListener = (entry: LogEntry) => void;
+
 // LogSink persists log entries and reads them back. The real implementation writes to a capped
 // file inside the plugin's own data directory (see adapter.ts); tests, and the fallback used
 // when there's nowhere to persist to, use an in-memory sink (see createMemorySink below).
@@ -32,20 +43,52 @@ export type LogSink = {
   clear: () => Promise<void>;
 };
 
+// createLogBus returns an in-memory LogBus. Listener errors are isolated: one throwing listener
+// must not stop the others, nor break the logging call that triggered the emit.
+export function createLogBus(): LogBus {
+  const listeners = new Set<LogListener>();
+
+  return {
+    emit: (entry) => {
+      for (const listener of listeners) {
+        try {
+          listener(entry);
+        } catch (err) {
+          console.error(`geode: log listener failed: ${err}`);
+        }
+      }
+    },
+    subscribe: (listener) => {
+      listeners.add(listener);
+
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+  };
+}
+
 // createLogger returns a Logger that mirrors every message to the console and persists it via
-// sink, both gated by the same minLevel.
-export function createLogger(sink: LogSink, minLevel: LogLevel): Logger {
+// sink, both gated by the same minLevel. Each persisted entry is also handed to onEntry, if
+// given, so a live view can update without polling.
+export function createLogger(sink: LogSink, minLevel: LogLevel, onEntry?: LogListener): Logger {
   const log = (level: LogLevel, message: string) => {
     if (!levelEnabled(level, minLevel)) {
       return;
     }
     consoleFor(level)(`geode: ${message}`);
-    // Fire and forget: the Logger API is synchronous, so append can't be awaited. Report a
-    // failed persist to the console rather than leaving it as an unhandled rejection, and never
-    // back into sink, which would recurse if the sink itself is what's failing.
-    sink.append({ time: Date.now(), level, message }).catch((err) => {
-      console.error(`geode: log sink append failed: ${err}`);
-    });
+    const entry: LogEntry = { time: Date.now(), level, message };
+    // Fire and forget: the Logger API is synchronous, so append can't be awaited. Notify listeners
+    // only once the append has persisted, so a listener that re-reads the sink is guaranteed to
+    // see this entry rather than racing the write. A failed persist is reported to the console
+    // rather than left as an unhandled rejection, and never logged back into sink, which would
+    // recurse if the sink itself is what's failing.
+    sink
+      .append(entry)
+      .then(() => notify(onEntry, entry))
+      .catch((err) => {
+        console.error(`geode: log sink append failed: ${err}`);
+      });
   };
 
   return {
@@ -178,4 +221,17 @@ function linesOf(text: string): string[] {
     return parts.slice(0, -1);
   }
   return parts;
+}
+
+// notify hands entry to listener, isolating a throwing listener so it can neither reject the
+// append promise it runs inside nor stop the next log call.
+function notify(listener: LogListener | undefined, entry: LogEntry): void {
+  if (listener === undefined) {
+    return;
+  }
+  try {
+    listener(entry);
+  } catch (err) {
+    console.error(`geode: log listener failed: ${err}`);
+  }
 }

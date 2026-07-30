@@ -1,7 +1,7 @@
 import type { App } from "obsidian";
 import { Plugin, setIcon, setTooltip } from "obsidian";
 import { createLogSink } from "./log/adapter";
-import { createLogger, type Logger, type LogSink } from "./log/log";
+import { createLogBus, createLogger, type LogBus, type Logger, type LogSink } from "./log/log";
 import { GeodeLogView, LOG_VIEW_TYPE } from "./log/view";
 import {
   DEFAULT_SETTINGS,
@@ -10,7 +10,8 @@ import {
   normalizeSettings,
 } from "./settings/settings";
 import { GeodeSettingTab } from "./settings/tab";
-import { createS3Client } from "./storage/storage";
+import { obsidianTransport } from "./storage/obsidian";
+import { createS3Client, probeConditionalWrites } from "./storage/storage";
 import { syncOnce } from "./sync/sync";
 import {
   createObsidianLocalWriter,
@@ -72,20 +73,28 @@ export default class GeodePlugin extends Plugin {
   settings: GeodeSettings = DEFAULT_SETTINGS;
   // Assigned in onload, which Obsidian always runs before any other plugin method.
   logger!: Logger;
+  private logBus!: LogBus;
   private logSink!: LogSink;
   private statusBarEl!: HTMLElement;
   private refreshTimer: number | undefined;
   private refreshInFlight: Promise<void> | null = null;
   private refreshQueued = false;
   private syncing = false;
+  // The manifest compare-and-swap that keeps overlapping syncs from clobbering each other (#83)
+  // only holds if the provider honours conditional writes. testConnection probes for this, but
+  // nothing forces a user to run it, so sync verifies once per session before it trusts the CAS
+  // and refuses to run rather than silently lose edits on a provider that ignores preconditions
+  // (#108). Reset on saveSettings so switching provider re-verifies.
+  private conditionalWritesVerified = false;
 
   async onload() {
     await this.loadSettings();
 
     this.logSink = createLogSink(this.app.vault.adapter, this.manifest.dir, MAX_LOG_LINES);
-    this.logger = createLogger(this.logSink, LOG_MIN_LEVEL);
+    this.logBus = createLogBus();
+    this.logger = createLogger(this.logSink, LOG_MIN_LEVEL, this.logBus.emit);
 
-    this.registerView(LOG_VIEW_TYPE, (leaf) => new GeodeLogView(leaf, this.logSink));
+    this.registerView(LOG_VIEW_TYPE, (leaf) => new GeodeLogView(leaf, this.logSink, this.logBus));
     this.addCommand({
       id: "logs",
       name: "Logs",
@@ -210,7 +219,19 @@ export default class GeodePlugin extends Plugin {
       return;
     }
 
-    const storage = createS3Client(this.settings, secretAccessKey);
+    const storage = createS3Client(this.settings, secretAccessKey, obsidianTransport);
+
+    if (!this.conditionalWritesVerified) {
+      const probe = await probeConditionalWrites(storage);
+      if (!probe.ok) {
+        this.logger.error(`sync: conditional write check failed: ${probe.message}`);
+        this.setSyncStatus("error", probe.message);
+        return;
+      }
+      this.conditionalWritesVerified = true;
+      this.logger.info("sync: conditional write support verified");
+    }
+
     const stateStore = createObsidianStore(
       this.app.vault.adapter,
       `${dir}/state.json`,
@@ -246,6 +267,9 @@ export default class GeodePlugin extends Plugin {
 
   async saveSettings() {
     await this.saveData(this.settings);
+    // A settings change may point at a different provider, so the next sync must re-verify
+    // conditional write support rather than trust the last provider's result.
+    this.conditionalWritesVerified = false;
     this.logger.info("settings saved");
   }
 
