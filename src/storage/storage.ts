@@ -1,5 +1,9 @@
 import { AwsClient } from "aws4fetch";
-import { endpointFor, type GeodeSettings, regionFor } from "../settings/settings.ts";
+import {
+  endpointFor,
+  type GeodeSettings,
+  regionFor,
+} from "../settings/settings.ts";
 import { encodeComponent, encodeKey } from "./encode.ts";
 import { messageFor, statusForHttp } from "./errors.ts";
 import { parseListObjectsXml } from "./xml.ts";
@@ -63,7 +67,9 @@ export type ObjectMeta = {
 // equals etag, "ifAbsent" only while no object exists at the key. A failed precondition comes
 // back as a "conflict" status, how a caller detects a concurrent writer instead of silently
 // overwriting what that writer just stored.
-export type PutCondition = { kind: "ifMatch"; etag: string } | { kind: "ifAbsent" };
+export type PutCondition =
+  | { kind: "ifMatch"; etag: string }
+  | { kind: "ifAbsent" };
 
 // PutResult reports whether an object was written. Message is the empty string when ok is true.
 export type PutResult = {
@@ -88,15 +94,26 @@ export type ResultStatus =
 // returns plain data, never provider credentials or settings, so a future WebDAV or Dropbox
 // client can satisfy this same shape without changing anything that depends on it.
 export type StorageClient = {
-  putObject: (key: string, body: Uint8Array, condition?: PutCondition) => Promise<PutResult>;
+  putObject: (
+    key: string,
+    body: Uint8Array,
+    condition?: PutCondition,
+  ) => Promise<PutResult>;
   getObject: (key: string) => Promise<GetResult>;
-  copyObject: (sourceKey: string, destKey: string) => Promise<CopyResult>;
+  copyObject: (
+    sourceKey: string,
+    destKey: string,
+    condition?: PutCondition,
+  ) => Promise<CopyResult>;
   deleteObject: (key: string) => Promise<DeleteResult>;
   listObjects: (prefix?: string) => Promise<ListResult>;
 };
 
 // createS3Client returns a StorageClient backed by the S3 compatible endpoint in settings.
-export function createS3Client(settings: GeodeSettings, secretAccessKey: string): StorageClient {
+export function createS3Client(
+  settings: GeodeSettings,
+  secretAccessKey: string,
+): StorageClient {
   const client = new AwsClient({
     accessKeyId: settings.accessKeyId,
     secretAccessKey,
@@ -106,10 +123,18 @@ export function createS3Client(settings: GeodeSettings, secretAccessKey: string)
   const baseUrl = `${endpointFor(settings)}/${settings.bucket}`;
 
   return {
-    putObject: (key, body, condition) => s3PutObject(client, baseUrl, key, body, condition),
+    putObject: (key, body, condition) =>
+      s3PutObject(client, baseUrl, key, body, condition),
     getObject: (key) => s3GetObject(client, baseUrl, key),
-    copyObject: (sourceKey, destKey) =>
-      s3CopyObject(client, baseUrl, settings.bucket, sourceKey, destKey),
+    copyObject: (sourceKey, destKey, condition) =>
+      s3CopyObject(
+        client,
+        baseUrl,
+        settings.bucket,
+        sourceKey,
+        destKey,
+        condition,
+      ),
     deleteObject: (key) => s3DeleteObject(client, baseUrl, key),
     listObjects: (prefix) => s3ListObjects(client, baseUrl, prefix),
   };
@@ -123,7 +148,9 @@ export function createS3Client(settings: GeodeSettings, secretAccessKey: string)
 // clobber the first, the exact silent data loss the conditional puts exist to prevent. It also
 // checks the read hands back an ETag, which sync needs to make later updates conditional. The probe
 // object is always deleted, best effort.
-export async function probeConditionalWrites(client: StorageClient): Promise<ConnectionResult> {
+export async function probeConditionalWrites(
+  client: StorageClient,
+): Promise<ConnectionResult> {
   const key = `${PROBE_KEY_PREFIX}${crypto.randomUUID()}`;
   const body = new TextEncoder().encode("geode connection probe");
 
@@ -138,7 +165,8 @@ export async function probeConditionalWrites(client: StorageClient): Promise<Con
       return {
         ok: false,
         status: "client",
-        message: "Storage ignored a conditional write, so concurrent edits can be lost",
+        message:
+          "Storage ignored a conditional write, so concurrent edits can be lost",
       };
     }
     if (second.status !== "conflict") {
@@ -153,7 +181,8 @@ export async function probeConditionalWrites(client: StorageClient): Promise<Con
       return {
         ok: false,
         status: "client",
-        message: "Storage did not return an ETag, which sync needs for conditional writes",
+        message:
+          "Storage did not return an ETag, which sync needs for conditional writes",
       };
     }
 
@@ -208,7 +237,9 @@ export async function testConnection(
 
 // conditionHeaders converts a PutCondition into the HTTP precondition headers an S3 compatible
 // server evaluates before accepting a write.
-function conditionHeaders(condition: PutCondition | undefined): Record<string, string> {
+function conditionHeaders(
+  condition: PutCondition | undefined,
+): Record<string, string> {
   if (condition === undefined) {
     return {};
   }
@@ -223,7 +254,10 @@ function conditionHeaders(condition: PutCondition | undefined): Record<string, s
 // "" if everything required is present. The requirements mirror hasConnectionConfig: all providers
 // need bucket, access key, and secret; R2 derives endpoint and region from the account ID, so
 // only custom needs them explicitly.
-function missingFieldFor(settings: GeodeSettings, secretAccessKey: string): string {
+function missingFieldFor(
+  settings: GeodeSettings,
+  secretAccessKey: string,
+): string {
   if (settings.bucket === "") {
     return "bucket";
   }
@@ -263,19 +297,27 @@ async function s3CopyObject(
   bucket: string,
   sourceKey: string,
   destKey: string,
+  condition: PutCondition | undefined,
 ): Promise<CopyResult> {
   const source = `/${bucket}/${encodeKey(sourceKey)}`;
   let response: Response;
   try {
     response = await client.fetch(`${baseUrl}/${encodeKey(destKey)}`, {
       method: "PUT",
-      headers: { "x-amz-copy-source": source },
+      headers: { "x-amz-copy-source": source, ...conditionHeaders(condition) },
     });
   } catch (err) {
     return { ok: false, status: "network", message: messageFor(err) };
   }
 
   if (!response.ok) {
+    if (response.status === 412) {
+      return {
+        ok: false,
+        status: "conflict",
+        message: "Destination changed since it was listed",
+      };
+    }
     return {
       ok: false,
       status: statusForHttp(response.status),
@@ -284,7 +326,11 @@ async function s3CopyObject(
   }
   const body = await response.text();
   if (body.includes("<Error")) {
-    return { ok: false, status: "server", message: "Storage rejected the copy (200 error body)" };
+    return {
+      ok: false,
+      status: "server",
+      message: "Storage rejected the copy (200 error body)",
+    };
   }
   return { ok: true, status: "ok", message: "" };
 }
@@ -315,7 +361,11 @@ async function s3DeleteObject(
 }
 
 // s3GetObject reads the bytes stored at key.
-async function s3GetObject(client: AwsClient, baseUrl: string, key: string): Promise<GetResult> {
+async function s3GetObject(
+  client: AwsClient,
+  baseUrl: string,
+  key: string,
+): Promise<GetResult> {
   let response: Response;
   try {
     response = await client.fetch(`${baseUrl}/${encodeKey(key)}`, {

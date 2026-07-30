@@ -1,4 +1,8 @@
-import type { ObjectMeta, PutCondition, StorageClient } from "../storage/storage.ts";
+import type {
+  ObjectMeta,
+  PutCondition,
+  StorageClient,
+} from "../storage/storage.ts";
 import {
   byPath,
   decodeSnapshot,
@@ -10,7 +14,11 @@ import {
   type Snapshot,
   takeSnapshot,
 } from "../vault/vault.ts";
-import { executeSyncPlan, type LocalWriter, type SyncFailure } from "./execute.ts";
+import {
+  executeSyncPlan,
+  type LocalWriter,
+  type SyncFailure,
+} from "./execute.ts";
 import {
   MANIFEST_KEY,
   manifestAfterSync,
@@ -327,8 +335,20 @@ export async function syncOnce(
     }
 
     for (const { from, to } of toCopy) {
-      const copied = await storage.copyObject(from, to);
+      // Conditional on the destination still being absent: the group was built from a listing
+      // taken before this loop ran, so a concurrent writer could have created `to` in the
+      // meantime. An unconditional copy would silently overwrite that write, and the delete of
+      // `from` below would then discard the only remaining copy with no way to recover it.
+      const copied = await storage.copyObject(from, to, { kind: "ifAbsent" });
       if (!copied.ok) {
+        if (copied.status === "conflict") {
+          return {
+            ok: false,
+            message: `${to} was created remotely during migration; sync again`,
+            failures: [],
+            snapshot: null,
+          };
+        }
         return {
           ok: false,
           message: `failed to migrate ${from} to NFC: ${copied.message}`,
@@ -383,7 +403,12 @@ export async function syncOnce(
   // keeps the entry the bucket really holds; the manifest is uploaded even when some actions
   // failed, so one bad file never leaves the rest of the pass's pushes invisible to every other
   // device (#87).
-  const manifest = manifestAfterSync(local, remote.snapshot, executed.completed, now);
+  const manifest = manifestAfterSync(
+    local,
+    remote.snapshot,
+    executed.completed,
+    now,
+  );
   const final = adoptLiveStats(manifest, await takeSnapshot(reader, local));
   const manifestBody = new TextEncoder().encode(encodeSnapshot(final));
 
@@ -397,7 +422,11 @@ export async function syncOnce(
   if (!remote.firstSync) {
     condition = { kind: "ifMatch", etag: remote.etag };
   }
-  const uploaded = await storage.putObject(MANIFEST_KEY, manifestBody, condition);
+  const uploaded = await storage.putObject(
+    MANIFEST_KEY,
+    manifestBody,
+    condition,
+  );
   if (!uploaded.ok) {
     if (uploaded.status === "conflict") {
       return {
