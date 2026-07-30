@@ -36,9 +36,8 @@ function renderRow(list: HTMLElement, entry: LogEntry): void {
 export class GeodeLogView extends ItemView {
   private sink: LogSink;
   private bus: LogBus;
-  // The refresh coalescing pair, mirroring the plugin's vault state refresh: while a refresh is in
-  // flight, at most one more is queued, so a burst of entries collapses into a final render of the
-  // settled log instead of one render per entry.
+  // The refresh coalescing pair: refreshInFlight guards the single running refresh, and
+  // refreshQueued records that another pass is owed because an entry arrived while one was running.
   private refreshInFlight: Promise<void> | null = null;
   private refreshQueued = false;
 
@@ -76,31 +75,37 @@ export class GeodeLogView extends ItemView {
     await this.refresh();
   }
 
-  // refresh re-reads the sink and redraws the pane. Concurrent calls coalesce so a burst of
-  // entries collapses into a single trailing render; the final render always runs after the last
-  // change settles, so the pane converges on the persisted log rather than a stale snapshot.
-  private async refresh(): Promise<void> {
+  // refresh re-reads the sink and redraws the pane. Concurrent calls coalesce onto the run already
+  // in flight: each marks that another pass is owed and awaits the same run, so a burst of entries
+  // collapses into a final render of the settled log rather than one render per entry.
+  private refresh(): Promise<void> {
     if (this.refreshInFlight !== null) {
       this.refreshQueued = true;
       return this.refreshInFlight;
     }
 
-    let runQueued = false;
-    this.refreshInFlight = this.render();
+    this.refreshInFlight = this.runRefresh();
+    return this.refreshInFlight;
+  }
+
+  // runRefresh reads and draws in a loop until no further pass was requested mid-render. The queued
+  // flag is reset before each read and checked immediately after, and the guard is released in the
+  // same synchronous tick as that final check, with no await in between. So an entry logged while a
+  // read is in flight always forces one more read: it either lands before this read's snapshot (and
+  // is drawn now) or sets the flag (and the loop runs again), never slipping through the gap as the
+  // run finishes.
+  private async runRefresh(): Promise<void> {
     try {
-      await this.refreshInFlight;
-      runQueued = this.refreshQueued;
+      do {
+        this.refreshQueued = false;
+        await this.render();
+      } while (this.refreshQueued);
     } finally {
       this.refreshInFlight = null;
-      this.refreshQueued = false;
-    }
-
-    if (runQueued) {
-      return this.refresh();
     }
   }
 
-  // render does the actual read and draw, split out so refresh can own the coalescing guard.
+  // render does the actual read and draw, split out so runRefresh can own the coalescing loop.
   private async render(): Promise<void> {
     const entries = await this.sink.read();
     renderLogView(this.contentEl, entries);
