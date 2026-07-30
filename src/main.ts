@@ -10,6 +10,7 @@ import {
   normalizeSettings,
 } from "./settings/settings";
 import { GeodeSettingTab } from "./settings/tab";
+import { obsidianTransport } from "./storage/obsidian";
 import { createS3Client, probeConditionalWrites } from "./storage/storage";
 import { syncOnce } from "./sync/sync";
 import {
@@ -218,7 +219,7 @@ export default class GeodePlugin extends Plugin {
       return;
     }
 
-    const storage = createS3Client(this.settings, secretAccessKey);
+    const storage = createS3Client(this.settings, secretAccessKey, obsidianTransport);
 
     if (!this.conditionalWritesVerified) {
       const probe = await probeConditionalWrites(storage);

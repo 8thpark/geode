@@ -44,6 +44,17 @@ export type GetResult = {
   etag: string | null;
 };
 
+// HttpResponse is the normalized reply a Transport returns: the HTTP status and the fully read
+// body, so the storage operations never touch a streaming Response and the fetch and requestUrl
+// transports are interchangeable behind one shape. Header looks a single response header up by
+// name, case insensitively, since the two transports disagree on header name casing.
+export type HttpResponse = {
+  ok: boolean;
+  status: number;
+  body: Uint8Array;
+  header: (name: string) => string | null;
+};
+
 // ListResult reports whether a bucket listing succeeded. Objects is empty when ok is false.
 export type ListResult = {
   ok: boolean;
@@ -95,8 +106,19 @@ export type StorageClient = {
   listObjects: (prefix?: string) => Promise<ListResult>;
 };
 
-// createS3Client returns a StorageClient backed by the S3 compatible endpoint in settings.
-export function createS3Client(settings: GeodeSettings, secretAccessKey: string): StorageClient {
+// Transport sends an already signed request and returns its response, rejecting only when the
+// request never completes (offline, a failed DNS lookup, a refused connection). The plugin injects
+// a transport backed by Obsidian's requestUrl, which issues a native request and so is never
+// subject to CORS; tests and any non Obsidian caller inject fetchTransport.
+export type Transport = (request: Request) => Promise<HttpResponse>;
+
+// createS3Client returns a StorageClient backed by the S3 compatible endpoint in settings, sending
+// every request through the given transport.
+export function createS3Client(
+  settings: GeodeSettings,
+  secretAccessKey: string,
+  transport: Transport,
+): StorageClient {
   const client = new AwsClient({
     accessKeyId: settings.accessKeyId,
     secretAccessKey,
@@ -106,12 +128,28 @@ export function createS3Client(settings: GeodeSettings, secretAccessKey: string)
   const baseUrl = `${endpointFor(settings)}/${settings.bucket}`;
 
   return {
-    putObject: (key, body, condition) => s3PutObject(client, baseUrl, key, body, condition),
-    getObject: (key) => s3GetObject(client, baseUrl, key),
+    putObject: (key, body, condition) =>
+      s3PutObject(client, transport, baseUrl, key, body, condition),
+    getObject: (key) => s3GetObject(client, transport, baseUrl, key),
     copyObject: (sourceKey, destKey) =>
-      s3CopyObject(client, baseUrl, settings.bucket, sourceKey, destKey),
-    deleteObject: (key) => s3DeleteObject(client, baseUrl, key),
-    listObjects: (prefix) => s3ListObjects(client, baseUrl, prefix),
+      s3CopyObject(client, transport, baseUrl, settings.bucket, sourceKey, destKey),
+    deleteObject: (key) => s3DeleteObject(client, transport, baseUrl, key),
+    listObjects: (prefix) => s3ListObjects(client, transport, baseUrl, prefix),
+  };
+}
+
+// fetchTransport dispatches a signed request through the global fetch. It is the transport for
+// tests and any environment without Obsidian; the plugin uses a requestUrl backed transport so its
+// requests are not subject to CORS.
+export async function fetchTransport(request: Request): Promise<HttpResponse> {
+  const response = await fetch(request);
+  const buffer = await response.arrayBuffer();
+
+  return {
+    ok: response.ok,
+    status: response.status,
+    body: new Uint8Array(buffer),
+    header: (name) => response.headers.get(name),
   };
 }
 
@@ -174,6 +212,7 @@ export async function probeConditionalWrites(client: StorageClient): Promise<Con
 export async function testConnection(
   settings: GeodeSettings,
   secretAccessKey: string,
+  transport: Transport,
 ): Promise<ConnectionResult> {
   const missing = missingFieldFor(settings, secretAccessKey);
   if (missing !== "") {
@@ -188,9 +227,9 @@ export async function testConnection(
   });
   const url = `${endpointFor(settings)}/${settings.bucket}`;
 
-  let response: Response;
+  let response: HttpResponse;
   try {
-    response = await client.fetch(url, { method: "HEAD" });
+    response = await send(client, transport, url, { method: "HEAD" });
   } catch (err) {
     return { ok: false, status: "network", message: messageFor(err) };
   }
@@ -203,7 +242,7 @@ export async function testConnection(
     };
   }
 
-  return probeConditionalWrites(createS3Client(settings, secretAccessKey));
+  return probeConditionalWrites(createS3Client(settings, secretAccessKey, transport));
 }
 
 // conditionHeaders converts a PutCondition into the HTTP precondition headers an S3 compatible
@@ -259,15 +298,16 @@ function missingFieldFor(settings: GeodeSettings, secretAccessKey: string): stri
 // actually backed up, so the body is inspected and a failure surfaced rather than swallowed.
 async function s3CopyObject(
   client: AwsClient,
+  transport: Transport,
   baseUrl: string,
   bucket: string,
   sourceKey: string,
   destKey: string,
 ): Promise<CopyResult> {
   const source = `/${bucket}/${encodeKey(sourceKey)}`;
-  let response: Response;
+  let response: HttpResponse;
   try {
-    response = await client.fetch(`${baseUrl}/${encodeKey(destKey)}`, {
+    response = await send(client, transport, `${baseUrl}/${encodeKey(destKey)}`, {
       method: "PUT",
       headers: { "x-amz-copy-source": source },
     });
@@ -282,7 +322,7 @@ async function s3CopyObject(
       message: `Storage rejected the copy (${response.status})`,
     };
   }
-  const body = await response.text();
+  const body = new TextDecoder().decode(response.body);
   if (body.includes("<Error")) {
     return { ok: false, status: "server", message: "Storage rejected the copy (200 error body)" };
   }
@@ -292,12 +332,13 @@ async function s3CopyObject(
 // s3DeleteObject removes key from the bucket.
 async function s3DeleteObject(
   client: AwsClient,
+  transport: Transport,
   baseUrl: string,
   key: string,
 ): Promise<DeleteResult> {
-  let response: Response;
+  let response: HttpResponse;
   try {
-    response = await client.fetch(`${baseUrl}/${encodeKey(key)}`, {
+    response = await send(client, transport, `${baseUrl}/${encodeKey(key)}`, {
       method: "DELETE",
     });
   } catch (err) {
@@ -315,10 +356,15 @@ async function s3DeleteObject(
 }
 
 // s3GetObject reads the bytes stored at key.
-async function s3GetObject(client: AwsClient, baseUrl: string, key: string): Promise<GetResult> {
-  let response: Response;
+async function s3GetObject(
+  client: AwsClient,
+  transport: Transport,
+  baseUrl: string,
+  key: string,
+): Promise<GetResult> {
+  let response: HttpResponse;
   try {
-    response = await client.fetch(`${baseUrl}/${encodeKey(key)}`, {
+    response = await send(client, transport, `${baseUrl}/${encodeKey(key)}`, {
       method: "GET",
     });
   } catch (err) {
@@ -340,13 +386,13 @@ async function s3GetObject(client: AwsClient, baseUrl: string, key: string): Pro
       etag: null,
     };
   }
-  const buffer = await response.arrayBuffer();
+
   return {
     ok: true,
     status: "ok",
     message: "",
-    body: new Uint8Array(buffer),
-    etag: response.headers.get("etag"),
+    body: response.body,
+    etag: response.header("etag"),
   };
 }
 
@@ -355,6 +401,7 @@ async function s3GetObject(client: AwsClient, baseUrl: string, key: string): Pro
 // and returns every key. Stopping early would make unlisted keys look like remote deletions.
 async function s3ListObjects(
   client: AwsClient,
+  transport: Transport,
   baseUrl: string,
   prefix: string | undefined,
 ): Promise<ListResult> {
@@ -370,9 +417,9 @@ async function s3ListObjects(
       url += `&continuation-token=${encodeComponent(continuationToken)}`;
     }
 
-    let response: Response;
+    let response: HttpResponse;
     try {
-      response = await client.fetch(url, { method: "GET" });
+      response = await send(client, transport, url, { method: "GET" });
     } catch (err) {
       return {
         ok: false,
@@ -391,7 +438,7 @@ async function s3ListObjects(
       };
     }
 
-    const page = parseListObjectsXml(await response.text());
+    const page = parseListObjectsXml(new TextDecoder().decode(response.body));
     objects.push(...page.objects);
     continuationToken = page.nextContinuationToken;
   } while (continuationToken !== undefined);
@@ -403,16 +450,17 @@ async function s3ListObjects(
 // only lands if its precondition still holds; a 412 from the server surfaces as "conflict".
 async function s3PutObject(
   client: AwsClient,
+  transport: Transport,
   baseUrl: string,
   key: string,
   body: Uint8Array,
   condition: PutCondition | undefined,
 ): Promise<PutResult> {
-  let response: Response;
+  let response: HttpResponse;
   try {
     // Uint8Array<ArrayBufferLike> vs DOM's ArrayBufferView<ArrayBuffer> is a TS lib mismatch,
     // not a real runtime issue; every JS engine accepts a Uint8Array as a fetch body.
-    response = await client.fetch(`${baseUrl}/${encodeKey(key)}`, {
+    response = await send(client, transport, `${baseUrl}/${encodeKey(key)}`, {
       method: "PUT",
       body: body as BodyInit,
       headers: conditionHeaders(condition),
@@ -429,4 +477,18 @@ async function s3PutObject(
     };
   }
   return { ok: true, status: "ok", message: "" };
+}
+
+// send signs the request with the client's credentials, then hands the signed request to the
+// transport. Signing is environment agnostic (aws4fetch uses WebCrypto); only the transport, and
+// so whether the request is subject to CORS, differs between the plugin runtime and tests.
+async function send(
+  client: AwsClient,
+  transport: Transport,
+  url: string,
+  init: RequestInit,
+): Promise<HttpResponse> {
+  const signed = await client.sign(url, init);
+
+  return transport(signed);
 }
