@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  createLogBus,
   createLogger,
   createMemorySink,
   formatLogLine,
@@ -9,6 +10,12 @@ import {
   parseLogLine,
   trimLogLines,
 } from "./log.ts";
+
+// settle lets the fire-and-forget append promises, and the onEntry notifications chained off
+// them, run to completion before an assertion inspects what a listener saw.
+function settle(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
 
 test("formatLogLine and parseLogLine round trip", () => {
   const entry: LogEntry = {
@@ -222,4 +229,84 @@ test("createLogger: debug messages persist once minLevel is debug", async () => 
     messages.push(entry.message);
   }
   assert.deepEqual(messages, ["verbose detail"]);
+});
+
+test("createLogger: onEntry receives each persisted entry once the append settles", async () => {
+  const sink = createMemorySink(10);
+  const seen: string[] = [];
+  const logger = createLogger(sink, "debug", (entry) => seen.push(entry.message));
+
+  logger.info("first");
+  logger.warn("second");
+  await settle();
+
+  assert.deepEqual(seen, ["first", "second"]);
+});
+
+test("createLogger: onEntry is not called for entries below minLevel", async () => {
+  const sink = createMemorySink(10);
+  const seen: string[] = [];
+  const logger = createLogger(sink, "warn", (entry) => seen.push(entry.message));
+
+  logger.debug("noisy");
+  logger.info("still noisy");
+  logger.warn("worth keeping");
+  await settle();
+
+  assert.deepEqual(seen, ["worth keeping"]);
+});
+
+test("createLogger: a throwing onEntry does not break logging or persistence", async () => {
+  const sink = createMemorySink(10);
+  const logger = createLogger(sink, "debug", () => {
+    throw new Error("listener boom");
+  });
+
+  logger.info("still logged");
+  await settle();
+
+  const messages: string[] = [];
+  for (const entry of await sink.read()) {
+    messages.push(entry.message);
+  }
+  assert.deepEqual(messages, ["still logged"]);
+});
+
+test("createLogBus: emit delivers the entry to every subscriber", () => {
+  const bus = createLogBus();
+  const first: LogEntry[] = [];
+  const second: LogEntry[] = [];
+  bus.subscribe((entry) => first.push(entry));
+  bus.subscribe((entry) => second.push(entry));
+
+  const entry: LogEntry = { time: 1, level: "info", message: "hello" };
+  bus.emit(entry);
+
+  assert.deepEqual(first, [entry]);
+  assert.deepEqual(second, [entry]);
+});
+
+test("createLogBus: unsubscribing stops further delivery", () => {
+  const bus = createLogBus();
+  const seen: string[] = [];
+  const unsubscribe = bus.subscribe((entry) => seen.push(entry.message));
+
+  bus.emit({ time: 1, level: "info", message: "before" });
+  unsubscribe();
+  bus.emit({ time: 2, level: "info", message: "after" });
+
+  assert.deepEqual(seen, ["before"]);
+});
+
+test("createLogBus: one throwing listener does not stop the others", () => {
+  const bus = createLogBus();
+  const seen: string[] = [];
+  bus.subscribe(() => {
+    throw new Error("listener boom");
+  });
+  bus.subscribe((entry) => seen.push(entry.message));
+
+  bus.emit({ time: 1, level: "info", message: "delivered" });
+
+  assert.deepEqual(seen, ["delivered"]);
 });
