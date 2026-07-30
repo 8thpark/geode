@@ -1,0 +1,65 @@
+name: Release
+
+# Fires when a release tag is pushed. The pattern is a coarse filter (any X.Y.Z shaped tag, with an
+# optional -beta.N suffix): the authoritative check is `build:release`, which validates the tag
+# against manifest.json and fails the build on any mismatch, so the trigger stays simple and the
+# script stays the one source of truth. Tags are never prefixed with `v` (see CONTRIBUTING.md).
+on:
+  push:
+    tags:
+      - "*.*.*"
+
+# id-token + attestations are what keyless Sigstore signing needs; contents lets us create the
+# release. No long-lived signing key exists to leak.
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version-file: ".nvmrc"
+          cache: "npm"
+      - run: npm ci
+
+      # Validates tag ↔ manifest, builds, and secretlint-scans the exact bytes being shipped.
+      - name: Build release artifacts
+        run: npm run build:release -- --tag "${GITHUB_REF_NAME}"
+
+      # Keyless provenance over the three shipped files, recorded in the public transparency log.
+      # Anyone can verify with: gh attestation verify main.js --repo 8thpark/geode
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: |
+            dist/${{ github.ref_name }}/manifest.json
+            dist/${{ github.ref_name }}/main.js
+            dist/${{ github.ref_name }}/styles.css
+
+      # Draft, not published: the generated notes are a skeleton for a human to rewrite before
+      # launching. A -beta.N tag is marked pre-release so it never becomes "Latest" (BRAT still
+      # installs it). Editing notes and publishing later is metadata only, so the attestation over
+      # the asset bytes stays valid.
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          prerelease=""
+          case "$TAG" in
+            *-beta.*) prerelease="--prerelease" ;;
+          esac
+          gh release create "$TAG" \
+            --draft \
+            --title "$TAG" \
+            --generate-notes \
+            $prerelease \
+            "dist/$TAG/manifest.json" \
+            "dist/$TAG/main.js" \
+            "dist/$TAG/styles.css"
