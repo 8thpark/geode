@@ -6,6 +6,12 @@ import { endpointFor, type GeodeSettings, regionFor } from "../settings/settings
 // version field predates the marker and is this same format, version 1.
 export const SNAPSHOT_VERSION = 1;
 
+// SNAPSHOT_BYTE_BUDGET caps how many bytes takeSnapshot buffers across its concurrent reads, low
+// enough that a vault of large attachments cannot pile eight full files into memory at once and
+// breach a mobile memory ceiling mid snapshot. A single file larger than this is still read (it
+// has to be, there is no streaming read on the platform), just never alongside another.
+const SNAPSHOT_BYTE_BUDGET = 64 * 1024 * 1024;
+
 // Change describes one path whose state differs between two snapshots.
 export type Change = {
   path: string;
@@ -183,31 +189,93 @@ export function isSnapshot(value: unknown): value is Snapshot {
 // file whose size and mtime both match the previous snapshot reuses that hash instead of
 // rereading content — the same stat gated hashing rsync, git, and Syncthing all use, since mtime
 // and size alone aren't reliable enough to trust as identity, but are cheap enough to skip a
-// rehash when neither has moved. Concurrency is bounded by limit to avoid unbounded memory
-// pressure on large vaults.
+// rehash when neither has moved. Reads run at most concurrency at a time and hold at most
+// byteBudget bytes across them, so neither a vault of many files nor a vault of large attachments
+// drives unbounded memory pressure; a stat gated skip reads nothing and so costs neither budget.
 export async function takeSnapshot(
   reader: Reader,
   previous: Snapshot,
   concurrency = 8,
+  byteBudget = SNAPSHOT_BYTE_BUDGET,
 ): Promise<Snapshot> {
   const previousByPath = byPath(previous.files);
   const liveFiles = await reader.listFiles();
+  const budget = byteSemaphore(byteBudget);
 
   const files = await mapWithConcurrency(liveFiles, concurrency, async (file) => {
     const known = previousByPath.get(file.path);
     if (known !== undefined && known.size === file.size && known.mtime === file.mtime) {
       return known;
     }
-    const bytes = await reader.readFile(file.path);
-    return {
-      path: file.path,
-      size: file.size,
-      mtime: file.mtime,
-      hash: await hashBytes(bytes),
-    };
+
+    await budget.acquire(file.size);
+    try {
+      const bytes = await reader.readFile(file.path);
+
+      return {
+        path: file.path,
+        size: file.size,
+        mtime: file.mtime,
+        hash: await hashBytes(bytes),
+      };
+    } finally {
+      budget.release(file.size);
+    }
   });
 
   return { files };
+}
+
+// byteSemaphore caps the bytes held by in-flight readers to budget: acquire resolves once the file
+// fits, release hands the room back and wakes the longest waiter it now satisfies. Waiters wake in
+// arrival order, so an early large read never starves behind later small ones. A file bigger than
+// the whole budget is clamped to it and admitted alone, since blocking it forever would wedge every
+// snapshot it appears in.
+function byteSemaphore(budget: number): {
+  acquire: (bytes: number) => Promise<void>;
+  release: (bytes: number) => void;
+} {
+  let available = budget;
+  const waiters: Array<{ need: number; wake: () => void }> = [];
+
+  function clamp(bytes: number): number {
+    if (bytes > budget) {
+      return budget;
+    }
+
+    return bytes;
+  }
+
+  function drain(): void {
+    while (waiters.length > 0) {
+      const next = waiters[0];
+      if (next.need > available) {
+        return;
+      }
+      waiters.shift();
+      available -= next.need;
+      next.wake();
+    }
+  }
+
+  return {
+    acquire: (bytes: number): Promise<void> => {
+      const need = clamp(bytes);
+      if (need <= available) {
+        available -= need;
+
+        return Promise.resolve();
+      }
+
+      return new Promise<void>((resolve) => {
+        waiters.push({ need, wake: resolve });
+      });
+    },
+    release: (bytes: number): void => {
+      available += clamp(bytes);
+      drain();
+    },
+  };
 }
 
 // mapWithConcurrency runs fn over each item with at most limit concurrent invocations, preserving

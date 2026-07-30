@@ -206,3 +206,57 @@ test("takeSnapshot: concurrency is bounded by the limit", async () => {
   assert.equal(snapshot.files.length, 10);
   assert.ok(peakInflight <= 2, `expected at most 2 concurrent reads, got ${peakInflight}`);
 });
+
+test("takeSnapshot: in-flight bytes are bounded by the byte budget", async () => {
+  const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+  const size = 100;
+  const files: Record<string, { content: string; mtime: number }> = {};
+  for (let i = 0; i < 10; i++) {
+    files[`${i}.md`] = { content: "x".repeat(size), mtime: 1 };
+  }
+
+  let inflightBytes = 0;
+  let peakBytes = 0;
+  const reader: Reader = {
+    fileExists: async (path) => {
+      return files[path] !== undefined;
+    },
+    listFiles: async () => {
+      const list: FileInfo[] = [];
+      for (const [path, file] of Object.entries(files)) {
+        list.push({ path, size: file.content.length, mtime: file.mtime });
+      }
+      return list;
+    },
+    readFile: async (path) => {
+      const file = files[path];
+      if (file === undefined) {
+        throw new Error(`no such file: ${path}`);
+      }
+      inflightBytes += file.content.length;
+      if (inflightBytes > peakBytes) {
+        peakBytes = inflightBytes;
+      }
+      await delay(10);
+      inflightBytes -= file.content.length;
+
+      return new TextEncoder().encode(file.content);
+    },
+  };
+
+  // A high file-count cap so the byte budget, not the worker count, is what binds: a 250 byte
+  // budget admits two 100 byte reads at once and holds the rest until one releases.
+  const snapshot = await takeSnapshot(reader, empty, 10, 250);
+
+  assert.equal(snapshot.files.length, 10);
+  assert.ok(peakBytes <= 250, `expected at most 250 in-flight bytes, got ${peakBytes}`);
+});
+
+test("takeSnapshot: a file larger than the whole byte budget is still read", async () => {
+  const { reader } = fakeReader({ "big.bin": { content: "x".repeat(1000), mtime: 1 } });
+
+  const snapshot = await takeSnapshot(reader, empty, 8, 100);
+
+  assert.equal(snapshot.files.length, 1);
+  assert.equal(snapshot.files[0].path, "big.bin");
+});
