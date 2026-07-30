@@ -233,6 +233,82 @@ test("syncOnce: an interrupted first sync's own uploads never block the retry", 
   assert.equal(objects.has(MANIFEST_KEY), true);
 });
 
+test("syncOnce: a missing manifest over divergent bytes conflicts instead of wedging the sync", async () => {
+  // The manifest is gone (a lifecycle rule, a second vault on the same bucket) but the object at
+  // a.md survived, holding bytes this vault has never seen. Before the fix the empty remote view
+  // made that path an ifAbsent push, the surviving object rejected it with a 412, and the pass read
+  // that as another device syncing and told the user to sync again: nothing about either side
+  // changed, so every retry hit the identical 412, a permanent wedge whose message named the one
+  // action that could not work. Planning against what the bucket really holds makes it a conflict.
+  const { storage, objects } = fakeStorage({ "a.md": "theirs" });
+  const reader = fakeReader({ "a.md": "ours" });
+  const { writer, files } = fakeLocalWriter();
+  files.set("a.md", "ours");
+
+  const outcome = await syncOnce(empty, reader, writer, storage, 1);
+
+  assert.equal(outcome.ok, true);
+  // Neither version was lost: the surviving object keeps the path, the local edit lives on under
+  // the conflict copy, both on disk and in the bucket, and a manifest now describes all of it.
+  const copy = conflictCopyPath("a.md", 1);
+  assert.equal(files.get("a.md"), "theirs");
+  assert.equal(files.get(copy), "ours");
+  assert.equal(objects.get("a.md"), "theirs");
+  assert.equal(objects.get(copy), "ours");
+  assert.equal(objects.has(MANIFEST_KEY), true);
+});
+
+test("syncOnce: an unreadable survivor on a first sync is reported, never guessed at as absent", async () => {
+  const { storage, objects } = fakeStorage({ "a.md": "theirs" });
+  const inner = storage.getObject;
+  storage.getObject = async (key) => {
+    if (key !== "a.md") {
+      return inner(key);
+    }
+    return {
+      ok: false,
+      status: "server",
+      message: "Storage rejected the read (500)",
+      body: null,
+      etag: null,
+    };
+  };
+  const reader = fakeReader({ "a.md": "ours" });
+  const { writer } = fakeLocalWriter();
+
+  const outcome = await syncOnce(empty, reader, writer, storage, 1);
+
+  assert.deepEqual(outcome, {
+    ok: false,
+    message: "Storage rejected the read (500)",
+    failures: [{ path: "a.md", message: "Storage rejected the read (500)" }],
+    snapshot: null,
+  });
+  // The survivor was left alone and no manifest was written over a view we could not read.
+  assert.equal(objects.get("a.md"), "theirs");
+  assert.equal(objects.has(MANIFEST_KEY), false);
+});
+
+test("syncOnce: a survivor deleted between the listing and the read is treated as gone", async () => {
+  // Another device removed the object in the window between the two calls. That is the absence the
+  // missing manifest already implied, so the pass proceeds and pushes the local file.
+  const { storage, objects } = fakeStorage({ "a.md": "theirs" });
+  const inner = storage.getObject;
+  storage.getObject = async (key) => {
+    if (key === "a.md") {
+      objects.delete(key);
+    }
+    return inner(key);
+  };
+  const reader = fakeReader({ "a.md": "ours" });
+  const { writer } = fakeLocalWriter();
+
+  const outcome = await syncOnce(empty, reader, writer, storage, 1);
+
+  assert.equal(outcome.ok, true);
+  assert.equal(objects.get("a.md"), "ours");
+});
+
 test("syncOnce: a failed bucket listing on a first sync is reported, never guessed at as empty", async () => {
   const { storage } = fakeStorage();
   storage.listObjects = async () => ({

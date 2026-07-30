@@ -398,6 +398,45 @@ test("sync: a deleted manifest with surviving objects refuses a first sync inste
   }
 });
 
+test("sync: a deleted manifest over a divergent object conflicts instead of wedging the sync", async () => {
+  // A and B share a synced note, then the manifest alone is deleted (a lifecycle rule, manual
+  // cleanup) and B edits the note before its next sync. B sees objects and no manifest, so the
+  // path it is about to push already exists remotely holding different bytes. Before the fix that
+  // push's ifAbsent precondition failed, the 412 read as another device syncing, and B was told to
+  // sync again forever: nothing changed between attempts, so every retry failed identically.
+  await resetRemote();
+  const a = newDevice();
+  const b = newDevice();
+  const now = Date.parse("2026-07-14T11:00:00.000Z");
+  try {
+    await writeLocal(a, "ten/note.md", "from A");
+    assert.equal((await sync(a)).ok, true);
+    assert.equal((await sync(b)).ok, true);
+
+    await storage.deleteObject(MANIFEST_KEY);
+    await writeLocal(b, "ten/note.md", "B's own edit");
+
+    const outcome = await sync(b, now);
+    assert.equal(outcome.ok, true);
+
+    // The surviving object keeps the path on both sides, B's edit survives as a conflict copy, and
+    // the manifest B wrote describes both, so A converges on the same view rather than orphaning
+    // anything.
+    const copyPath = conflictCopyPath("ten/note.md", now);
+    assert.equal(await readLocal(b, "ten/note.md"), "from A");
+    assert.equal(await readLocal(b, copyPath), "B's own edit");
+    assert.equal((await sync(a)).ok, true);
+    assert.equal(await readLocal(a, "ten/note.md"), "from A");
+    assert.equal(await readLocal(a, copyPath), "B's own edit");
+
+    // And the pass that used to wedge is now genuinely idle on both devices.
+    assert.equal((await sync(b)).ok, true);
+    assert.equal((await sync(a)).ok, true);
+  } finally {
+    cleanup(a, b);
+  }
+});
+
 test("sync: an edit on one device and a delete on another preserves the edit as a copy, no phantom pull failure", async () => {
   await resetRemote();
   const a = newDevice();

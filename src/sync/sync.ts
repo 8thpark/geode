@@ -4,6 +4,7 @@ import {
   decodeSnapshot,
   encodeSnapshot,
   type FileState,
+  hashBytes,
   type Reader,
   type Snapshot,
   takeSnapshot,
@@ -187,9 +188,17 @@ export async function syncOnce(
   // cleanup, or partial restore can remove the manifest while file objects survive (#109). The
   // pass below would build a manifest purely from local files, leaving every surviving object
   // invisible: never pulled, never listed, orphaned forever. Refuse loudly instead when the
-  // bucket holds objects no local file accounts for. Objects that do match a local path are safe
-  // to proceed over — an interrupted first sync leaves exactly those, and each push's own
-  // precondition adopts identical bytes and refuses divergent ones.
+  // bucket holds objects no local file accounts for.
+  //
+  // Objects that do match a local path are safe to proceed over, but only once the plan knows
+  // what they hold. The empty snapshot a missing manifest implies claims the bucket has nothing
+  // at that key, so the path plans as an ifAbsent push the surviving object can only reject; the
+  // 412 reads as concurrency and aborts the pass telling the user to sync again, and since
+  // nothing about either side changes, every retry reproduces it exactly: a permanent wedge whose
+  // error message names the one action that cannot work. Reading those objects instead makes the
+  // plan honest, and the ordinary machinery does the rest: identical bytes need no action at all,
+  // divergent bytes are a conflict, and neither side's version is lost.
+  let remoteView = remote.snapshot;
   if (remote.firstSync) {
     const listed = await storage.listObjects();
     if (!listed.ok) {
@@ -208,9 +217,19 @@ export async function syncOnce(
         snapshot: null,
       };
     }
+    const survivors = await bucketView(listed.objects, local, storage);
+    if (!survivors.ok) {
+      return {
+        ok: false,
+        message: survivors.failure.message,
+        failures: [survivors.failure],
+        snapshot: null,
+      };
+    }
+    remoteView = survivors.snapshot;
   }
 
-  const actions = planSync(ancestor, local, remote.snapshot);
+  const actions = planSync(ancestor, local, remoteView);
   const executed = await executeSyncPlan(
     actions,
     local,
@@ -218,7 +237,7 @@ export async function syncOnce(
     localWriter,
     storage,
     now,
-    remote.snapshot,
+    remoteView,
   );
 
   // A failed file precondition means the plan's remote snapshot is no longer current. Do not
@@ -242,7 +261,7 @@ export async function syncOnce(
   // keeps the entry the bucket really holds; the manifest is uploaded even when some actions
   // failed, so one bad file never leaves the rest of the pass's pushes invisible to every other
   // device (#87).
-  const manifest = manifestAfterSync(local, remote.snapshot, executed.completed, now);
+  const manifest = manifestAfterSync(local, remoteView, executed.completed, now);
   const final = adoptLiveStats(manifest, await takeSnapshot(reader, local));
   const manifestBody = new TextEncoder().encode(encodeSnapshot(final));
 
@@ -286,4 +305,48 @@ export async function syncOnce(
   }
 
   return { ok: true, snapshot: final, changeCount: actions.length };
+}
+
+// bucketView returns the remote snapshot a first sync should plan against: what the bucket really
+// holds, read from the objects that outlived the manifest, rather than the empty snapshot a missing
+// manifest implies. Only keys with a local file at the same path are read; anything else is either
+// geode's own bookkeeping or an orphan the caller has already refused over. The objects are fetched
+// and hashed because a plan needs content identity, not just a key: an ETag is a provider specific
+// opaque string and a listed size cannot tell two same length edits apart. That costs one GET per
+// surviving object, on a path only ever taken when a bucket has lost its manifest, and no more than
+// the failed conditional PUT plus its verifying GET that the same objects cost before. mtime is 0
+// because a remote object has no local mtime to speak of: any entry that survives into the manifest
+// therefore misses takeSnapshot's stat check next pass and is rehashed, the safe direction to err
+// in, and adoptLiveStats replaces it with the live entry wherever the content already agrees.
+async function bucketView(
+  objects: ObjectMeta[],
+  local: Snapshot,
+  storage: StorageClient,
+): Promise<{ ok: true; snapshot: Snapshot } | { ok: false; failure: SyncFailure }> {
+  const localByPath = byPath(local.files);
+  const files: FileState[] = [];
+
+  for (const object of objects) {
+    if (object.key.startsWith(RESERVED_PREFIX) || !localByPath.has(object.key)) {
+      continue;
+    }
+    const fetched = await storage.getObject(object.key);
+    if (!fetched.ok || fetched.body === null) {
+      // Listed a moment ago and gone now means another device deleted it in between, which is
+      // exactly the absence the missing manifest already implied; anything else is a real failure
+      // and must not be read as "the bucket holds nothing here", the guess that orphans files.
+      if (fetched.status === "not_found") {
+        continue;
+      }
+      return { ok: false, failure: { path: object.key, message: fetched.message } };
+    }
+    files.push({
+      path: object.key,
+      size: fetched.body.length,
+      mtime: 0,
+      hash: await hashBytes(fetched.body),
+    });
+  }
+
+  return { ok: true, snapshot: { files } };
 }
