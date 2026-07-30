@@ -21,11 +21,11 @@ gh attestation verify main.js --repo 8thpark/geode
 Run it against each downloaded asset (`main.js`, `manifest.json`, `styles.css`). A pass proves the
 file is byte-identical to what this repository's automation signed, and unmodified since.
 
-Each release also ships the signed provenance as a `geode-<version>.sigstore.json` asset, so you can
-verify offline without hitting GitHub's API:
+Each release also ships a per-asset signed provenance bundle (`main.js.sigstore.json` and so on), so
+you can verify against the shipped bundle rather than fetching the attestation from GitHub's API:
 
 ```bash
-gh attestation verify main.js --bundle geode-0.1.0.sigstore.json --repo 8thpark/geode
+gh attestation verify main.js --bundle main.js.sigstore.json --repo 8thpark/geode
 ```
 
 For releases from `0.1.0` onward the attestation is stronger: the artifacts are built from source in

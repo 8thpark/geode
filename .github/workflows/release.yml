@@ -35,26 +35,41 @@ jobs:
       - name: Build release artifacts
         run: npm run build:release -- --tag "${GITHUB_REF_NAME}"
 
-      # Keyless provenance over the three shipped files, recorded in the public transparency log.
-      # Anyone can verify with: gh attestation verify main.js --repo 8thpark/geode
-      - name: Attest build provenance
-        id: attest
+      # Keyless provenance, one attestation per shipped file, recorded in the public transparency
+      # log. Anyone can verify online with: gh attestation verify main.js --repo 8thpark/geode
+      - name: Attest manifest.json
+        id: attest-manifest
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
-          subject-path: |
-            dist/${{ github.ref_name }}/manifest.json
-            dist/${{ github.ref_name }}/main.js
-            dist/${{ github.ref_name }}/styles.css
+          subject-path: dist/${{ github.ref_name }}/manifest.json
 
-      # Ship the Sigstore bundle (the signed provenance for all three artifacts) as a release asset,
-      # not just in GitHub's attestation store. It lets anyone verify the release offline, and OSSF
-      # Scorecard's Signed-Releases check reads release assets rather than the attestation store, so
-      # the `.sigstore.json` asset is what earns that check.
-      - name: Stage provenance bundle
+      - name: Attest main.js
+        id: attest-mainjs
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: dist/${{ github.ref_name }}/main.js
+
+      - name: Attest styles.css
+        id: attest-styles
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: dist/${{ github.ref_name }}/styles.css
+
+      # Ship each file's Sigstore bundle as its own `<asset>.sigstore.json` release asset, not only
+      # in GitHub's attestation store. Each is a single valid bundle, so it verifies directly with
+      # `gh attestation verify <asset> --bundle <asset>.sigstore.json`, and OSSF Scorecard's
+      # Signed-Releases check (which reads release assets, not the store) credits the suffix. Paths
+      # come in via env so nothing gets interpolated straight into the shell.
+      - name: Stage provenance bundles
         env:
-          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
           TAG: ${{ github.ref_name }}
-        run: cp "$BUNDLE" "dist/$TAG/geode-$TAG.sigstore.json"
+          MANIFEST_BUNDLE: ${{ steps.attest-manifest.outputs.bundle-path }}
+          MAINJS_BUNDLE: ${{ steps.attest-mainjs.outputs.bundle-path }}
+          STYLES_BUNDLE: ${{ steps.attest-styles.outputs.bundle-path }}
+        run: |
+          cp "$MANIFEST_BUNDLE" "dist/$TAG/manifest.json.sigstore.json"
+          cp "$MAINJS_BUNDLE" "dist/$TAG/main.js.sigstore.json"
+          cp "$STYLES_BUNDLE" "dist/$TAG/styles.css.sigstore.json"
 
       # Draft, not published: the generated notes are a skeleton for a human to rewrite before
       # launching. A -beta.N tag is marked pre-release so it never becomes "Latest" (BRAT still
@@ -77,4 +92,6 @@ jobs:
             "dist/$TAG/manifest.json" \
             "dist/$TAG/main.js" \
             "dist/$TAG/styles.css" \
-            "dist/$TAG/geode-$TAG.sigstore.json"
+            "dist/$TAG/manifest.json.sigstore.json" \
+            "dist/$TAG/main.js.sigstore.json" \
+            "dist/$TAG/styles.css.sigstore.json"
