@@ -9,17 +9,20 @@ on:
     tags:
       - "*.*.*"
 
-# id-token + attestations are what keyless Sigstore signing needs; contents lets us create the
-# release. No long-lived signing key exists to leak.
+# Least privilege at the top: read only. The single job below elevates to exactly what it needs.
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
+  contents: read
 
 jobs:
   release:
     name: Release
     runs-on: ubuntu-latest
+    # id-token + attestations are what keyless Sigstore signing needs; contents lets us create the
+    # release. Scoped to the job, not the workflow. No long-lived signing key exists to leak.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
@@ -32,15 +35,41 @@ jobs:
       - name: Build release artifacts
         run: npm run build:release -- --tag "${GITHUB_REF_NAME}"
 
-      # Keyless provenance over the three shipped files, recorded in the public transparency log.
-      # Anyone can verify with: gh attestation verify main.js --repo 8thpark/geode
-      - name: Attest build provenance
+      # Keyless provenance, one attestation per shipped file, recorded in the public transparency
+      # log. Anyone can verify online with: gh attestation verify main.js --repo 8thpark/geode
+      - name: Attest manifest.json
+        id: attest-manifest
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
-          subject-path: |
-            dist/${{ github.ref_name }}/manifest.json
-            dist/${{ github.ref_name }}/main.js
-            dist/${{ github.ref_name }}/styles.css
+          subject-path: dist/${{ github.ref_name }}/manifest.json
+
+      - name: Attest main.js
+        id: attest-mainjs
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: dist/${{ github.ref_name }}/main.js
+
+      - name: Attest styles.css
+        id: attest-styles
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: dist/${{ github.ref_name }}/styles.css
+
+      # Ship each file's Sigstore bundle as its own `<asset>.sigstore.json` release asset, not only
+      # in GitHub's attestation store. Each is a single valid bundle, so it verifies directly with
+      # `gh attestation verify <asset> --bundle <asset>.sigstore.json`, and OSSF Scorecard's
+      # Signed-Releases check (which reads release assets, not the store) credits the suffix. Paths
+      # come in via env so nothing gets interpolated straight into the shell.
+      - name: Stage provenance bundles
+        env:
+          TAG: ${{ github.ref_name }}
+          MANIFEST_BUNDLE: ${{ steps.attest-manifest.outputs.bundle-path }}
+          MAINJS_BUNDLE: ${{ steps.attest-mainjs.outputs.bundle-path }}
+          STYLES_BUNDLE: ${{ steps.attest-styles.outputs.bundle-path }}
+        run: |
+          cp "$MANIFEST_BUNDLE" "dist/$TAG/manifest.json.sigstore.json"
+          cp "$MAINJS_BUNDLE" "dist/$TAG/main.js.sigstore.json"
+          cp "$STYLES_BUNDLE" "dist/$TAG/styles.css.sigstore.json"
 
       # Draft, not published: the generated notes are a skeleton for a human to rewrite before
       # launching. A -beta.N tag is marked pre-release so it never becomes "Latest" (BRAT still
@@ -62,4 +91,7 @@ jobs:
             $prerelease \
             "dist/$TAG/manifest.json" \
             "dist/$TAG/main.js" \
-            "dist/$TAG/styles.css"
+            "dist/$TAG/styles.css" \
+            "dist/$TAG/manifest.json.sigstore.json" \
+            "dist/$TAG/main.js.sigstore.json" \
+            "dist/$TAG/styles.css.sigstore.json"
