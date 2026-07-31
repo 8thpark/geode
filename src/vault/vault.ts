@@ -62,6 +62,13 @@ export type Store = {
   write: (snapshot: Snapshot) => Promise<void>;
 };
 
+// Hold is a live byteSemaphore reservation: resize reconciles it to the bytes actually read, since
+// a file can grow between listing and read, and release returns them to the budget.
+type Hold = {
+  release: () => void;
+  resize: (bytes: number) => void;
+};
+
 // byPath builds a lookup from path to file state, for matching a live file against what the
 // previous snapshot last saw at that same path. Exported for sync.ts, which needs the same
 // lookup to compare a local snapshot against a remote one.
@@ -190,8 +197,9 @@ export function isSnapshot(value: unknown): value is Snapshot {
 // rereading content — the same stat gated hashing rsync, git, and Syncthing all use, since mtime
 // and size alone aren't reliable enough to trust as identity, but are cheap enough to skip a
 // rehash when neither has moved. Reads run at most concurrency at a time and hold at most
-// byteBudget bytes across them, so neither a vault of many files nor a vault of large attachments
-// drives unbounded memory pressure; a stat gated skip reads nothing and so costs neither budget.
+// byteBudget bytes of read content across them — reconciled to each file's real size, since a file
+// can grow between listing and read — so neither a vault of many files nor a vault of large
+// attachments drives unbounded memory pressure; a stat gated skip reads nothing and costs neither.
 export async function takeSnapshot(
   reader: Reader,
   previous: Snapshot,
@@ -208,9 +216,12 @@ export async function takeSnapshot(
       return known;
     }
 
-    await budget.acquire(file.size);
+    // Reserve the listed size to gain admission, then charge the true size once the bytes are in
+    // hand, so a file that grew since listing counts against the budget for what it actually holds.
+    const hold = await budget.acquire(file.size);
     try {
       const bytes = await reader.readFile(file.path);
+      hold.resize(bytes.length);
 
       return {
         path: file.path,
@@ -219,37 +230,37 @@ export async function takeSnapshot(
         hash: await hashBytes(bytes),
       };
     } finally {
-      budget.release(file.size);
+      hold.release();
     }
   });
 
   return { files };
 }
 
-// byteSemaphore caps the bytes held by in-flight readers to budget: acquire resolves once the file
-// fits, release hands the room back and wakes the longest waiter it now satisfies. Waiters wake in
-// arrival order, so an early large read never starves behind later small ones. A file bigger than
-// the whole budget is clamped to it and admitted alone, since blocking it forever would wedge every
-// snapshot it appears in.
-function byteSemaphore(budget: number): {
-  acquire: (bytes: number) => Promise<void>;
-  release: (bytes: number) => void;
-} {
+// byteSemaphore caps the bytes held by in-flight readers to budget. acquire reserves the caller's
+// estimate and resolves once it fits, returning a hold whose resize reconciles that estimate to the
+// bytes actually read and whose release hands the room back. Waiters are admitted strictly in
+// arrival order — a later small read never jumps a queued large one — and a file larger than the
+// whole budget is admitted only when nothing else is held, so it runs alone rather than blocking
+// forever. The count cap in takeSnapshot remains the hard ceiling: this only tightens the common
+// case where files are far smaller than the budget.
+function byteSemaphore(budget: number): { acquire: (bytes: number) => Promise<Hold> } {
   let available = budget;
   const waiters: Array<{ need: number; wake: () => void }> = [];
 
-  function clamp(bytes: number): number {
-    if (bytes > budget) {
-      return budget;
+  function admits(need: number): boolean {
+    if (need <= available) {
+      return true;
     }
 
-    return bytes;
+    // Nothing else is resident, so an oversized read is let through alone rather than wedged.
+    return available === budget;
   }
 
   function drain(): void {
     while (waiters.length > 0) {
       const next = waiters[0];
-      if (next.need > available) {
+      if (!admits(next.need)) {
         return;
       }
       waiters.shift();
@@ -258,22 +269,37 @@ function byteSemaphore(budget: number): {
     }
   }
 
-  return {
-    acquire: (bytes: number): Promise<void> => {
-      const need = clamp(bytes);
-      if (need <= available) {
-        available -= need;
+  function hold(reserved: number): Hold {
+    let held = reserved;
 
-        return Promise.resolve();
+    return {
+      release: (): void => {
+        available += held;
+        held = 0;
+        drain();
+      },
+      resize: (bytes: number): void => {
+        const freed = held - bytes;
+        available += freed;
+        held = bytes;
+        if (freed > 0) {
+          drain();
+        }
+      },
+    };
+  }
+
+  return {
+    acquire: (bytes: number): Promise<Hold> => {
+      if (waiters.length === 0 && admits(bytes)) {
+        available -= bytes;
+
+        return Promise.resolve(hold(bytes));
       }
 
-      return new Promise<void>((resolve) => {
-        waiters.push({ need, wake: resolve });
+      return new Promise<Hold>((resolve) => {
+        waiters.push({ need: bytes, wake: () => resolve(hold(bytes)) });
       });
-    },
-    release: (bytes: number): void => {
-      available += clamp(bytes);
-      drain();
     },
   };
 }

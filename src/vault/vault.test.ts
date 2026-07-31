@@ -260,3 +260,87 @@ test("takeSnapshot: a file larger than the whole byte budget is still read", asy
   assert.equal(snapshot.files.length, 1);
   assert.equal(snapshot.files[0].path, "big.bin");
 });
+
+test("takeSnapshot: a small read does not jump a queued large read", async () => {
+  const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+  let releaseHog: () => void = () => {};
+  const hogGate = new Promise<void>((resolve) => {
+    releaseHog = resolve;
+  });
+  const sizes: Record<string, number> = { hog: 60, big: 60, small: 10 };
+  const started: string[] = [];
+  const reader: Reader = {
+    fileExists: async () => true,
+    // hog fills most of the budget and is held open; big cannot fit and queues; small then arrives
+    // and, with fair admission, must wait behind big rather than slipping into the gap hog left.
+    listFiles: async () => [
+      { path: "hog", size: 60, mtime: 1 },
+      { path: "big", size: 60, mtime: 1 },
+      { path: "small", size: 10, mtime: 1 },
+    ],
+    readFile: async (path) => {
+      started.push(path);
+      if (path === "hog") {
+        await hogGate;
+      }
+
+      return new Uint8Array(sizes[path]);
+    },
+  };
+
+  const snapshot = takeSnapshot(reader, empty, 3, 100);
+  await delay(20);
+  releaseHog();
+  const result = await snapshot;
+
+  assert.equal(result.files.length, 3);
+  assert.ok(
+    started.indexOf("big") < started.indexOf("small"),
+    `expected big to start before small, got ${started.join(",")}`,
+  );
+});
+
+test("takeSnapshot: reads that grow past their listed size complete without wedging", async () => {
+  const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+  const files: Record<string, { listed: number; actual: number; mtime: number }> = {};
+  for (let i = 0; i < 6; i++) {
+    files[`${i}.bin`] = { listed: 10, actual: 400, mtime: 1 };
+  }
+
+  let inflightBytes = 0;
+  let peakBytes = 0;
+  const reader: Reader = {
+    fileExists: async (path) => {
+      return files[path] !== undefined;
+    },
+    // Every file lists as 10 bytes but reads as 400. Admitting on the listed size then charging the
+    // real size drives the budget negative; the pass must recover from that, not deadlock on it.
+    listFiles: async () => {
+      const list: FileInfo[] = [];
+      for (const [path, file] of Object.entries(files)) {
+        list.push({ path, size: file.listed, mtime: file.mtime });
+      }
+      return list;
+    },
+    readFile: async (path) => {
+      const file = files[path];
+      if (file === undefined) {
+        throw new Error(`no such file: ${path}`);
+      }
+      inflightBytes += file.actual;
+      if (inflightBytes > peakBytes) {
+        peakBytes = inflightBytes;
+      }
+      await delay(10);
+      inflightBytes -= file.actual;
+
+      return new Uint8Array(file.actual);
+    },
+  };
+
+  const snapshot = await takeSnapshot(reader, empty, 2, 500);
+
+  // The count cap of 2 still bounds residency to two reads even when every listed size was wrong.
+  assert.equal(snapshot.files.length, 6);
+  assert.ok(peakBytes <= 800, `expected at most two 400 byte reads resident, got ${peakBytes}`);
+});
