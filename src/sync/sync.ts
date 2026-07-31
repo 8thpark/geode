@@ -260,8 +260,11 @@ export async function syncOnce(
   // a local change on the next pass. Only completed actions feed in, so a failed action's path
   // keeps the entry the bucket really holds; the manifest is uploaded even when some actions
   // failed, so one bad file never leaves the rest of the pass's pushes invisible to every other
-  // device (#87).
-  const manifest = manifestAfterSync(local, remoteView, executed.completed, now);
+  // device (#87). Pushed files are recorded at the hash executed.pushedFiles carries, hashed from
+  // the bytes executeSyncPlan actually uploaded rather than this local snapshot, so an edit landing
+  // between the snapshot and the push's own read is never left naming stale content another
+  // device's verifyFetch would then reject until this device happens to sync again.
+  const manifest = manifestAfterSync(remoteView, executed.completed, executed.pushedFiles, now);
   const final = adoptLiveStats(manifest, await takeSnapshot(reader, local));
   const manifestBody = new TextEncoder().encode(encodeSnapshot(final));
 

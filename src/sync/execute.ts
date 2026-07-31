@@ -12,15 +12,16 @@ const MANIFEST_MISSING_HASH_MESSAGE = "manifest missing expected hash for this p
 const REMOTE_ETAG_MESSAGE = "remote object has no etag";
 
 // ExecuteResult reports what executeSyncPlan carried out: completed holds every action fully
-// applied, failed the actions that weren't, failures the per file detail of why, and concurrent
-// whether a file precondition proved the remote snapshot stale. failed is carried separately
-// from failures because a conflict's failure can name its copy path rather than the action's own
-// path.
+// applied, failed the actions that weren't, failures the per file detail of why, concurrent
+// whether a file precondition proved the remote snapshot stale, and pushedFiles the FileState of
+// every path a completed action actually wrote to the bucket, hashed from those exact bytes so
+// the manifest built from it never names content the bucket doesn't hold.
 export type ExecuteResult = {
   completed: SyncAction[];
   concurrent: boolean;
   failed: SyncAction[];
   failures: SyncFailure[];
+  pushedFiles: FileState[];
 };
 
 // LocalWriter applies changes decided by a sync to the local vault. The real implementation
@@ -40,6 +41,7 @@ export type SyncFailure = {
 type ActionResult = {
   concurrent: boolean;
   failures: SyncFailure[];
+  pushed: FileState[];
 };
 
 type PutConditionResult =
@@ -67,6 +69,7 @@ export async function executeSyncPlan(
   let concurrent = false;
   const failed: SyncAction[] = [];
   const failures: SyncFailure[] = [];
+  const pushedFiles: FileState[] = [];
   const localByPath = byPath(local.files);
   const remoteByPath = byPath(remote.files);
 
@@ -82,6 +85,9 @@ export async function executeSyncPlan(
     );
     if (actionResult.failures.length === 0) {
       completed.push(action);
+      for (const file of actionResult.pushed) {
+        pushedFiles.push(file);
+      }
       continue;
     }
     failed.push(action);
@@ -96,7 +102,7 @@ export async function executeSyncPlan(
     }
   }
 
-  return { completed, concurrent, failed, failures };
+  return { completed, concurrent, failed, failures, pushedFiles };
 }
 
 // applyLocalWrite runs one localWriter mutation, converting a thrown I/O error into a SyncFailure
@@ -169,10 +175,11 @@ async function executeAction(
     }
     const checked = await putCondition(action.path, bytes, remoteByPath.get(action.path), storage);
     if (!checked.ok) {
-      return { concurrent: checked.concurrent, failures: [checked.failure] };
+      return { concurrent: checked.concurrent, failures: [checked.failure], pushed: [] };
     }
+    const pushed = await pushedFile(action.path, bytes, now);
     if (checked.kind === "done") {
-      return successfulAction();
+      return successfulAction([pushed]);
     }
     const result = await storage.putObject(action.path, bytes, checked.condition);
     if (!result.ok) {
@@ -181,12 +188,12 @@ async function executeAction(
       }
       const matches = await remoteMatches(action.path, bytes, storage);
       if (matches) {
-        return successfulAction();
+        return successfulAction([pushed]);
       }
       return failedAction(action.path, result.message, true);
     }
 
-    return successfulAction();
+    return successfulAction([pushed]);
   }
 
   if (action.kind === "pushDelete") {
@@ -219,7 +226,7 @@ async function executeAction(
   if (action.kind === "pull") {
     const drift = await checkLocalDrift(reader, action.path, localByPath.get(action.path));
     if (drift !== null) {
-      return { concurrent: false, failures: [drift] };
+      return { concurrent: false, failures: [drift], pushed: [] };
     }
     const result = await storage.getObject(action.path, remoteByPath.get(action.path)?.size);
     if (!result.ok || result.body === null) {
@@ -228,13 +235,13 @@ async function executeAction(
     const body = result.body;
     const integrity = await verifyFetch(action.path, body, remoteByPath.get(action.path));
     if (integrity !== null) {
-      return { concurrent: false, failures: [integrity] };
+      return { concurrent: false, failures: [integrity], pushed: [] };
     }
     const failure = await applyLocalWrite(action.path, () =>
       localWriter.writeFile(action.path, body),
     );
     if (failure !== null) {
-      return { concurrent: false, failures: [failure] };
+      return { concurrent: false, failures: [failure], pushed: [] };
     }
 
     return successfulAction();
@@ -243,11 +250,11 @@ async function executeAction(
   if (action.kind === "pullDelete") {
     const drift = await checkLocalDrift(reader, action.path, localByPath.get(action.path));
     if (drift !== null) {
-      return { concurrent: false, failures: [drift] };
+      return { concurrent: false, failures: [drift], pushed: [] };
     }
     const failure = await applyLocalWrite(action.path, () => localWriter.deleteFile(action.path));
     if (failure !== null) {
-      return { concurrent: false, failures: [failure] };
+      return { concurrent: false, failures: [failure], pushed: [] };
     }
 
     return successfulAction();
@@ -259,7 +266,7 @@ async function executeAction(
   if (action.deletedSide === "local") {
     const drift = await checkLocalDrift(reader, action.path, localByPath.get(action.path));
     if (drift !== null) {
-      return { concurrent: false, failures: [drift] };
+      return { concurrent: false, failures: [drift], pushed: [] };
     }
     const result = await storage.getObject(action.path, remoteByPath.get(action.path)?.size);
     if (!result.ok || result.body === null) {
@@ -268,13 +275,13 @@ async function executeAction(
     const body = result.body;
     const integrity = await verifyFetch(action.path, body, remoteByPath.get(action.path));
     if (integrity !== null) {
-      return { concurrent: false, failures: [integrity] };
+      return { concurrent: false, failures: [integrity], pushed: [] };
     }
     const failure = await applyLocalWrite(action.path, () =>
       localWriter.writeFile(action.path, body),
     );
     if (failure !== null) {
-      return { concurrent: false, failures: [failure] };
+      return { concurrent: false, failures: [failure], pushed: [] };
     }
 
     return successfulAction();
@@ -298,32 +305,35 @@ async function executeAction(
     localWriter.renameFile(action.path, copyPath),
   );
   if (renameFailure !== null) {
-    return { concurrent: false, failures: [renameFailure] };
+    return { concurrent: false, failures: [renameFailure], pushed: [] };
   }
   const failures: SyncFailure[] = [];
+  const pushedFiles: FileState[] = [];
   let concurrent = false;
-  const pushed = await storage.putObject(copyPath, localBytes, { kind: "ifAbsent" });
-  if (!pushed.ok) {
-    failures.push({ path: copyPath, message: pushed.message });
-    concurrent = pushed.status === "conflict";
+  const copyResult = await storage.putObject(copyPath, localBytes, { kind: "ifAbsent" });
+  if (!copyResult.ok) {
+    failures.push({ path: copyPath, message: copyResult.message });
+    concurrent = copyResult.status === "conflict";
+  } else {
+    pushedFiles.push(await pushedFile(copyPath, localBytes, now));
   }
 
   // deletedSide "remote": there is nothing at this path remotely to pull, the rename above
   // already vacated it locally, and that is the correct final state, not a failure to report.
   if (action.deletedSide === "remote") {
-    return { concurrent, failures };
+    return { concurrent, failures, pushed: pushedFiles };
   }
 
   const result = await storage.getObject(action.path, remoteByPath.get(action.path)?.size);
   if (!result.ok || result.body === null) {
     failures.push({ path: action.path, message: result.message });
-    return { concurrent, failures };
+    return { concurrent, failures, pushed: pushedFiles };
   }
   const body = result.body;
   const integrity = await verifyFetch(action.path, body, remoteByPath.get(action.path));
   if (integrity !== null) {
     failures.push(integrity);
-    return { concurrent, failures };
+    return { concurrent, failures, pushed: pushedFiles };
   }
   const writeFailure = await applyLocalWrite(action.path, () =>
     localWriter.writeFile(action.path, body),
@@ -332,12 +342,20 @@ async function executeAction(
     failures.push(writeFailure);
   }
 
-  return { concurrent, failures };
+  return { concurrent, failures, pushed: pushedFiles };
 }
 
 // failedAction returns one failed action result with its concurrency classification.
 function failedAction(path: string, message: string, concurrent: boolean): ActionResult {
-  return { concurrent, failures: [{ path, message }] };
+  return { concurrent, failures: [{ path, message }], pushed: [] };
+}
+
+// pushedFile returns the FileState for bytes just written to path in the bucket, hashed fresh
+// from those exact bytes rather than reused from a pre-push snapshot, so a file edited in the
+// window between the snapshot and this read is never recorded in the manifest as content the
+// bucket doesn't actually hold.
+async function pushedFile(path: string, bytes: Uint8Array, mtime: number): Promise<FileState> {
+  return { path, size: bytes.length, mtime, hash: await hashBytes(bytes) };
 }
 
 // putCondition returns the precondition that keeps a file PUT tied to the remote snapshot this
@@ -439,9 +457,10 @@ async function remoteMatches(
   return (await hashBytes(fetched.body)) === (await hashBytes(bytes));
 }
 
-// successfulAction returns the zero failure result for a completed action.
-function successfulAction(): ActionResult {
-  return { concurrent: false, failures: [] };
+// successfulAction returns the zero failure result for a completed action, pushed carrying the
+// FileState of any bytes it wrote to the bucket, empty for an action that pushed nothing.
+function successfulAction(pushed: FileState[] = []): ActionResult {
+  return { concurrent: false, failures: [], pushed };
 }
 
 // localFailureMessage turns whatever a local vault operation threw into a SyncFailure message.

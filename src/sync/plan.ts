@@ -1,4 +1,10 @@
-import { byPath, type Change, diffSnapshots, type Snapshot } from "../vault/vault.ts";
+import {
+  byPath,
+  type Change,
+  diffSnapshots,
+  type FileState,
+  type Snapshot,
+} from "../vault/vault.ts";
 
 // MANIFEST_KEY is the well known remote object holding the last synced snapshot, geode's source
 // of truth for "what does the other side think exists". Reserved: never treated as a real vault
@@ -40,21 +46,23 @@ export function conflictCopyPath(path: string, now: number): string {
 }
 
 // manifestAfterSync returns the snapshot of what the bucket holds once every action in the plan
-// has succeeded: remote as it was read, minus pushed deletions, plus pushed files and conflict
-// copies recorded at the local snapshot's entry. It is computed from the plan rather than
-// re-snapshotted from disk so the manifest can never record content the bucket does not have
+// has succeeded: remote as it was read, minus pushed deletions, plus every file and conflict copy
+// pushed, each recorded at the hash executeSyncPlan hashed from the bytes it actually uploaded
+// (pushed), never a pre-push snapshot. A file edited in the window between the snapshot and the
+// push's own read would otherwise leave the manifest naming older content than the bucket really
+// holds, which every other device's verifyFetch then rejects as a hash mismatch until this device
+// happens to sync again — indefinitely, if it stays offline. It is computed from the plan rather
+// than re-snapshotted from disk so the manifest can never record content the bucket does not have
 // (#84): a file that changed while the plan ran keeps its bucket entry, and the next sync sees
-// the drift as a local change and pushes it. The one race left, a push whose bytes drifted past
-// the local snapshot before they were read, only ever understates the bucket, and the next pass
-// simply pushes again.
+// the drift as a local change and pushes it.
 export function manifestAfterSync(
-  local: Snapshot,
   remote: Snapshot,
   actions: SyncAction[],
+  pushed: FileState[],
   now: number,
 ): Snapshot {
   const files = byPath(remote.files);
-  const localByPath = byPath(local.files);
+  const pushedByPath = byPath(pushed);
 
   for (const action of actions) {
     // pull and pullDelete only change the local vault; the bucket is untouched.
@@ -66,11 +74,11 @@ export function manifestAfterSync(
       continue;
     }
     if (action.kind === "push") {
-      // A push is only ever planned for a file present in the local snapshot, so the guard is
-      // narrowing, not a real branch; a miss would mean planSync broke that invariant.
-      const pushed = localByPath.get(action.path);
-      if (pushed !== undefined) {
-        files.set(action.path, pushed);
+      // A completed push always reports the file it uploaded, so a miss here would mean
+      // executeSyncPlan broke that invariant.
+      const entry = pushedByPath.get(action.path);
+      if (entry !== undefined) {
+        files.set(action.path, entry);
       }
       continue;
     }
@@ -80,10 +88,10 @@ export function manifestAfterSync(
     if (action.deletedSide === "local") {
       continue;
     }
-    const copied = localByPath.get(action.path);
-    if (copied !== undefined) {
-      const copyPath = conflictCopyPath(action.path, now);
-      files.set(copyPath, { ...copied, path: copyPath });
+    const copyPath = conflictCopyPath(action.path, now);
+    const entry = pushedByPath.get(copyPath);
+    if (entry !== undefined) {
+      files.set(copyPath, entry);
     }
   }
 

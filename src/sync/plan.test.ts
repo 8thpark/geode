@@ -110,35 +110,46 @@ test("trashKeyFor: parks the path under the reserved trash prefix behind a times
   );
 });
 
-test("manifestAfterSync: a push records the local snapshot's entry", () => {
-  const local = snapshot(file("a.md", "h2"));
+test("manifestAfterSync: a push records the pushed file's entry", () => {
   const remote = snapshot(file("a.md", "h1"), file("b.md", "h3"));
+  const pushed = [file("a.md", "h2")];
 
-  const result = manifestAfterSync(local, remote, [{ kind: "push", path: "a.md" }], 1);
+  const result = manifestAfterSync(remote, [{ kind: "push", path: "a.md" }], pushed, 1);
 
   assert.deepEqual(result, snapshot(file("a.md", "h2"), file("b.md", "h3")));
 });
 
+test("manifestAfterSync: a push whose bytes drifted past the snapshot still records what was actually uploaded", () => {
+  // The snapshot saw h1, but the file changed again before the push read it, so h2 is what
+  // actually reached the bucket. The manifest must never fall back to the stale snapshot hash
+  // here, or every other device's verifyFetch rejects h2's real bytes until this device syncs
+  // again, indefinitely if it never does.
+  const remote = snapshot(file("a.md", "h1"));
+  const pushed = [file("a.md", "h2")];
+
+  const result = manifestAfterSync(remote, [{ kind: "push", path: "a.md" }], pushed, 1);
+
+  assert.deepEqual(result, snapshot(file("a.md", "h2")));
+});
+
 test("manifestAfterSync: a pushDelete removes the entry", () => {
-  const local = empty;
   const remote = snapshot(file("a.md", "h1"), file("b.md", "h3"));
 
-  const result = manifestAfterSync(local, remote, [{ kind: "pushDelete", path: "a.md" }], 1);
+  const result = manifestAfterSync(remote, [{ kind: "pushDelete", path: "a.md" }], [], 1);
 
   assert.deepEqual(result, snapshot(file("b.md", "h3")));
 });
 
 test("manifestAfterSync: pull and pullDelete leave the bucket, and so the manifest, untouched", () => {
-  const local = empty;
   const remote = snapshot(file("a.md", "h1"));
 
   const result = manifestAfterSync(
-    local,
     remote,
     [
       { kind: "pull", path: "a.md" },
       { kind: "pullDelete", path: "b.md" },
     ],
+    [],
     1,
   );
 
@@ -147,44 +158,42 @@ test("manifestAfterSync: pull and pullDelete leave the bucket, and so the manife
 
 test("manifestAfterSync: a content conflict keeps the remote entry and adds the pushed copy", () => {
   const now = Date.parse("2026-07-14T10:00:00.000Z");
-  const local = snapshot(file("a.md", "h2"));
   const remote = snapshot(file("a.md", "h3"));
+  const copyPath = "a (conflicted copy 2026-07-14T10-00-00-000Z).md";
+  const pushed = [{ ...file("a.md", "h2"), path: copyPath }];
 
   const result = manifestAfterSync(
-    local,
     remote,
     [{ kind: "conflict", path: "a.md", deletedSide: "none" }],
+    pushed,
     now,
   );
 
-  const copyPath = "a (conflicted copy 2026-07-14T10-00-00-000Z).md";
   assert.deepEqual(result, snapshot(file("a.md", "h3"), { ...file("a.md", "h2"), path: copyPath }));
 });
 
 test("manifestAfterSync: a remote deletion conflict records only the pushed copy", () => {
   const now = Date.parse("2026-07-14T10:00:00.000Z");
-  const local = snapshot(file("a.md", "h2"));
-  const remote = empty;
+  const copyPath = "a (conflicted copy 2026-07-14T10-00-00-000Z).md";
+  const pushed = [{ ...file("a.md", "h2"), path: copyPath }];
 
   const result = manifestAfterSync(
-    local,
-    remote,
+    empty,
     [{ kind: "conflict", path: "a.md", deletedSide: "remote" }],
+    pushed,
     now,
   );
 
-  const copyPath = "a (conflicted copy 2026-07-14T10-00-00-000Z).md";
   assert.deepEqual(result, snapshot({ ...file("a.md", "h2"), path: copyPath }));
 });
 
 test("manifestAfterSync: a local deletion conflict pushes nothing, the remote entry stands", () => {
-  const local = empty;
   const remote = snapshot(file("a.md", "h2"));
 
   const result = manifestAfterSync(
-    local,
     remote,
     [{ kind: "conflict", path: "a.md", deletedSide: "local" }],
+    [],
     1,
   );
 
