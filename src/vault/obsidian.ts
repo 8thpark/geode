@@ -70,6 +70,13 @@ export function createObsidianReader(vault: Vault): Reader {
       const buffer = await vault.readBinary(file);
       return new Uint8Array(buffer);
     },
+    size: async (path) => {
+      const file = vault.getFileByPath(path);
+      if (file === null) {
+        return 0;
+      }
+      return file.stat.size;
+    },
   };
 }
 

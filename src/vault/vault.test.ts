@@ -39,6 +39,13 @@ function fakeReader(files: Record<string, { content: string; mtime: number }>): 
       }
       return new TextEncoder().encode(file.content);
     },
+    size: async (path) => {
+      const file = files[path];
+      if (file === undefined) {
+        return 0;
+      }
+      return file.content.length;
+    },
   };
   return { reader, readCount: () => reads };
 }
@@ -199,6 +206,13 @@ test("takeSnapshot: concurrency is bounded by the limit", async () => {
       }
       return new TextEncoder().encode(file.content);
     },
+    size: async (path) => {
+      const file = files[path];
+      if (file === undefined) {
+        return 0;
+      }
+      return file.content.length;
+    },
   };
 
   const snapshot = await takeSnapshot(reader, empty, 2);
@@ -241,6 +255,13 @@ test("takeSnapshot: in-flight bytes are bounded by the byte budget", async () =>
       inflightBytes -= file.content.length;
 
       return new TextEncoder().encode(file.content);
+    },
+    size: async (path) => {
+      const file = files[path];
+      if (file === undefined) {
+        return 0;
+      }
+      return file.content.length;
     },
   };
 
@@ -286,6 +307,9 @@ test("takeSnapshot: a small read does not jump a queued large read", async () =>
 
       return new Uint8Array(sizes[path]);
     },
+    size: async (path) => {
+      return sizes[path];
+    },
   };
 
   const snapshot = takeSnapshot(reader, empty, 3, 100);
@@ -300,7 +324,7 @@ test("takeSnapshot: a small read does not jump a queued large read", async () =>
   );
 });
 
-test("takeSnapshot: reads that grow past their listed size complete without wedging", async () => {
+test("takeSnapshot: growth since listing is bounded by the fresh size", async () => {
   const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
   const files: Record<string, { listed: number; actual: number; mtime: number }> = {};
   for (let i = 0; i < 6; i++) {
@@ -313,8 +337,8 @@ test("takeSnapshot: reads that grow past their listed size complete without wedg
     fileExists: async (path) => {
       return files[path] !== undefined;
     },
-    // Every file lists as 10 bytes but reads as 400. Admitting on the listed size then charging the
-    // real size drives the budget negative; the pass must recover from that, not deadlock on it.
+    // Every file lists as 10 bytes but has since grown to 400. Reserving on the listed 10 would let
+    // several read at once and blow past the budget; reserving on the fresh size read now must not.
     listFiles: async () => {
       const list: FileInfo[] = [];
       for (const [path, file] of Object.entries(files)) {
@@ -336,11 +360,19 @@ test("takeSnapshot: reads that grow past their listed size complete without wedg
 
       return new Uint8Array(file.actual);
     },
+    size: async (path) => {
+      const file = files[path];
+      if (file === undefined) {
+        return 0;
+      }
+      return file.actual;
+    },
   };
 
-  const snapshot = await takeSnapshot(reader, empty, 2, 500);
+  // A 500 byte budget with a generous count cap: on the stale listed size of 10 all six would read
+  // at once (2400 bytes resident); on the fresh size of 400 only one fits at a time.
+  const snapshot = await takeSnapshot(reader, empty, 6, 500);
 
-  // The count cap of 2 still bounds residency to two reads even when every listed size was wrong.
   assert.equal(snapshot.files.length, 6);
-  assert.ok(peakBytes <= 800, `expected at most two 400 byte reads resident, got ${peakBytes}`);
+  assert.ok(peakBytes <= 500, `expected in-flight bytes within the 500 budget, got ${peakBytes}`);
 });

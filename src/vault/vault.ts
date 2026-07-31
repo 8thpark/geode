@@ -40,13 +40,17 @@ export type FileState = {
   hash: string;
 };
 
-// Reader lists files present in the vault right now, reads their bytes, and answers whether a
-// path currently exists, so a failed read on a present file is never mistaken for absence. The
-// real implementation wraps Obsidian's Vault API (see obsidian.ts); tests use an in-memory fake.
+// Reader lists files present in the vault right now, reads their bytes, answers whether a path
+// currently exists (so a failed read on a present file is never mistaken for absence), and reports
+// a single path's current size on demand — fresher than the listing, so a snapshot can reserve
+// memory against what it is about to read rather than a size that may have grown since. A vanished
+// path reports size 0, letting the read that follows raise the real disappearance error. The real
+// implementation wraps Obsidian's Vault API (see obsidian.ts); tests use an in-memory fake.
 export type Reader = {
   fileExists: (path: string) => Promise<boolean>;
   listFiles: () => Promise<FileInfo[]>;
   readFile: (path: string) => Promise<Uint8Array>;
+  size: (path: string) => Promise<number>;
 };
 
 // Snapshot is every file geode saw the last time it took a snapshot.
@@ -197,9 +201,9 @@ export function isSnapshot(value: unknown): value is Snapshot {
 // rereading content — the same stat gated hashing rsync, git, and Syncthing all use, since mtime
 // and size alone aren't reliable enough to trust as identity, but are cheap enough to skip a
 // rehash when neither has moved. Reads run at most concurrency at a time and hold at most
-// byteBudget bytes of read content across them — reconciled to each file's real size, since a file
-// can grow between listing and read — so neither a vault of many files nor a vault of large
-// attachments drives unbounded memory pressure; a stat gated skip reads nothing and costs neither.
+// byteBudget bytes of read content across them, so neither a vault of many files nor a vault of
+// large attachments drives unbounded memory pressure; a stat gated skip reads nothing and costs
+// neither budget.
 export async function takeSnapshot(
   reader: Reader,
   previous: Snapshot,
@@ -216,9 +220,11 @@ export async function takeSnapshot(
       return known;
     }
 
-    // Reserve the listed size to gain admission, then charge the true size once the bytes are in
-    // hand, so a file that grew since listing counts against the budget for what it actually holds.
-    const hold = await budget.acquire(file.size);
+    // Reserve against the size read now, not the one listed at the start of the pass, so a file
+    // that has since grown cannot slip past the budget on a stale, smaller number; resize then
+    // corrects for any change in the narrow window between this probe and the read itself.
+    const reserved = await reader.size(file.path);
+    const hold = await budget.acquire(reserved);
     try {
       const bytes = await reader.readFile(file.path);
       hold.resize(bytes.length);
@@ -238,12 +244,12 @@ export async function takeSnapshot(
 }
 
 // byteSemaphore caps the bytes held by in-flight readers to budget. acquire reserves the caller's
-// estimate and resolves once it fits, returning a hold whose resize reconciles that estimate to the
+// size and resolves once it fits, returning a hold whose resize reconciles that reservation to the
 // bytes actually read and whose release hands the room back. Waiters are admitted strictly in
 // arrival order — a later small read never jumps a queued large one — and a file larger than the
 // whole budget is admitted only when nothing else is held, so it runs alone rather than blocking
-// forever. The count cap in takeSnapshot remains the hard ceiling: this only tightens the common
-// case where files are far smaller than the budget.
+// forever. The bound holds only as far as the reserved size is honest, which is why takeSnapshot
+// reserves against a freshly read size rather than a stale listed one.
 function byteSemaphore(budget: number): { acquire: (bytes: number) => Promise<Hold> } {
   let available = budget;
   const waiters: Array<{ need: number; wake: () => void }> = [];

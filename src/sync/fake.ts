@@ -55,6 +55,13 @@ export function fakeReader(files: Record<string, string>): Reader {
       }
       return new TextEncoder().encode(content);
     },
+    size: async (path) => {
+      const content = files[path];
+      if (content === undefined) {
+        return 0;
+      }
+      return content.length;
+    },
   };
 }
 
