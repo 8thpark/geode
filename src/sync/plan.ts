@@ -1,4 +1,10 @@
-import { byPath, type Change, diffSnapshots, type Snapshot } from "../vault/vault.ts";
+import {
+  byPath,
+  type Change,
+  diffSnapshots,
+  type FileState,
+  type Snapshot,
+} from "../vault/vault.ts";
 
 // MANIFEST_KEY is the well known remote object holding the last synced snapshot, geode's source
 // of truth for "what does the other side think exists". Reserved: never treated as a real vault
@@ -39,52 +45,30 @@ export function conflictCopyPath(path: string, now: number): string {
   return `${path.slice(0, lastDot)} (conflicted copy ${stamp})${path.slice(lastDot)}`;
 }
 
-// manifestAfterSync returns the snapshot of what the bucket holds once every action in the plan
-// has succeeded: remote as it was read, minus pushed deletions, plus pushed files and conflict
-// copies recorded at the local snapshot's entry. It is computed from the plan rather than
-// re-snapshotted from disk so the manifest can never record content the bucket does not have
-// (#84): a file that changed while the plan ran keeps its bucket entry, and the next sync sees
-// the drift as a local change and pushes it. The one race left, a push whose bytes drifted past
-// the local snapshot before they were read, only ever understates the bucket, and the next pass
-// simply pushes again.
+// manifestAfterSync returns the snapshot of what the bucket holds once the pass has run: remote
+// as it was read, minus every path a completed pushDelete removed, plus an entry for every
+// FileState pushed carries, keyed by the exact bytes executeSyncPlan actually wrote to the bucket
+// rather than a pre-push snapshot or an action's own success. A conflict's copy push can succeed
+// even when the conflict as a whole later fails to restore the remote version (the pull, its
+// integrity check, or the local write can each fail on their own); the copy still landed in the
+// bucket, and pushed carries its entry regardless, so leaving it out here would strand that
+// object, invisible to every other device, until this same device happened to sync again,
+// indefinitely if it never did. completed is only consulted for pushDelete, since a failed
+// pushDelete means the live object may still be there and its entry must stand.
 export function manifestAfterSync(
-  local: Snapshot,
   remote: Snapshot,
-  actions: SyncAction[],
-  now: number,
+  completed: SyncAction[],
+  pushed: FileState[],
 ): Snapshot {
   const files = byPath(remote.files);
-  const localByPath = byPath(local.files);
 
-  for (const action of actions) {
-    // pull and pullDelete only change the local vault; the bucket is untouched.
-    if (action.kind === "pull" || action.kind === "pullDelete") {
-      continue;
-    }
+  for (const action of completed) {
     if (action.kind === "pushDelete") {
       files.delete(action.path);
-      continue;
     }
-    if (action.kind === "push") {
-      // A push is only ever planned for a file present in the local snapshot, so the guard is
-      // narrowing, not a real branch; a miss would mean planSync broke that invariant.
-      const pushed = localByPath.get(action.path);
-      if (pushed !== undefined) {
-        files.set(action.path, pushed);
-      }
-      continue;
-    }
-    // conflict: a local deletion pushes nothing, the remote entry stands as is. The other two
-    // sides push the local edit under its conflict copy name; the original path is already
-    // correct in remote (present for deletedSide "none", absent for "remote").
-    if (action.deletedSide === "local") {
-      continue;
-    }
-    const copied = localByPath.get(action.path);
-    if (copied !== undefined) {
-      const copyPath = conflictCopyPath(action.path, now);
-      files.set(copyPath, { ...copied, path: copyPath });
-    }
+  }
+  for (const entry of pushed) {
+    files.set(entry.path, entry);
   }
 
   return { files: [...files.values()] };

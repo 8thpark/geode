@@ -16,7 +16,7 @@ test("executeSyncPlan: push reads the local file and puts it remotely", async ()
   const { writer, files } = fakeLocalWriter();
   const { storage, objects } = fakeStorage();
 
-  const { failures } = await executeSyncPlan(
+  const { failures, pushedFiles } = await executeSyncPlan(
     [{ kind: "push", path: "a.md" }],
     empty,
     reader,
@@ -28,6 +28,38 @@ test("executeSyncPlan: push reads the local file and puts it remotely", async ()
   assert.deepEqual(failures, []);
   assert.equal(objects.get("a.md"), "hello");
   assert.equal(files.size, 0);
+  assert.deepEqual(pushedFiles, [{ path: "a.md", size: 5, mtime: 1, hash: await hashOf("hello") }]);
+});
+
+test("executeSyncPlan: a push records the bytes it actually uploaded, not the pre push snapshot's hash", async () => {
+  // a.md was edited again after the local snapshot this pass planned from, but before the push
+  // read its bytes: the race that used to leave the manifest naming the stale snapshot hash while
+  // the bucket held the newer content, which every other device's verifyFetch then rejected until
+  // this device happened to sync again.
+  const reader = fakeReader({ "a.md": "edited after snapshot" });
+  const local = snapshot(file("a.md", await hashOf("as snapshotted")));
+  const { writer } = fakeLocalWriter();
+  const { storage, objects } = fakeStorage();
+
+  const { failures, pushedFiles } = await executeSyncPlan(
+    [{ kind: "push", path: "a.md" }],
+    local,
+    reader,
+    writer,
+    storage,
+    1,
+  );
+
+  assert.deepEqual(failures, []);
+  assert.equal(objects.get("a.md"), "edited after snapshot");
+  assert.deepEqual(pushedFiles, [
+    {
+      path: "a.md",
+      size: "edited after snapshot".length,
+      mtime: 1,
+      hash: await hashOf("edited after snapshot"),
+    },
+  ]);
 });
 
 test("executeSyncPlan: pushDelete trashes the remote object before removing its live key", async () => {
@@ -302,7 +334,7 @@ test("executeSyncPlan: a conflict renames the local copy, pushes it to storage, 
   const remote = snapshot(file("a.md", await hashOf("remote edit")));
   const now = Date.parse("2026-07-14T10:00:00.000Z");
 
-  const { failures } = await executeSyncPlan(
+  const { failures, pushedFiles } = await executeSyncPlan(
     [{ kind: "conflict", path: "a.md", deletedSide: "none" }],
     empty,
     reader,
@@ -319,6 +351,16 @@ test("executeSyncPlan: a conflict renames the local copy, pushes it to storage, 
   // claims a remote object that doesn't exist, and every other device fails forever trying to
   // pull it.
   assert.equal(objects.get(conflictCopyPath("a.md", now)), "local edit");
+  // Recorded at the hash of the copy's own bytes, the same race a push closes: the conflict copy
+  // is read fresh at execution time, never assumed from a pre-sync snapshot.
+  assert.deepEqual(pushedFiles, [
+    {
+      path: conflictCopyPath("a.md", now),
+      size: "local edit".length,
+      mtime: now,
+      hash: await hashOf("local edit"),
+    },
+  ]);
 });
 
 test("executeSyncPlan: a conflict with nothing local to preserve just pulls the remote version, never reading a deleted local file", async () => {
@@ -666,7 +708,7 @@ test("executeSyncPlan: conflict with hash mismatch on remote restore is reported
   const remote = snapshot(file("a.md", await hashOf("correct content")));
   const now = Date.parse("2026-07-14T10:00:00.000Z");
 
-  const { failures } = await executeSyncPlan(
+  const { failures, completed, pushedFiles } = await executeSyncPlan(
     [{ kind: "conflict", path: "a.md", deletedSide: "none" }],
     empty,
     reader,
@@ -686,4 +728,15 @@ test("executeSyncPlan: conflict with hash mismatch on remote restore is reported
   assert.equal(files.get("a.md"), undefined);
   assert.equal(files.get(conflictCopyPath("a.md", now)), "local edit");
   assert.equal(objects.get(conflictCopyPath("a.md", now)), "local edit");
+  // The action is reported failed, never completed, but the copy really did land in the bucket:
+  // pushedFiles must still carry it, or the manifest built from it would never know it's there.
+  assert.deepEqual(completed, []);
+  assert.deepEqual(pushedFiles, [
+    {
+      path: conflictCopyPath("a.md", now),
+      size: "local edit".length,
+      mtime: now,
+      hash: await hashOf("local edit"),
+    },
+  ]);
 });
