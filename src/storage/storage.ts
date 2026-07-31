@@ -469,7 +469,8 @@ async function s3ListObjects(
 }
 
 // s3PutObject writes body to key, creating or overwriting it. When condition is set, the write
-// only lands if its precondition still holds; a 412 from the server surfaces as "conflict".
+// only lands if its precondition still holds; a 412, or a 409 from a provider that reports a
+// losing race that way, surfaces as "conflict".
 async function s3PutObject(
   client: AwsClient,
   transport: Transport,
