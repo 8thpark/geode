@@ -318,6 +318,33 @@ test("executeSyncPlan: pullDelete of a file that exists but cannot be read is re
   assert.equal(files.get("a.md"), "hello");
 });
 
+test("executeSyncPlan: pullDelete refuses when the manifest has moved on, rather than deleting a repopulated path", async () => {
+  // pullDelete has no bucket object of its own to check, unlike pull's fetch, so it would
+  // otherwise remove a local file purely on the say of a stale plan even though another device has
+  // since pushed new content back to this exact path.
+  const reader = fakeReader({ "a.md": "hello" });
+  const { writer, files } = fakeLocalWriter();
+  files.set("a.md", "hello");
+  const local = snapshot(file("a.md", await hashOf("hello")));
+  const { storage } = fakeStorage({ [MANIFEST_KEY]: "irrelevant" });
+
+  const { failures } = await executeSyncPlan(
+    [{ kind: "pullDelete", path: "a.md" }],
+    local,
+    reader,
+    writer,
+    storage,
+    1,
+    empty,
+    '"stale-etag"',
+  );
+
+  assert.deepEqual(failures, [
+    { path: "a.md", message: "changed remotely mid sync; sync again to reconcile" },
+  ]);
+  assert.equal(files.get("a.md"), "hello");
+});
+
 test("executeSyncPlan: a conflict renames the local copy, pushes its blob to storage, and pulls the remote version clean", async () => {
   const reader = fakeReader({ "a.md": "local edit" });
   const { writer, files } = fakeLocalWriter();
@@ -383,7 +410,10 @@ test("executeSyncPlan: a conflict with nothing local to preserve just pulls the 
 test("executeSyncPlan: a conflict restore onto a path recreated after the snapshot is refused", async () => {
   // The snapshot saw this path as locally deleted, so the plan decided the remote edit could be
   // restored with nothing to preserve. The user then recreated the file before the plan reached
-  // this action; overwriting it now would discard content the plan never saw (#86).
+  // this action; overwriting it now would discard content the plan never saw (#86). No remote
+  // snapshot is supplied either, so the fetch this branch attempts first refuses on its own
+  // account (a plan with no manifest entry to restore from is already inconsistent); either way
+  // the recreated file is never touched.
   const reader = fakeReader({ "a.md": "recreated after snapshot" });
   const { writer, files } = fakeLocalWriter();
   files.set("a.md", "recreated after snapshot");
@@ -397,6 +427,33 @@ test("executeSyncPlan: a conflict restore onto a path recreated after the snapsh
     writer,
     storage,
     now,
+  );
+
+  assert.deepEqual(failures, [
+    { path: "a.md", message: "manifest missing expected hash for this path" },
+  ]);
+  assert.equal(files.get("a.md"), "recreated after snapshot");
+});
+
+test("executeSyncPlan: a conflict restore onto a path recreated after the snapshot is refused even with a real remote entry", async () => {
+  // The same scenario as above but with a real remote entry present, so the fetch succeeds and the
+  // recreated local file is what checkLocalDrift, run last, must catch.
+  const reader = fakeReader({ "a.md": "recreated after snapshot" });
+  const { writer, files } = fakeLocalWriter();
+  files.set("a.md", "recreated after snapshot");
+  const hash = await hashOf("remote edit");
+  const { storage } = fakeStorage({ [blobKeyFor(hash)]: "remote edit" });
+  const remote = snapshot(file("a.md", hash));
+  const now = Date.parse("2026-07-14T10:00:00.000Z");
+
+  const { failures } = await executeSyncPlan(
+    [{ kind: "conflict", path: "a.md", deletedSide: "local" }],
+    empty,
+    reader,
+    writer,
+    storage,
+    now,
+    remote,
   );
 
   assert.deepEqual(failures, [

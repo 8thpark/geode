@@ -6,6 +6,7 @@
 - [Remote Sync](#remote-sync)
 - [MCP](#mcp)
 - [API](#api)
+- [Prior Art](#prior-art)
 
 Allowing for seamless and secure interaction with your Obsidian vault remotely from multiple device
 and tools. There are similar projects in the space, that we can learn from, which are outlined
@@ -25,6 +26,10 @@ below.
 - [GitHub Gitless Sync](https://github.com/silvanocerza/github-gitless-sync)
 - [YAOS](https://github.com/kavinsood/yaos)
 - [BYOC](https://github.com/winters27/obsidian-byoc)
+- [AnySocket Sync](https://github.com/lynxaegon/obsidian-anysocket-sync)
+- [Cloud Sync](https://github.com/ai-bytedance/obsidian-cloud-sync)
+- [Fast Note Sync](https://github.com/haierkeys/obsidian-fast-note-sync)
+- [Sync Share](https://github.com/Alt-er/obsidian-sync-share)
 
 ## MCP
 
@@ -37,3 +42,15 @@ below.
 ## API
 
 - [Local REST API](https://github.com/coddingtonbear/obsidian-local-rest-api)
+
+## Prior Art
+
+- [Restic](https://github.com/restic/restic)
+- [Rclone (Bisync)](https://rclone.org/bisync)
+- [Cryptomator](https://docs.cryptomator.org/security/vault)
+- [Unison](https://github.com/bcpierce00/unison)
+- [Syncthing](https://docs.syncthing.net/users/syncing.html)
+- [Joplin](https://joplinapp.org/help)
+- [Seafile](https://seafile.com/en/home)
+- [Age](https://github.com/FiloSottile/age)
+- [Git Annex](https://git-annex.branchable.com)

@@ -15,15 +15,17 @@ const MANIFEST_MISSING_HASH_MESSAGE = "manifest missing expected hash for this p
 // the FileState of every path a blob now exists under, hashed from those exact bytes. pushedFiles
 // is not limited to completed actions: a conflict's copy push can succeed even when the rest of
 // that same action later fails, and the copy still needs to reach the manifest. There is no
-// concurrency flag: a write here is either additive (a blob keyed by its own hash, which a losing
-// race still leaves holding the right bytes) or, for a delete, touches no bucket object at all (see
-// the pushDelete branch of executeAction), so neither can ever discover that the plan's remote view
-// went stale mid pass. A pull family read is different: it fetches a specific blob by the hash the
-// plan already decided on, which by construction always "succeeds" with exactly that content, so it
-// can never notice on its own that a newer manifest has since pointed the path elsewhere; that is
-// what manifestDrifted checks for immediately before each such write. The one CAS the plan
-// ultimately depends on either way is the manifest's own conditional PUT (sync.ts), the backstop
-// that still catches anything a mid pass check's own race window lets through.
+// concurrency flag: a remote side write is either additive (a blob keyed by its own hash, which a
+// losing race still leaves holding the right bytes) or, for pushDelete, touches no bucket object at
+// all, so neither can ever discover on its own that the plan's remote view went stale mid pass. The
+// pull family (pull, pullDelete, and a conflict's restore) is different: a pull's own fetch reads a
+// specific blob by the hash the plan already decided on, which by construction always "succeeds"
+// with exactly that content, and pullDelete has no bucket object of its own to check at all, so
+// neither can notice on its own that a newer manifest has since pointed the path elsewhere or
+// repopulated it; that is what manifestDrifted checks for immediately before each such local write
+// or delete. The one CAS the plan ultimately depends on either way is the manifest's own conditional
+// PUT (sync.ts), the backstop that still catches anything a mid pass check's own race window lets
+// through.
 export type ExecuteResult = {
   completed: SyncAction[];
   failed: SyncAction[];
@@ -227,16 +229,18 @@ async function executeAction(
   }
 
   if (action.kind === "pull") {
-    const drift = await checkLocalDrift(reader, action.path, localByPath.get(action.path));
-    if (drift !== null) {
-      return { failures: [drift], pushed: [] };
-    }
     const fetched = await pullBlob(storage, action.path, remoteByPath.get(action.path));
     if (!fetched.ok) {
       return { failures: [fetched.failure], pushed: [] };
     }
     if (await manifestDrifted(storage, manifestEtag)) {
       return { failures: [{ path: action.path, message: MANIFEST_DRIFT_MESSAGE }], pushed: [] };
+    }
+    // Checked last, immediately before the write: every check above this one is itself async and
+    // would otherwise widen the very race this exists to shrink (#86).
+    const drift = await checkLocalDrift(reader, action.path, localByPath.get(action.path));
+    if (drift !== null) {
+      return { failures: [drift], pushed: [] };
     }
     const failure = await applyLocalWrite(action.path, () =>
       localWriter.writeFile(action.path, fetched.body),
@@ -249,6 +253,13 @@ async function executeAction(
   }
 
   if (action.kind === "pullDelete") {
+    // A deletion is only safe once the manifest is confirmed still current: unlike pull's fetch,
+    // which reads a specific blob and so cannot itself observe staleness, a delete has nothing of
+    // its own to check against and would otherwise remove a path a newer manifest has since
+    // repopulated, based purely on the stale plan.
+    if (await manifestDrifted(storage, manifestEtag)) {
+      return { failures: [{ path: action.path, message: MANIFEST_DRIFT_MESSAGE }], pushed: [] };
+    }
     const drift = await checkLocalDrift(reader, action.path, localByPath.get(action.path));
     if (drift !== null) {
       return { failures: [drift], pushed: [] };
@@ -265,16 +276,18 @@ async function executeAction(
   // preserve; the remote edit simply wins and is restored onto the local path. The snapshot has
   // no entry here, so any file found now was recreated after it and must not be overwritten.
   if (action.deletedSide === "local") {
-    const drift = await checkLocalDrift(reader, action.path, localByPath.get(action.path));
-    if (drift !== null) {
-      return { failures: [drift], pushed: [] };
-    }
     const fetched = await pullBlob(storage, action.path, remoteByPath.get(action.path));
     if (!fetched.ok) {
       return { failures: [fetched.failure], pushed: [] };
     }
     if (await manifestDrifted(storage, manifestEtag)) {
       return { failures: [{ path: action.path, message: MANIFEST_DRIFT_MESSAGE }], pushed: [] };
+    }
+    // Checked last, immediately before the write: every check above this one is itself async and
+    // would otherwise widen the very race this exists to shrink (#86).
+    const drift = await checkLocalDrift(reader, action.path, localByPath.get(action.path));
+    if (drift !== null) {
+      return { failures: [drift], pushed: [] };
     }
     const failure = await applyLocalWrite(action.path, () =>
       localWriter.writeFile(action.path, fetched.body),
