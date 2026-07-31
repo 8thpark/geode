@@ -4,19 +4,12 @@ import {
   decodeSnapshot,
   encodeSnapshot,
   type FileState,
-  hashBytes,
   type Reader,
   type Snapshot,
   takeSnapshot,
 } from "../vault/vault.ts";
 import { executeSyncPlan, type LocalWriter, type SyncFailure } from "./execute.ts";
-import {
-  MANIFEST_KEY,
-  manifestAfterSync,
-  planSync,
-  RESERVED_PREFIX,
-  type SyncAction,
-} from "./plan.ts";
+import { BLOB_PREFIX, MANIFEST_KEY, manifestAfterSync, planSync, type SyncAction } from "./plan.ts";
 
 // SyncOutcome is the result of a single sync pass. On success it carries the new snapshot to
 // persist as the next sync's starting point and how many actions were applied; on failure it
@@ -55,28 +48,6 @@ export function adoptLiveStats(manifest: Snapshot, live: Snapshot): Snapshot {
   return { files };
 }
 
-// orphanedKeys returns the bucket keys a first sync would strand: objects with no local file at
-// their key, which a manifest built purely from local files would never mention, so no device
-// would ever pull, list, or delete them again (#109). Keys under the reserved prefix are geode's
-// own bookkeeping (the manifest, trashed deletions), never vault files, and are not counted; if
-// the manifest appears in the listing (another device's first sync landing mid pass) the
-// conditional manifest upload catches it loudly. Exported for its tests; syncOnce is the only
-// production caller.
-export function orphanedKeys(objects: ObjectMeta[], local: Snapshot): string[] {
-  const localByPath = byPath(local.files);
-  const orphans: string[] = [];
-  for (const object of objects) {
-    if (object.key.startsWith(RESERVED_PREFIX)) {
-      continue;
-    }
-    if (!localByPath.has(object.key)) {
-      orphans.push(object.key);
-    }
-  }
-
-  return orphans;
-}
-
 // readRemoteManifest fetches and parses the remote manifest. A confirmed 404 means no manifest
 // has ever been written, the safe assumption for a first sync against an empty bucket, so that's
 // treated as an empty snapshot flagged firstSync. Any other failure (network, auth, a real 5xx)
@@ -107,7 +78,10 @@ export async function readRemoteManifest(
     const decoded = decodeSnapshot(new TextDecoder().decode(fetched.body));
     if (!decoded.ok) {
       if (decoded.reason === "unsupportedVersion") {
-        return { ok: false, message: "remote manifest needs a newer version of geode" };
+        return {
+          ok: false,
+          message: "remote manifest is a format this version of geode can't read",
+        };
       }
       return { ok: false, message: "remote manifest is corrupt" };
     }
@@ -185,48 +159,35 @@ export async function syncOnce(
   const local = await takeSnapshot(reader, ancestor);
 
   // A missing manifest usually means a fresh bucket, but not always: a lifecycle rule, manual
-  // cleanup, or partial restore can remove the manifest while file objects survive (#109). The
-  // pass below would build a manifest purely from local files, leaving every surviving object
-  // invisible: never pulled, never listed, orphaned forever. Refuse loudly instead when the
-  // bucket holds objects no local file accounts for.
-  //
-  // Objects that do match a local path are safe to proceed over, but only once the plan knows
-  // what they hold. The empty snapshot a missing manifest implies claims the bucket has nothing
-  // at that key, so the path plans as an ifAbsent push the surviving object can only reject; the
-  // 412 reads as concurrency and aborts the pass telling the user to sync again, and since
-  // nothing about either side changes, every retry reproduces it exactly: a permanent wedge whose
-  // error message names the one action that cannot work. Reading those objects instead makes the
-  // plan honest, and the ordinary machinery does the rest: identical bytes need no action at all,
-  // divergent bytes are a conflict, and neither side's version is lost.
-  let remoteView = remote.snapshot;
+  // cleanup, or partial restore can remove the manifest while blob objects survive (#109). Unlike
+  // the plaintext path keyed layout this replaced, that survival is not automatically a hazard: a
+  // blob's key is its own content hash, so a survivor whose hash matches something the local
+  // vault still holds needs no recovery at all, the ordinary push below finds it already there
+  // (one HEAD, no re-upload) and the manifest this pass writes describes it correctly. What
+  // remains dangerous is a survivor whose hash matches nothing local: unexplained content this
+  // device cannot account for, most plausibly a different vault's data that once shared this
+  // bucket, or the very race #109 first named. Building a manifest that silently ignores it would
+  // make that content unreachable forever, the same failure #109 fixed, just for content the local
+  // vault never had, so this refuses loudly and names it rather than guessing it away.
+  const remoteView = remote.snapshot;
   if (remote.firstSync) {
-    const listed = await storage.listObjects();
+    const listed = await storage.listObjects(BLOB_PREFIX);
     if (!listed.ok) {
       return { ok: false, message: listed.message, failures: [], snapshot: null };
     }
-    const orphans = orphanedKeys(listed.objects, local);
-    if (orphans.length > 0) {
+    const unexplained = unexplainedBlobs(listed.objects, local);
+    if (unexplained.length > 0) {
       const failures: SyncFailure[] = [];
-      for (const key of orphans) {
+      for (const key of unexplained) {
         failures.push({ path: key, message: "in the bucket but not in the local vault" });
       }
       return {
         ok: false,
-        message: "bucket has files but no manifest; sync would orphan them",
+        message: "bucket has content but no manifest; sync would strand it",
         failures,
         snapshot: null,
       };
     }
-    const survivors = await bucketView(listed.objects, local, storage);
-    if (!survivors.ok) {
-      return {
-        ok: false,
-        message: survivors.failure.message,
-        failures: [survivors.failure],
-        snapshot: null,
-      };
-    }
-    remoteView = survivors.snapshot;
   }
 
   const actions = planSync(ancestor, local, remoteView);
@@ -239,18 +200,6 @@ export async function syncOnce(
     now,
     remoteView,
   );
-
-  // A failed file precondition means the plan's remote snapshot is no longer current. Do not
-  // upload any manifest from that stale view, even if its own CAS has not lost yet: another pass
-  // may have uploaded the file object but still be about to upload its manifest.
-  if (executed.concurrent) {
-    return {
-      ok: false,
-      message: "another device synced at the same time; sync again",
-      failures: executed.failures,
-      snapshot: null,
-    };
-  }
 
   // The manifest is derived from what the plan just did to the bucket, never from a fresh disk
   // snapshot: a file edited while the plan ran would land in a re-snapshot claiming content the
@@ -311,46 +260,24 @@ export async function syncOnce(
   return { ok: true, snapshot: final, changeCount: actions.length };
 }
 
-// bucketView returns the remote snapshot a first sync should plan against: what the bucket really
-// holds, read from the objects that outlived the manifest, rather than the empty snapshot a missing
-// manifest implies. Only keys with a local file at the same path are read; anything else is either
-// geode's own bookkeeping or an orphan the caller has already refused over. The objects are fetched
-// and hashed because a plan needs content identity, not just a key: an ETag is a provider specific
-// opaque string and a listed size cannot tell two same length edits apart. That costs one GET per
-// surviving object, on a path only ever taken when a bucket has lost its manifest, and no more than
-// the failed conditional PUT plus its verifying GET that the same objects cost before. mtime is 0
-// because a remote object has no local mtime to speak of: any entry that survives into the manifest
-// therefore misses takeSnapshot's stat check next pass and is rehashed, the safe direction to err
-// in, and adoptLiveStats replaces it with the live entry wherever the content already agrees.
-async function bucketView(
-  objects: ObjectMeta[],
-  local: Snapshot,
-  storage: StorageClient,
-): Promise<{ ok: true; snapshot: Snapshot } | { ok: false; failure: SyncFailure }> {
-  const localByPath = byPath(local.files);
-  const files: FileState[] = [];
-
-  for (const object of objects) {
-    if (object.key.startsWith(RESERVED_PREFIX) || !localByPath.has(object.key)) {
-      continue;
-    }
-    const fetched = await storage.getObject(object.key, object.size);
-    if (!fetched.ok || fetched.body === null) {
-      // Listed a moment ago and gone now means another device deleted it in between, which is
-      // exactly the absence the missing manifest already implied; anything else is a real failure
-      // and must not be read as "the bucket holds nothing here", the guess that orphans files.
-      if (fetched.status === "not_found") {
-        continue;
-      }
-      return { ok: false, failure: { path: object.key, message: fetched.message } };
-    }
-    files.push({
-      path: object.key,
-      size: fetched.body.length,
-      mtime: 0,
-      hash: await hashBytes(fetched.body),
-    });
+// unexplainedBlobs returns the blob keys a first sync cannot account for: survivors whose content
+// hash matches nothing in the local vault, so nothing this pass is about to do would ever
+// reference them. Every other survivor, whose hash a local file already carries, needs no special
+// handling: the ordinary push below finds it already there and folds it into the manifest for
+// free. Exported for its tests; syncOnce is the only production caller.
+export function unexplainedBlobs(objects: ObjectMeta[], local: Snapshot): string[] {
+  const localHashes = new Set<string>();
+  for (const entry of local.files) {
+    localHashes.add(entry.hash);
   }
 
-  return { ok: true, snapshot: { files } };
+  const unexplained: string[] = [];
+  for (const object of objects) {
+    const hash = object.key.slice(BLOB_PREFIX.length);
+    if (!localHashes.has(hash)) {
+      unexplained.push(object.key);
+    }
+  }
+
+  return unexplained;
 }

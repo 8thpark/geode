@@ -18,14 +18,6 @@ export type ConnectionResult = {
   message: string;
 };
 
-// CopyResult reports whether an object was copied to a new key. Message is the empty string when
-// ok is true.
-export type CopyResult = {
-  ok: boolean;
-  status: ResultStatus;
-  message: string;
-};
-
 // DeleteResult reports whether an object was removed. Message is the empty string when ok is
 // true.
 export type DeleteResult = {
@@ -43,6 +35,14 @@ export type GetResult = {
   message: string;
   body: Uint8Array | null;
   etag: string | null;
+};
+
+// HeadResult reports whether an object exists at a key, without transferring its body. Message is
+// the empty string when ok is true.
+export type HeadResult = {
+  ok: boolean;
+  status: ResultStatus;
+  message: string;
 };
 
 // HttpResponse is the normalized reply a Transport returns: the HTTP status and the fully read
@@ -102,7 +102,7 @@ export type ResultStatus =
 export type StorageClient = {
   putObject: (key: string, body: Uint8Array, condition?: PutCondition) => Promise<PutResult>;
   getObject: (key: string, expectedBytes?: number) => Promise<GetResult>;
-  copyObject: (sourceKey: string, destKey: string) => Promise<CopyResult>;
+  headObject: (key: string) => Promise<HeadResult>;
   deleteObject: (key: string) => Promise<DeleteResult>;
   listObjects: (prefix?: string) => Promise<ListResult>;
 };
@@ -134,8 +134,7 @@ export function createS3Client(
     putObject: (key, body, condition) =>
       s3PutObject(client, transport, baseUrl, key, body, condition),
     getObject: (key, expectedBytes) => s3GetObject(client, transport, baseUrl, key, expectedBytes),
-    copyObject: (sourceKey, destKey) =>
-      s3CopyObject(client, transport, baseUrl, settings.bucket, sourceKey, destKey),
+    headObject: (key) => s3HeadObject(client, transport, baseUrl, key),
     deleteObject: (key) => s3DeleteObject(client, transport, baseUrl, key),
     listObjects: (prefix) => s3ListObjects(client, transport, baseUrl, prefix),
   };
@@ -302,46 +301,6 @@ function missingFieldFor(settings: GeodeSettings, secretAccessKey: string): stri
   return "";
 }
 
-// s3CopyObject server-side copies sourceKey to destKey within the same bucket, so the bytes never
-// travel through the client. The x-amz-copy-source header names the source as "/bucket/key" with
-// the key percent-encoded exactly as a request path is, so a source containing spaces or SigV4
-// sensitive characters is signed byte for byte the way the server canonicalizes it. S3 has a
-// documented quirk where CopyObject can answer 200 and then carry an <Error> in the body when the
-// copy fails mid-stream; treating that as success would let the caller delete a source it never
-// actually backed up, so the body is inspected and a failure surfaced rather than swallowed.
-async function s3CopyObject(
-  client: AwsClient,
-  transport: Transport,
-  baseUrl: string,
-  bucket: string,
-  sourceKey: string,
-  destKey: string,
-): Promise<CopyResult> {
-  const source = `/${bucket}/${encodeKey(sourceKey)}`;
-  let response: HttpResponse;
-  try {
-    response = await send(client, transport, `${baseUrl}/${encodeKey(destKey)}`, {
-      method: "PUT",
-      headers: { "x-amz-copy-source": source },
-    });
-  } catch (err) {
-    return { ok: false, status: "network", message: messageFor(err) };
-  }
-
-  if (!response.ok) {
-    return {
-      ok: false,
-      status: statusForHttp(response.status),
-      message: `Storage rejected the copy (${response.status})`,
-    };
-  }
-  const body = new TextDecoder().decode(response.body);
-  if (body.includes("<Error")) {
-    return { ok: false, status: "server", message: "Storage rejected the copy (200 error body)" };
-  }
-  return { ok: true, status: "ok", message: "" };
-}
-
 // s3DeleteObject removes key from the bucket.
 async function s3DeleteObject(
   client: AwsClient,
@@ -416,6 +375,33 @@ async function s3GetObject(
     body: response.body,
     etag: response.header("etag"),
   };
+}
+
+// s3HeadObject reports whether key exists, without transferring the object's body. Used to check
+// for an already stored blob before uploading it: a content addressed key that already exists
+// holds, by construction, the exact bytes a caller would otherwise upload, so the upload can be
+// skipped entirely once its existence is confirmed.
+async function s3HeadObject(
+  client: AwsClient,
+  transport: Transport,
+  baseUrl: string,
+  key: string,
+): Promise<HeadResult> {
+  let response: HttpResponse;
+  try {
+    response = await send(client, transport, `${baseUrl}/${encodeKey(key)}`, { method: "HEAD" });
+  } catch (err) {
+    return { ok: false, status: "network", message: messageFor(err) };
+  }
+
+  if (!response.ok) {
+    return {
+      ok: false,
+      status: statusForHttp(response.status),
+      message: `Storage rejected the head (${response.status})`,
+    };
+  }
+  return { ok: true, status: "ok", message: "" };
 }
 
 // s3ListObjects lists objects in the bucket, optionally restricted to a key prefix. S3 caps a

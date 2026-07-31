@@ -1,7 +1,7 @@
 import type {
-  CopyResult,
   DeleteResult,
   GetResult,
+  HeadResult,
   ListResult,
   ObjectMeta,
   PutResult,
@@ -120,14 +120,10 @@ export function fakeStorage(objects: Record<string, string> = {}): {
         etag,
       };
     },
-    copyObject: async (sourceKey, destKey): Promise<CopyResult> => {
-      const content = store.get(sourceKey);
-      if (content === undefined) {
-        return { ok: false, status: "not_found", message: "Storage rejected the copy (404)" };
+    headObject: async (key): Promise<HeadResult> => {
+      if (!store.has(key)) {
+        return { ok: false, status: "not_found", message: "Storage rejected the head (404)" };
       }
-      revision++;
-      etags.set(destKey, `"v${revision}"`);
-      store.set(destKey, content);
       return { ok: true, status: "ok", message: "" };
     },
     deleteObject: async (key): Promise<DeleteResult> => {

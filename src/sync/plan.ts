@@ -6,20 +6,25 @@ import {
   type Snapshot,
 } from "../vault/vault.ts";
 
+// BLOB_PREFIX is where every file's content lives, keyed by its own SHA-256 hash rather than its
+// vault path: a rename touches no bytes (the manifest's path just points at the same key), a
+// duplicate attachment stores once (two paths, one key), and a delete never destroys bytes (the
+// manifest simply stops pointing at them; the blob is recoverable for as long as any retained
+// manifest, past or present, still names its hash). It sits under RESERVED_PREFIX, so blobs never
+// re-enter a sync as vault files.
+export const BLOB_PREFIX = ".geode/blobs/";
+
 // MANIFEST_KEY is the well known remote object holding the last synced snapshot, geode's source
-// of truth for "what does the other side think exists". Reserved: never treated as a real vault
-// path, on either side, even if a vault happens to contain a file at this exact path.
+// of truth for both "what does the other side think exists" and, since a FileState already pairs
+// a path with its content hash, "which blob a path's content lives at". Reserved: never treated
+// as a real vault path, on either side, even if a vault happens to contain a file at this exact
+// path.
 export const MANIFEST_KEY = ".geode/manifest.json";
 
-// RESERVED_PREFIX namespaces geode's own bookkeeping in the bucket: the manifest, and the trashed
-// copies of deleted objects. Nothing under it is ever a real vault file to sync, list as an
-// orphan, or diff, on either side, even if a vault happens to hold a file at a colliding path.
+// RESERVED_PREFIX namespaces geode's own bookkeeping in the bucket: the manifest and the content
+// addressed blobs. Nothing under it is ever a real vault file to sync, list as an orphan, or
+// diff, on either side, even if a vault happens to hold a file at a colliding path.
 export const RESERVED_PREFIX = ".geode/";
-
-// TRASH_PREFIX is where a pushed deletion parks the object before removing it from its live key,
-// giving a mistaken delete a recovery window instead of destroying the bytes outright (#53). It
-// sits under RESERVED_PREFIX, so trashed copies never re-enter a sync as vault files.
-export const TRASH_PREFIX = ".geode/trash/";
 
 // SyncAction is one thing a sync needs to do to bring local and remote back in step. A conflict
 // carries deletedSide so executeSyncPlan never has to guess, from a failed read, whether a deleted
@@ -31,6 +36,12 @@ export type SyncAction =
   | { kind: "pull"; path: string }
   | { kind: "pullDelete"; path: string }
   | { kind: "conflict"; path: string; deletedSide: "local" | "remote" | "none" };
+
+// blobKeyFor returns the reserved key content with the given hash lives at, the same key
+// regardless of which path, or how many paths, currently point at it.
+export function blobKeyFor(hash: string): string {
+  return `${BLOB_PREFIX}${hash}`;
+}
 
 // conflictCopyPath returns the name a locally diverged file is renamed to before the remote
 // version claims the original path, so neither edit is ever silently discarded. The extension,
@@ -139,17 +150,6 @@ export function planSync(previous: Snapshot, local: Snapshot, remote: Snapshot):
   }
 
   return actions;
-}
-
-// trashKeyFor returns the reserved key a pushed deletion parks path at before removing the live
-// object, timestamped so a later delete of a recreated path never overwrites an earlier trashed
-// copy. The original path is preserved under the stamped folder, so a recovery can see where the
-// object came from. now is passed in rather than read internally so the key is deterministic under
-// test, matching conflictCopyPath.
-export function trashKeyFor(path: string, now: number): string {
-  const stamp = new Date(now).toISOString().replace(/[:.]/g, "-");
-
-  return `${TRASH_PREFIX}${stamp}/${path}`;
 }
 
 // changesByPath builds a lookup from path to change, for matching a local change against a

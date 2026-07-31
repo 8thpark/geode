@@ -129,22 +129,31 @@ test("encodeSnapshot: the wire format carries the version marker and round-trips
   assert.deepEqual(decodeSnapshot(raw), { ok: true, snapshot });
 });
 
-test("decodeSnapshot: version handling accepts the marker, treats absence as version 1, and refuses the unknown", () => {
+test("decodeSnapshot: only the current version is accepted; version 1, missing, and newer are all refused", () => {
   const files = [{ path: "a.md", size: 1, mtime: 2, hash: "h" }];
   const cases: { name: string; raw: string; want: DecodedSnapshot }[] = [
     {
       name: "the current versioned format",
-      raw: JSON.stringify({ version: 1, files }),
+      raw: JSON.stringify({ version: 2, files }),
       want: { ok: true, snapshot: { files } },
     },
     {
-      name: "a pre-marker snapshot with no version field, version 1 by definition",
+      // Version 1, plaintext path keyed storage, predates the marker (#91) and is version 1 by
+      // definition. Its JSON shape is identical to version 2's (both are `{files: [...]}`), only
+      // the marker distinguishes them, so this build refuses it rather than misread its paths as
+      // content addressed keys.
+      name: "a pre-marker snapshot with no version field",
       raw: JSON.stringify({ files }),
-      want: { ok: true, snapshot: { files } },
+      want: { ok: false, reason: "unsupportedVersion" },
+    },
+    {
+      name: "an explicit version 1, plaintext path keyed storage",
+      raw: JSON.stringify({ version: 1, files }),
+      want: { ok: false, reason: "unsupportedVersion" },
     },
     {
       name: "a version from a newer build",
-      raw: JSON.stringify({ version: 2, files }),
+      raw: JSON.stringify({ version: 3, files }),
       want: { ok: false, reason: "unsupportedVersion" },
     },
     {
@@ -152,7 +161,7 @@ test("decodeSnapshot: version handling accepts the marker, treats absence as ver
       // itself (files as an encrypted blob, say), and it must read as "needs a newer build",
       // never as corrupt.
       name: "a newer version whose shape this build does not understand",
-      raw: JSON.stringify({ version: 2, files: "ciphertext" }),
+      raw: JSON.stringify({ version: 3, files: "ciphertext" }),
       want: { ok: false, reason: "unsupportedVersion" },
     },
     {
@@ -162,8 +171,16 @@ test("decodeSnapshot: version handling accepts the marker, treats absence as ver
     },
     { name: "bytes that aren't JSON", raw: "not json", want: { ok: false, reason: "corrupt" } },
     {
-      name: "JSON of the wrong shape",
-      raw: JSON.stringify({ version: 1 }),
+      name: "JSON of the wrong shape at the current version",
+      raw: JSON.stringify({ version: 2 }),
+      want: { ok: false, reason: "corrupt" },
+    },
+    {
+      // Genuinely malformed data with no version field must still read as corrupt, not as "an old
+      // but well formed version 1 manifest": shape is checked before the missing-version case is
+      // resolved to unsupportedVersion.
+      name: "JSON of the wrong shape with no version field",
+      raw: JSON.stringify({}),
       want: { ok: false, reason: "corrupt" },
     },
   ];

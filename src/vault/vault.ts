@@ -3,8 +3,14 @@ import { endpointFor, type GeodeSettings, regionFor } from "../settings/settings
 // SNAPSHOT_VERSION is the format version stamped into every serialized snapshot, remote manifest
 // and local state.json alike, so a future format change (encryption, chunked upload) has
 // something to branch on when it meets an existing bucket (#91). A serialized snapshot with no
-// version field predates the marker and is this same format, version 1.
-export const SNAPSHOT_VERSION = 1;
+// version field predates the marker and is version 1, plaintext path keyed storage. Version 2
+// moved file content off the vault path and onto a content addressed key under the manifest's own
+// bucket (`.geode/blobs/<hash>`, see sync/plan.ts); a version 1 manifest is refused rather than
+// read, since its paths point at objects this build never looks for again, and reading it as
+// version 2 would plan every push and pull against keys that were never written. There is no
+// migration path at this version: a bucket written before this change needs a fresh bucket, not an
+// upgrade.
+export const SNAPSHOT_VERSION = 2;
 
 // SNAPSHOT_BYTE_BUDGET caps how many bytes takeSnapshot buffers across its concurrent reads, low
 // enough that a vault of large attachments cannot pile eight full files into memory at once and
@@ -85,11 +91,13 @@ export function byPath(files: FileState[]): Map<string, FileState> {
 }
 
 // decodeSnapshot parses a serialized snapshot (a remote manifest, a local state.json) and checks
-// its format version. A missing version is accepted as version 1, the format every build before
-// the marker existed wrote; any other unknown version is refused rather than guessed at, so this
-// build never misreads a bucket written in a newer format as garbage or, worse, as valid. The
-// version check runs before the shape check on purpose: a future format is free to change the
-// shape itself, and its snapshots must still read as "needs a newer build", never as corrupt.
+// its format version. An explicit version other than SNAPSHOT_VERSION is refused before the shape
+// is even looked at: a future format is free to change the shape itself (files as an encrypted
+// blob, say), and its snapshots must still read as "needs a different build", never as corrupt.
+// A missing version field means version 1, the format every build before the marker existed
+// wrote, and shares version 2's JSON shape exactly (`{files: [...]}`), so the two can only be
+// told apart by the marker itself; that check runs after the shape check, so a merely malformed
+// payload with no version field still reads as corrupt rather than as a well formed old manifest.
 // The returned snapshot carries only the in-memory shape; the version is a wire concern that
 // encodeSnapshot stamps back on at the next write.
 export function decodeSnapshot(raw: string): DecodedSnapshot {
@@ -108,6 +116,9 @@ export function decodeSnapshot(raw: string): DecodedSnapshot {
   }
   if (!isSnapshot(parsed)) {
     return { ok: false, reason: "corrupt" };
+  }
+  if (version === undefined) {
+    return { ok: false, reason: "unsupportedVersion" };
   }
   const settingsFingerprint = (parsed as { settingsFingerprint?: unknown }).settingsFingerprint;
   const fingerprintStr = typeof settingsFingerprint === "string" ? settingsFingerprint : undefined;
