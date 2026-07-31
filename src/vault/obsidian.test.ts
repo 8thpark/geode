@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { DataAdapter } from "obsidian";
+import type { DataAdapter, Workspace } from "obsidian";
 import { DEFAULT_SETTINGS } from "../settings/settings.ts";
-import { createObsidianLocalWriter, createObsidianStore } from "./obsidian.ts";
+import { createObsidianLocalWriter, createObsidianStore, flushOpenEditors } from "./obsidian.ts";
 import { fingerprintSettings, type Snapshot } from "./vault.ts";
 
 // fakeAdapter returns a DataAdapter whose exists/read/write operate over one in-memory file map,
@@ -344,4 +344,46 @@ test("createObsidianStore: a state file from a newer format version reads back a
   );
 
   assert.deepEqual(await store.read(), empty);
+});
+
+// fakeWorkspace returns a Workspace whose getLeavesOfType("markdown") yields one leaf per entry in
+// views, enough to drive flushOpenEditors without the rest of the Workspace surface.
+function fakeWorkspace(views: unknown[]): Workspace {
+  const workspace = {
+    getLeavesOfType: (type: string) => {
+      if (type !== "markdown") {
+        return [];
+      }
+      return views.map((view) => ({ view }));
+    },
+  };
+  return workspace as unknown as Workspace;
+}
+
+test("flushOpenEditors: saves every open markdown leaf", async () => {
+  const saved: string[] = [];
+  const views = [{ save: async () => saved.push("a") }, { save: async () => saved.push("b") }];
+
+  await flushOpenEditors(fakeWorkspace(views));
+
+  assert.deepEqual(saved.sort(), ["a", "b"]);
+});
+
+test("flushOpenEditors: a leaf whose view has no save method is skipped, not treated as an error", async () => {
+  const saved: string[] = [];
+  const views = [{ save: async () => saved.push("a") }, { otherMethod: () => {} }];
+
+  await flushOpenEditors(fakeWorkspace(views));
+
+  assert.deepEqual(saved, ["a"]);
+});
+
+test("flushOpenEditors: no open markdown leaves is a no-op", async () => {
+  await flushOpenEditors(fakeWorkspace([]));
+});
+
+test("flushOpenEditors: a save failure rejects rather than being swallowed", async () => {
+  const views = [{ save: async () => Promise.reject(new Error("disk full")) }];
+
+  await assert.rejects(flushOpenEditors(fakeWorkspace(views)), /disk full/);
 });
