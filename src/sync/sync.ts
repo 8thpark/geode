@@ -166,30 +166,38 @@ export async function syncOnce(
   // (one HEAD, no re-upload) and the manifest this pass writes describes it correctly. What
   // remains dangerous is a survivor whose hash matches nothing local: unexplained content this
   // device cannot account for, most plausibly a different vault's data that once shared this
-  // bucket, or the very race #109 first named. Building a manifest that silently ignores it would
-  // make that content unreachable forever, the same failure #109 fixed, just for content the local
-  // vault never had, so this refuses loudly and names it rather than guessing it away.
+  // bucket, or the very race #109 first named.
+  //
+  // This is reported rather than refused outright. An earlier version blocked the whole pass on
+  // any unexplained survivor, but that has no path back to a clean state when the explanation is
+  // mundane rather than sinister: an interrupted first sync leaves a blob behind, the local file
+  // it belonged to is deleted before the retry, and now nothing local will ever explain it again.
+  // Since remote.firstSync only flips to false once a manifest actually lands, a hard refusal here
+  // never writes one, so every retry hits the identical refusal forever, a permanent deadlock over
+  // an entirely ordinary local edit, worse than the silent stranding #109 fixed. Proceeding lets a
+  // real first sync complete and end firstSync state, at the cost that content #109 would have
+  // caught explicitly now stays unreferenced instead: still sitting in the bucket, never destroyed,
+  // just unreachable through any manifest until someone notices this failure and investigates.
   const remoteView = remote.snapshot;
+  const strandedFailures: SyncFailure[] = [];
   if (remote.firstSync) {
     const listed = await storage.listObjects(BLOB_PREFIX);
     if (!listed.ok) {
       return { ok: false, message: listed.message, failures: [], snapshot: null };
     }
-    const unexplained = unexplainedBlobs(listed.objects, local);
-    if (unexplained.length > 0) {
-      const failures: SyncFailure[] = [];
-      for (const key of unexplained) {
-        failures.push({ path: key, message: "in the bucket but not in the local vault" });
-      }
-      return {
-        ok: false,
-        message: "bucket has content but no manifest; sync would strand it",
-        failures,
-        snapshot: null,
-      };
+    for (const key of unexplainedBlobs(listed.objects, local)) {
+      strandedFailures.push({ path: key, message: "in the bucket but not in the local vault" });
     }
   }
 
+  // A pull family action re-checks this etag immediately before it writes fetched content locally
+  // (execute.ts's manifestDrifted), so a manifest another device replaces mid pass is caught before
+  // stale content lands on disk rather than only afterward, when this pass's own manifest upload
+  // fails. null on a first sync: there is no manifest yet for a pull to have gone stale against.
+  let manifestEtag: string | null = null;
+  if (!remote.firstSync) {
+    manifestEtag = remote.etag;
+  }
   const actions = planSync(ancestor, local, remoteView);
   const executed = await executeSyncPlan(
     actions,
@@ -199,6 +207,7 @@ export async function syncOnce(
     storage,
     now,
     remoteView,
+    manifestEtag,
   );
 
   // The manifest is derived from what the plan just did to the bucket, never from a fresh disk
@@ -248,11 +257,15 @@ export async function syncOnce(
 
   // The count comes from failed (one entry per planned path), not failures: a conflict can report
   // two operation failures (copy push and pull) for the same file, and the message counts files.
-  if (executed.failed.length > 0) {
+  // strandedFailures adds to it without adding to failed: there is no action, planned or
+  // otherwise, for a path a stranded blob doesn't have, so there is nothing for revertFailedPaths
+  // to revert; it is folded in here purely so the pass reports itself failed and names what it
+  // could not explain, rather than returning ok on a first sync that left content unreferenced.
+  if (executed.failed.length > 0 || strandedFailures.length > 0) {
     return {
       ok: false,
-      message: `${executed.failed.length} file(s) failed to sync`,
-      failures: executed.failures,
+      message: `${executed.failed.length + strandedFailures.length} file(s) failed to sync`,
+      failures: [...executed.failures, ...strandedFailures],
       snapshot: revertFailedPaths(final, ancestor, executed.failed),
     };
   }

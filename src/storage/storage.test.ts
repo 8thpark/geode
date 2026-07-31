@@ -43,7 +43,7 @@ function probeStub(over: Partial<StorageClient>): StorageClient {
       body: new Uint8Array(),
       etag: '"probe"',
     }),
-    headObject: async () => ({ ok: true, status: "ok", message: "" }),
+    headObject: async () => ({ ok: true, status: "ok", message: "", etag: '"probe"' }),
     deleteObject: async () => ({ ok: true, status: "ok", message: "" }),
     listObjects: async () => ({ ok: true, status: "ok", message: "", objects: [] }),
   };

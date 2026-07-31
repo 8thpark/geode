@@ -211,13 +211,16 @@ test("syncOnce: a present but empty manifest still trusts the ancestor and pulls
   assert.equal(files.has("a.md"), false);
 });
 
-test("syncOnce: a missing manifest with unexplained blobs refuses, never strands them", async () => {
-  // Reproduces #109 for content addressed storage. A lifecycle rule or manual cleanup deleted the
-  // manifest while a blob survived, and its hash matches nothing in this device's local vault: this
-  // device cannot say what path, if any, that content used to live at. Before the fix this read as
-  // a clean first sync: the pass pushed local files and wrote a manifest that never mentioned the
-  // survivor, so no device would ever pull, list, or delete it again. The pass must refuse instead,
-  // naming the stranded key.
+test("syncOnce: a missing manifest with unexplained blobs reports and proceeds, rather than deadlocking every future sync", async () => {
+  // Reproduces #109 for content addressed storage, and the regression an outright refusal here
+  // caused. A lifecycle rule or manual cleanup deleted the manifest while a blob survived, and its
+  // hash matches nothing in this device's local vault: this device cannot say what path, if any,
+  // that content used to live at. A blanket refusal here never writes a manifest, so
+  // remote.firstSync stays true and every future attempt hits the identical refusal, forever, even
+  // once the explanation is entirely mundane (an interrupted first sync's blob, whose local file
+  // was deleted before the retry) rather than another vault's stray data. The pass must instead
+  // proceed, push what is local, and report the stranded content as a failure so a human can still
+  // notice it without every future sync being blocked on it.
   const strayHash = await hashOf("not local");
   const { storage, objects } = fakeStorage({ [blobKeyFor(strayHash)]: "not local" });
   const reader = fakeReader({ "a.md": "alpha" });
@@ -225,17 +228,21 @@ test("syncOnce: a missing manifest with unexplained blobs refuses, never strands
 
   const outcome = await syncOnce(empty, reader, writer, storage, 1);
 
-  assert.deepEqual(outcome, {
-    ok: false,
-    message: "bucket has content but no manifest; sync would strand it",
-    failures: [
-      { path: blobKeyFor(strayHash), message: "in the bucket but not in the local vault" },
-    ],
-    snapshot: null,
-  });
-  // Nothing was pushed and no manifest was invented.
-  assert.equal(objects.has(blobKeyFor(await hashOf("alpha"))), false);
-  assert.equal(objects.has(MANIFEST_KEY), false);
+  assert.ok(!outcome.ok);
+  assert.equal(outcome.message, "1 file(s) failed to sync");
+  assert.deepEqual(outcome.failures, [
+    { path: blobKeyFor(strayHash), message: "in the bucket but not in the local vault" },
+  ]);
+  // The local file still pushed and a manifest still landed, ending firstSync state; the stray
+  // blob is left exactly where it was, unreferenced but undestroyed.
+  assert.equal(objects.get(blobKeyFor(await hashOf("alpha"))), "alpha");
+  assert.equal(objects.has(MANIFEST_KEY), true);
+
+  // Because a manifest now exists, the next sync is an ordinary sync rather than a repeat of the
+  // same refusal: it completes cleanly, not deadlocked on content it will never be able to explain.
+  assert.ok(outcome.snapshot !== null);
+  const retry = await syncOnce(outcome.snapshot, reader, writer, storage, 1);
+  assert.equal(retry.ok, true);
 });
 
 test("syncOnce: an interrupted first sync's own uploads never block the retry", async () => {
@@ -515,6 +522,62 @@ test("syncOnce: a file edited mid sync is never overwritten by a pull, and the r
   assert.equal(files.get(copyPath), "edited mid sync");
   assert.equal(objects.get(blobKeyFor(await hashOf("edited mid sync"))), "edited mid sync");
   assert.equal(files.get("b.md"), "b v2");
+});
+
+test("syncOnce: a manifest that moves on mid pull is caught before stale content lands on disk", async () => {
+  // A blob fetched by its own hash always reads back exactly that content, so unlike the plaintext
+  // path keyed layout this replaced, a pull can never notice on its own that a newer manifest has
+  // since pointed the path at a different hash. Another device completes an entire sync (new
+  // content, new manifest) in the window between this pass reading the manifest and its pull's
+  // fetch finishing; the drift check right before the write must catch this rather than let the
+  // now stale content land on disk, only to be discovered afterward when this pass's own manifest
+  // upload fails.
+  const aV1Hash = await hashOf("a v1");
+  const aV2Hash = await hashOf("a v2");
+  const aV3Hash = await hashOf("a v3");
+  const ancestor = snapshot({ path: "a.md", size: 4, mtime: 1, hash: aV1Hash });
+  const remoteManifestV2 = encodeSnapshot(
+    snapshot({ path: "a.md", size: 4, mtime: 1, hash: aV2Hash }),
+  );
+  const { storage, objects } = fakeStorage({
+    [MANIFEST_KEY]: remoteManifestV2,
+    [blobKeyFor(aV2Hash)]: "a v2",
+  });
+  const reader = fakeReader({ "a.md": "a v1" });
+  const { writer, files } = fakeLocalWriter();
+  files.set("a.md", "a v1");
+
+  const inner = storage.getObject;
+  let raced = false;
+  storage.getObject = async (key) => {
+    if (key === blobKeyFor(aV2Hash) && !raced) {
+      raced = true;
+      // Another device wins outright: its own blob and manifest both land before this pass's pull
+      // gets to write anything locally.
+      await storage.putObject(blobKeyFor(aV3Hash), new TextEncoder().encode("a v3"));
+      await storage.putObject(
+        MANIFEST_KEY,
+        new TextEncoder().encode(encodeSnapshot(snapshot(file("a.md", aV3Hash)))),
+      );
+    }
+    return inner(key);
+  };
+
+  const outcome = await syncOnce(ancestor, reader, writer, storage, 1);
+
+  assert.ok(!outcome.ok);
+  assert.deepEqual(outcome.failures, [
+    { path: "a.md", message: "changed remotely mid sync; sync again to reconcile" },
+  ]);
+  // The stale v2 content was never written; the local file is untouched.
+  assert.equal(files.get("a.md"), "a v1");
+  assert.equal(objects.get(MANIFEST_KEY), encodeSnapshot(snapshot(file("a.md", aV3Hash))));
+
+  // The failed pass never advanced state.json, so the retry re-reads the now current manifest and
+  // pulls the real latest version.
+  const retry = await syncOnce(ancestor, reader, writer, storage, 1);
+  assert.equal(retry.ok, true);
+  assert.equal(files.get("a.md"), "a v3");
 });
 
 test("syncOnce: a failed push doesn't discard the progress of the rest of the pass", async () => {

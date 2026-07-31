@@ -38,11 +38,14 @@ export type GetResult = {
 };
 
 // HeadResult reports whether an object exists at a key, without transferring its body. Message is
-// the empty string when ok is true.
+// the empty string when ok is true. Etag is the object's ETag exactly as the server sent it,
+// mirroring GetResult, so a caller can detect the object changing underneath it without paying
+// for a body transfer; null when ok is false or the server sent none.
 export type HeadResult = {
   ok: boolean;
   status: ResultStatus;
   message: string;
+  etag: string | null;
 };
 
 // HttpResponse is the normalized reply a Transport returns: the HTTP status and the fully read
@@ -377,10 +380,11 @@ async function s3GetObject(
   };
 }
 
-// s3HeadObject reports whether key exists, without transferring the object's body. Used to check
-// for an already stored blob before uploading it: a content addressed key that already exists
-// holds, by construction, the exact bytes a caller would otherwise upload, so the upload can be
-// skipped entirely once its existence is confirmed.
+// s3HeadObject reports whether key exists, without transferring the object's body. Used both to
+// check for an already stored blob before uploading it (a content addressed key that already
+// exists holds, by construction, the exact bytes a caller would otherwise upload, so the upload
+// can be skipped entirely) and, via its etag, to detect a mutable key like the manifest changing
+// underneath a plan without paying for a body transfer.
 async function s3HeadObject(
   client: AwsClient,
   transport: Transport,
@@ -391,7 +395,7 @@ async function s3HeadObject(
   try {
     response = await send(client, transport, `${baseUrl}/${encodeKey(key)}`, { method: "HEAD" });
   } catch (err) {
-    return { ok: false, status: "network", message: messageFor(err) };
+    return { ok: false, status: "network", message: messageFor(err), etag: null };
   }
 
   if (!response.ok) {
@@ -399,9 +403,10 @@ async function s3HeadObject(
       ok: false,
       status: statusForHttp(response.status),
       message: `Storage rejected the head (${response.status})`,
+      etag: null,
     };
   }
-  return { ok: true, status: "ok", message: "" };
+  return { ok: true, status: "ok", message: "", etag: response.header("etag") };
 }
 
 // s3ListObjects lists objects in the bucket, optionally restricted to a key prefix. S3 caps a

@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { hashBytes } from "../vault/vault.ts";
 import { executeSyncPlan } from "./execute.ts";
 import { empty, fakeLocalWriter, fakeReader, fakeStorage, file, snapshot } from "./fake.ts";
-import { blobKeyFor, conflictCopyPath, type SyncAction } from "./plan.ts";
+import { blobKeyFor, conflictCopyPath, MANIFEST_KEY, type SyncAction } from "./plan.ts";
 
 // hashOf returns the real content hash of text, for building local snapshots whose entries
 // executeSyncPlan's drift check can verify against a fake reader's live bytes, and for keying a
@@ -680,6 +680,91 @@ test("executeSyncPlan: pull with truncated body is refused and nothing is writte
     },
   ]);
   assert.equal(files.has("a.md"), false);
+});
+
+test("executeSyncPlan: pull refuses when the manifest has moved on, rather than writing stale content", async () => {
+  // A blob fetched by its own hash always reads back exactly that content, so unlike a plaintext
+  // path keyed read it can never itself notice a newer manifest having since pointed the path at
+  // a different hash. Passing an etag that no longer matches the manifest's current one simulates
+  // another device having completed a whole sync in the window between this pass reading the
+  // manifest and this pull committing its write.
+  const reader = fakeReader({});
+  const { writer, files } = fakeLocalWriter();
+  const hash = await hashOf("hello");
+  const { storage } = fakeStorage({ [blobKeyFor(hash)]: "hello", [MANIFEST_KEY]: "irrelevant" });
+  const remote = snapshot(file("a.md", hash));
+
+  const { failures } = await executeSyncPlan(
+    [{ kind: "pull", path: "a.md" }],
+    empty,
+    reader,
+    writer,
+    storage,
+    1,
+    remote,
+    '"stale-etag"',
+  );
+
+  assert.deepEqual(failures, [
+    { path: "a.md", message: "changed remotely mid sync; sync again to reconcile" },
+  ]);
+  assert.equal(files.has("a.md"), false);
+});
+
+test("executeSyncPlan: pull proceeds when the manifest etag still matches what the plan was made from", async () => {
+  const reader = fakeReader({});
+  const { writer, files } = fakeLocalWriter();
+  const hash = await hashOf("hello");
+  const { storage } = fakeStorage({ [blobKeyFor(hash)]: "hello", [MANIFEST_KEY]: "current" });
+  const remote = snapshot(file("a.md", hash));
+  const manifestHead = await storage.headObject(MANIFEST_KEY);
+
+  const { failures } = await executeSyncPlan(
+    [{ kind: "pull", path: "a.md" }],
+    empty,
+    reader,
+    writer,
+    storage,
+    1,
+    remote,
+    manifestHead.etag,
+  );
+
+  assert.deepEqual(failures, []);
+  assert.equal(files.get("a.md"), "hello");
+});
+
+test("executeSyncPlan: a conflict restore refuses when the manifest has moved on, and the local edit survives as a copy", async () => {
+  const reader = fakeReader({ "a.md": "local edit" });
+  const { writer, files } = fakeLocalWriter();
+  files.set("a.md", "local edit");
+  const hash = await hashOf("remote edit");
+  const { storage, objects } = fakeStorage({
+    [blobKeyFor(hash)]: "remote edit",
+    [MANIFEST_KEY]: "irrelevant",
+  });
+  const remote = snapshot(file("a.md", hash));
+  const now = Date.parse("2026-07-14T10:00:00.000Z");
+
+  const { failures } = await executeSyncPlan(
+    [{ kind: "conflict", path: "a.md", deletedSide: "none" }],
+    empty,
+    reader,
+    writer,
+    storage,
+    now,
+    remote,
+    '"stale-etag"',
+  );
+
+  assert.deepEqual(failures, [
+    { path: "a.md", message: "changed remotely mid sync; sync again to reconcile" },
+  ]);
+  // The local edit was already renamed and pushed as a copy before the drift was caught, so it is
+  // never lost; only the stale remote restore is refused.
+  assert.equal(files.get("a.md"), undefined);
+  assert.equal(files.get(conflictCopyPath("a.md", now)), "local edit");
+  assert.equal(objects.get(blobKeyFor(await hashOf("local edit"))), "local edit");
 });
 
 test("executeSyncPlan: conflict restore with hash mismatch is refused and nothing is written", async () => {

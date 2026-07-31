@@ -122,9 +122,19 @@ export function fakeStorage(objects: Record<string, string> = {}): {
     },
     headObject: async (key): Promise<HeadResult> => {
       if (!store.has(key)) {
-        return { ok: false, status: "not_found", message: "Storage rejected the head (404)" };
+        return {
+          ok: false,
+          status: "not_found",
+          message: "Storage rejected the head (404)",
+          etag: null,
+        };
       }
-      return { ok: true, status: "ok", message: "" };
+      let etag: string | null = null;
+      const stored = etags.get(key);
+      if (stored !== undefined) {
+        etag = stored;
+      }
+      return { ok: true, status: "ok", message: "", etag };
     },
     deleteObject: async (key): Promise<DeleteResult> => {
       store.delete(key);

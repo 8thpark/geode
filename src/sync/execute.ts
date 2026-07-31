@@ -1,12 +1,13 @@
 import type { StorageClient } from "../storage/storage.ts";
 import { byPath, type FileState, hashBytes, type Reader, type Snapshot } from "../vault/vault.ts";
-import { blobKeyFor, conflictCopyPath, type SyncAction } from "./plan.ts";
+import { blobKeyFor, conflictCopyPath, MANIFEST_KEY, type SyncAction } from "./plan.ts";
 
 // DRIFT_MESSAGE is the failure reported when a local file changed after the snapshot an action
 // was planned from; the next sync re-snapshots and replans the path as a conflict.
 const DRIFT_MESSAGE = "changed locally mid sync; sync again to reconcile";
 
 const HASH_MISMATCH_MESSAGE = "fetched bytes do not match manifest hash; sync again to reconcile";
+const MANIFEST_DRIFT_MESSAGE = "changed remotely mid sync; sync again to reconcile";
 const MANIFEST_MISSING_HASH_MESSAGE = "manifest missing expected hash for this path";
 
 // ExecuteResult reports what executeSyncPlan carried out: completed holds every action fully
@@ -14,12 +15,15 @@ const MANIFEST_MISSING_HASH_MESSAGE = "manifest missing expected hash for this p
 // the FileState of every path a blob now exists under, hashed from those exact bytes. pushedFiles
 // is not limited to completed actions: a conflict's copy push can succeed even when the rest of
 // that same action later fails, and the copy still needs to reach the manifest. There is no
-// concurrency flag: every write here is either additive (a blob keyed by its own hash, which a
-// losing race still leaves holding the right bytes) or, for a delete, touches no bucket object at
-// all (see the pushDelete branch of executeAction), so no per file operation can ever discover that
-// the plan's remote view went stale mid pass. The one CAS the plan still depends on is the
-// manifest's own conditional PUT (sync.ts), which remains the sole and sufficient guard against two
-// devices syncing at overlapping times.
+// concurrency flag: a write here is either additive (a blob keyed by its own hash, which a losing
+// race still leaves holding the right bytes) or, for a delete, touches no bucket object at all (see
+// the pushDelete branch of executeAction), so neither can ever discover that the plan's remote view
+// went stale mid pass. A pull family read is different: it fetches a specific blob by the hash the
+// plan already decided on, which by construction always "succeeds" with exactly that content, so it
+// can never notice on its own that a newer manifest has since pointed the path elsewhere; that is
+// what manifestDrifted checks for immediately before each such write. The one CAS the plan
+// ultimately depends on either way is the manifest's own conditional PUT (sync.ts), the backstop
+// that still catches anything a mid pass check's own race window lets through.
 export type ExecuteResult = {
   completed: SyncAction[];
   failed: SyncAction[];
@@ -52,7 +56,10 @@ type ActionResult = {
 // was made from, so each destructive local write can first check the file hasn't changed since
 // (#86). now is passed in rather than read internally so a conflict's copy name is deterministic
 // under test. remote is the manifest the plan was made from, giving each action the hash its
-// path is expected to hold; its empty default suits callers with no remote view.
+// path is expected to hold; its empty default suits callers with no remote view. manifestEtag is
+// the etag of that same manifest read, checked again immediately before a pull family write so a
+// manifest that moved on mid pass is caught before stale content lands on disk (see
+// manifestDrifted); null skips the check for callers with no manifest read to compare against.
 export async function executeSyncPlan(
   actions: SyncAction[],
   local: Snapshot,
@@ -61,6 +68,7 @@ export async function executeSyncPlan(
   storage: StorageClient,
   now: number,
   remote: Snapshot = { files: [] },
+  manifestEtag: string | null = null,
 ): Promise<ExecuteResult> {
   const completed: SyncAction[] = [];
   const failed: SyncAction[] = [];
@@ -78,6 +86,7 @@ export async function executeSyncPlan(
       localWriter,
       storage,
       now,
+      manifestEtag,
     );
     // A conflict's copy push can succeed even when the rest of the action later fails (the pull,
     // its integrity check, or the local write), so pushed is gathered regardless of outcome: it
@@ -185,6 +194,7 @@ async function executeAction(
   localWriter: LocalWriter,
   storage: StorageClient,
   now: number,
+  manifestEtag: string | null,
 ): Promise<ActionResult> {
   if (action.kind === "push") {
     let bytes: Uint8Array;
@@ -225,6 +235,9 @@ async function executeAction(
     if (!fetched.ok) {
       return { failures: [fetched.failure], pushed: [] };
     }
+    if (await manifestDrifted(storage, manifestEtag)) {
+      return { failures: [{ path: action.path, message: MANIFEST_DRIFT_MESSAGE }], pushed: [] };
+    }
     const failure = await applyLocalWrite(action.path, () =>
       localWriter.writeFile(action.path, fetched.body),
     );
@@ -259,6 +272,9 @@ async function executeAction(
     const fetched = await pullBlob(storage, action.path, remoteByPath.get(action.path));
     if (!fetched.ok) {
       return { failures: [fetched.failure], pushed: [] };
+    }
+    if (await manifestDrifted(storage, manifestEtag)) {
+      return { failures: [{ path: action.path, message: MANIFEST_DRIFT_MESSAGE }], pushed: [] };
     }
     const failure = await applyLocalWrite(action.path, () =>
       localWriter.writeFile(action.path, fetched.body),
@@ -311,6 +327,10 @@ async function executeAction(
     failures.push(fetched.failure);
     return { failures, pushed: pushedFiles };
   }
+  if (await manifestDrifted(storage, manifestEtag)) {
+    failures.push({ path: action.path, message: MANIFEST_DRIFT_MESSAGE });
+    return { failures, pushed: pushedFiles };
+  }
   const writeFailure = await applyLocalWrite(action.path, () =>
     localWriter.writeFile(action.path, fetched.body),
   );
@@ -337,6 +357,24 @@ function localFailureMessage(err: unknown): string {
     return err.message;
   }
   return "local file operation failed";
+}
+
+// manifestDrifted reports whether the remote manifest has changed since the pass began, checked
+// immediately before a pull family write commits fetched content to disk. A blob fetched by its
+// own hash always reads back exactly that content, so unlike a plaintext path keyed read this can
+// never itself notice a newer manifest having since pointed the path at a different hash; the
+// manifest's own etag is the only signal left that the plan's remote view is stale. A HEAD, not a
+// full re-fetch, keeps this cheap enough to run before every such write, the same "check right
+// before the destructive write" shape checkLocalDrift already uses for the local side. A caller
+// with no manifest read to compare against (etag null) skips the check rather than treating a
+// missing baseline as drift.
+async function manifestDrifted(storage: StorageClient, etag: string | null): Promise<boolean> {
+  if (etag === null) {
+    return false;
+  }
+  const head = await storage.headObject(MANIFEST_KEY);
+
+  return !head.ok || head.etag !== etag;
 }
 
 // pullBlob reads the blob a path's expected FileState names and verifies it against that expected

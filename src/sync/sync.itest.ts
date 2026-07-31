@@ -383,13 +383,14 @@ test("sync: two devices syncing at overlapping times never silently delete a fil
   }
 });
 
-test("sync: a deleted manifest with unexplained blobs refuses a first sync instead of stranding them", async () => {
-  // Reproduces #109 for content addressed storage. A syncs a note up, then the manifest alone is
-  // deleted (a bucket lifecycle rule, manual cleanup, a partial restore) while its blob survives.
-  // B, never synced, then sees what looks like a first sync; its local vault has no file whose
-  // content explains that blob (a's note was never B's), so before the fix a naive first sync
-  // would push its own files and write a fresh manifest that never mentioned it, stranding it
-  // forever.
+test("sync: a deleted manifest with unexplained blobs reports and proceeds, rather than deadlocking B forever", async () => {
+  // Reproduces #109 for content addressed storage, and the regression an outright refusal here
+  // caused. A syncs a note up, then the manifest alone is deleted (a bucket lifecycle rule, manual
+  // cleanup, a partial restore) while its blob survives. B, never synced, then sees what looks
+  // like a first sync; its local vault has no file whose content explains that blob (a's note was
+  // never B's). A hard refusal here never writes a manifest, so every future attempt of B's would
+  // hit the identical refusal forever; the pass must instead proceed, push B's own files, and
+  // report the stranded content as a failure rather than silently going ok.
   await resetRemote();
   const a = newDevice();
   const b = newDevice();
@@ -402,30 +403,33 @@ test("sync: a deleted manifest with unexplained blobs refuses a first sync inste
 
     const outcome = await sync(b);
     assert.ok(!outcome.ok);
-    assert.equal(outcome.message, "bucket has content but no manifest; sync would strand it");
     const survivorKey = blobKeyFor(await hashOf("a's note"));
     assert.deepEqual(outcome.failures, [
       { path: survivorKey, message: "in the bucket but not in the local vault" },
     ]);
 
-    // Nothing was pushed and no manifest was written; A's blob is untouched.
+    // B's own file still pushed and a manifest still landed; A's blob is untouched, unreferenced
+    // but not destroyed.
     const kept = await storage.getObject(survivorKey);
     assert.equal(new TextDecoder().decode(kept.body ?? new Uint8Array()), "a's note");
-    assert.equal((await storage.getObject(blobKeyFor(await hashOf("b's note")))).ok, false);
-    assert.equal((await storage.getObject(MANIFEST_KEY)).ok, false);
+    assert.equal((await storage.getObject(blobKeyFor(await hashOf("b's note")))).ok, true);
+    assert.equal((await storage.getObject(MANIFEST_KEY)).ok, true);
+
+    // B is not stuck: the next sync is ordinary, not a repeat of the same refusal.
+    assert.equal((await sync(b)).ok, true);
   } finally {
     cleanup(a, b);
   }
 });
 
-test("sync: a deleted manifest over locally diverged content refuses rather than guessing a conflict", async () => {
+test("sync: a deleted manifest over locally diverged content reports and proceeds, rather than guessing a conflict", async () => {
   // A and B share a synced note, then the manifest alone is deleted (a lifecycle rule, manual
   // cleanup) and B edits the note before its next sync. Under the plaintext path keyed layout this
   // replaced, the surviving object's key was the path itself, so this case could be resolved
   // automatically as a conflict. Under content addressed storage the manifest was the only place
   // that ever recorded which path a hash belonged to, so B's now-edited local file no longer
-  // explains the surviving blob, and the pass must refuse rather than guess at a conflict it has
-  // no path information to construct.
+  // explains the surviving blob, and the pass has no path information left to construct a
+  // conflict from; it proceeds with B's edit as a plain push and reports the stranded original.
   await resetRemote();
   const a = newDevice();
   const b = newDevice();
@@ -439,13 +443,20 @@ test("sync: a deleted manifest over locally diverged content refuses rather than
 
     const outcome = await sync(b);
     assert.ok(!outcome.ok);
-    assert.equal(outcome.message, "bucket has content but no manifest; sync would strand it");
-
-    // Nothing was pushed and no manifest was written; A's original content is untouched.
     const survivorKey = blobKeyFor(await hashOf("from A"));
+    assert.deepEqual(outcome.failures, [
+      { path: survivorKey, message: "in the bucket but not in the local vault" },
+    ]);
+
+    // A's original content is untouched, unreferenced but not destroyed; B's edit still pushed
+    // under its own path.
     const kept = await storage.getObject(survivorKey);
     assert.equal(new TextDecoder().decode(kept.body ?? new Uint8Array()), "from A");
-    assert.equal((await storage.getObject(MANIFEST_KEY)).ok, false);
+    assert.equal(await readLocal(b, "ten/note.md"), "B's own edit");
+    assert.equal((await storage.getObject(MANIFEST_KEY)).ok, true);
+
+    // B is not stuck: the next sync is ordinary, not a repeat of the same refusal.
+    assert.equal((await sync(b)).ok, true);
   } finally {
     cleanup(a, b);
   }

@@ -121,6 +121,7 @@ test("headObject reports ok for an existing key without returning a body", async
   const headResult = await client.headObject(key);
   assert.equal(headResult.ok, true);
   assert.equal(headResult.status, "ok");
+  assert.notEqual(headResult.etag, null);
 
   await client.deleteObject(key);
 });
