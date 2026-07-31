@@ -708,7 +708,7 @@ test("executeSyncPlan: conflict with hash mismatch on remote restore is reported
   const remote = snapshot(file("a.md", await hashOf("correct content")));
   const now = Date.parse("2026-07-14T10:00:00.000Z");
 
-  const { failures } = await executeSyncPlan(
+  const { failures, completed, pushedFiles } = await executeSyncPlan(
     [{ kind: "conflict", path: "a.md", deletedSide: "none" }],
     empty,
     reader,
@@ -728,4 +728,15 @@ test("executeSyncPlan: conflict with hash mismatch on remote restore is reported
   assert.equal(files.get("a.md"), undefined);
   assert.equal(files.get(conflictCopyPath("a.md", now)), "local edit");
   assert.equal(objects.get(conflictCopyPath("a.md", now)), "local edit");
+  // The action is reported failed, never completed, but the copy really did land in the bucket:
+  // pushedFiles must still carry it, or the manifest built from it would never know it's there.
+  assert.deepEqual(completed, []);
+  assert.deepEqual(pushedFiles, [
+    {
+      path: conflictCopyPath("a.md", now),
+      size: "local edit".length,
+      mtime: now,
+      hash: await hashOf("local edit"),
+    },
+  ]);
 });

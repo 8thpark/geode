@@ -45,54 +45,30 @@ export function conflictCopyPath(path: string, now: number): string {
   return `${path.slice(0, lastDot)} (conflicted copy ${stamp})${path.slice(lastDot)}`;
 }
 
-// manifestAfterSync returns the snapshot of what the bucket holds once every action in the plan
-// has succeeded: remote as it was read, minus pushed deletions, plus every file and conflict copy
-// pushed, each recorded at the hash executeSyncPlan hashed from the bytes it actually uploaded
-// (pushed), never a pre-push snapshot. A file edited in the window between the snapshot and the
-// push's own read would otherwise leave the manifest naming older content than the bucket really
-// holds, which every other device's verifyFetch then rejects as a hash mismatch until this device
-// happens to sync again — indefinitely, if it stays offline. It is computed from the plan rather
-// than re-snapshotted from disk so the manifest can never record content the bucket does not have
-// (#84): a file that changed while the plan ran keeps its bucket entry, and the next sync sees
-// the drift as a local change and pushes it.
+// manifestAfterSync returns the snapshot of what the bucket holds once the pass has run: remote
+// as it was read, minus every path a completed pushDelete removed, plus an entry for every
+// FileState pushed carries, keyed by the exact bytes executeSyncPlan actually wrote to the bucket
+// rather than a pre-push snapshot or an action's own success. A conflict's copy push can succeed
+// even when the conflict as a whole later fails to restore the remote version (the pull, its
+// integrity check, or the local write can each fail on their own); the copy still landed in the
+// bucket, and pushed carries its entry regardless, so leaving it out here would strand that
+// object, invisible to every other device, until this same device happened to sync again,
+// indefinitely if it never did. completed is only consulted for pushDelete, since a failed
+// pushDelete means the live object may still be there and its entry must stand.
 export function manifestAfterSync(
   remote: Snapshot,
-  actions: SyncAction[],
+  completed: SyncAction[],
   pushed: FileState[],
-  now: number,
 ): Snapshot {
   const files = byPath(remote.files);
-  const pushedByPath = byPath(pushed);
 
-  for (const action of actions) {
-    // pull and pullDelete only change the local vault; the bucket is untouched.
-    if (action.kind === "pull" || action.kind === "pullDelete") {
-      continue;
-    }
+  for (const action of completed) {
     if (action.kind === "pushDelete") {
       files.delete(action.path);
-      continue;
     }
-    if (action.kind === "push") {
-      // A completed push always reports the file it uploaded, so a miss here would mean
-      // executeSyncPlan broke that invariant.
-      const entry = pushedByPath.get(action.path);
-      if (entry !== undefined) {
-        files.set(action.path, entry);
-      }
-      continue;
-    }
-    // conflict: a local deletion pushes nothing, the remote entry stands as is. The other two
-    // sides push the local edit under its conflict copy name; the original path is already
-    // correct in remote (present for deletedSide "none", absent for "remote").
-    if (action.deletedSide === "local") {
-      continue;
-    }
-    const copyPath = conflictCopyPath(action.path, now);
-    const entry = pushedByPath.get(copyPath);
-    if (entry !== undefined) {
-      files.set(copyPath, entry);
-    }
+  }
+  for (const entry of pushed) {
+    files.set(entry.path, entry);
   }
 
   return { files: [...files.values()] };

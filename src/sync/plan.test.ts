@@ -114,7 +114,7 @@ test("manifestAfterSync: a push records the pushed file's entry", () => {
   const remote = snapshot(file("a.md", "h1"), file("b.md", "h3"));
   const pushed = [file("a.md", "h2")];
 
-  const result = manifestAfterSync(remote, [{ kind: "push", path: "a.md" }], pushed, 1);
+  const result = manifestAfterSync(remote, [{ kind: "push", path: "a.md" }], pushed);
 
   assert.deepEqual(result, snapshot(file("a.md", "h2"), file("b.md", "h3")));
 });
@@ -127,7 +127,7 @@ test("manifestAfterSync: a push whose bytes drifted past the snapshot still reco
   const remote = snapshot(file("a.md", "h1"));
   const pushed = [file("a.md", "h2")];
 
-  const result = manifestAfterSync(remote, [{ kind: "push", path: "a.md" }], pushed, 1);
+  const result = manifestAfterSync(remote, [{ kind: "push", path: "a.md" }], pushed);
 
   assert.deepEqual(result, snapshot(file("a.md", "h2")));
 });
@@ -135,9 +135,19 @@ test("manifestAfterSync: a push whose bytes drifted past the snapshot still reco
 test("manifestAfterSync: a pushDelete removes the entry", () => {
   const remote = snapshot(file("a.md", "h1"), file("b.md", "h3"));
 
-  const result = manifestAfterSync(remote, [{ kind: "pushDelete", path: "a.md" }], [], 1);
+  const result = manifestAfterSync(remote, [{ kind: "pushDelete", path: "a.md" }], []);
 
   assert.deepEqual(result, snapshot(file("b.md", "h3")));
+});
+
+test("manifestAfterSync: a failed pushDelete leaves the entry standing", () => {
+  // A pushDelete that never completed (the trash copy or the delete itself failed) must not be
+  // taken as evidence the object is gone: it may still be sitting there untouched.
+  const remote = snapshot(file("a.md", "h1"));
+
+  const result = manifestAfterSync(remote, [], []);
+
+  assert.deepEqual(result, remote);
 });
 
 test("manifestAfterSync: pull and pullDelete leave the bucket, and so the manifest, untouched", () => {
@@ -150,7 +160,6 @@ test("manifestAfterSync: pull and pullDelete leave the bucket, and so the manife
       { kind: "pullDelete", path: "b.md" },
     ],
     [],
-    1,
   );
 
   assert.deepEqual(result, remote);
@@ -159,29 +168,42 @@ test("manifestAfterSync: pull and pullDelete leave the bucket, and so the manife
 test("manifestAfterSync: a content conflict keeps the remote entry and adds the pushed copy", () => {
   const now = Date.parse("2026-07-14T10:00:00.000Z");
   const remote = snapshot(file("a.md", "h3"));
-  const copyPath = "a (conflicted copy 2026-07-14T10-00-00-000Z).md";
+  const copyPath = conflictCopyPath("a.md", now);
   const pushed = [{ ...file("a.md", "h2"), path: copyPath }];
 
   const result = manifestAfterSync(
     remote,
     [{ kind: "conflict", path: "a.md", deletedSide: "none" }],
     pushed,
-    now,
   );
 
   assert.deepEqual(result, snapshot(file("a.md", "h3"), { ...file("a.md", "h2"), path: copyPath }));
 });
 
+test("manifestAfterSync: a conflict's pushed copy is recorded even when the action itself is absent from completed", () => {
+  // Reproduces the gap from #177: a conflict's copy push can succeed while the rest of the action
+  // (the pull, its integrity check, or the local write) later fails, so the action never appears
+  // in completed. The copy still landed in the bucket, and pushed must be enough on its own to
+  // land it in the manifest, or the object sits there forever, invisible to every other device.
+  const now = Date.parse("2026-07-14T10:00:00.000Z");
+  const remote = snapshot(file("a.md", "h1"));
+  const copyPath = conflictCopyPath("a.md", now);
+  const pushed = [{ ...file("a.md", "h2"), path: copyPath }];
+
+  const result = manifestAfterSync(remote, [], pushed);
+
+  assert.deepEqual(result, snapshot(file("a.md", "h1"), { ...file("a.md", "h2"), path: copyPath }));
+});
+
 test("manifestAfterSync: a remote deletion conflict records only the pushed copy", () => {
   const now = Date.parse("2026-07-14T10:00:00.000Z");
-  const copyPath = "a (conflicted copy 2026-07-14T10-00-00-000Z).md";
+  const copyPath = conflictCopyPath("a.md", now);
   const pushed = [{ ...file("a.md", "h2"), path: copyPath }];
 
   const result = manifestAfterSync(
     empty,
     [{ kind: "conflict", path: "a.md", deletedSide: "remote" }],
     pushed,
-    now,
   );
 
   assert.deepEqual(result, snapshot({ ...file("a.md", "h2"), path: copyPath }));
@@ -194,7 +216,6 @@ test("manifestAfterSync: a local deletion conflict pushes nothing, the remote en
     remote,
     [{ kind: "conflict", path: "a.md", deletedSide: "local" }],
     [],
-    1,
   );
 
   assert.deepEqual(result, remote);

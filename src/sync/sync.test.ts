@@ -676,6 +676,37 @@ test("syncOnce: a failed push doesn't discard the progress of the rest of the pa
   assert.equal(bPushes, 1);
 });
 
+test("syncOnce: a conflict's copy push survives into the uploaded manifest even when the restore fails", async () => {
+  // Reproduces #177: the copy push succeeds, but the manifest claims a remote version that isn't
+  // actually there, so the restore's GET 404s and the conflict is reported failed overall. The
+  // copy still landed in the bucket; if the manifest this pass uploads doesn't name it, the object
+  // sits there forever, invisible to every other device, until this same one syncs again.
+  const ancestor = snapshot({ path: "a.md", size: 4, mtime: 1, hash: await hashOf("a v1") });
+  const remoteManifest = encodeSnapshot(
+    snapshot({ path: "a.md", size: 4, mtime: 1, hash: await hashOf("a v2") }),
+  );
+  const { storage, objects } = fakeStorage({ [MANIFEST_KEY]: remoteManifest });
+  const reader = fakeReader({ "a.md": "a local" });
+  const { writer } = fakeLocalWriter();
+  const now = 1;
+  const copyPath = conflictCopyPath("a.md", now);
+
+  const outcome = await syncOnce(ancestor, reader, writer, storage, now);
+
+  assert.ok(!outcome.ok);
+  assert.deepEqual(outcome.failures, [
+    { path: "a.md", message: "Storage rejected the read (404)" },
+  ]);
+  // The copy really did reach the bucket.
+  assert.equal(objects.get(copyPath), "a local");
+  // The uploaded manifest names it, even though the conflict as a whole is reported failed.
+  const manifestBody = objects.get(MANIFEST_KEY);
+  assert.ok(manifestBody !== undefined);
+  const manifest = JSON.parse(manifestBody) as Snapshot;
+  const hashes = new Map(manifest.files.map((f) => [f.path, f.hash]));
+  assert.equal(hashes.get(copyPath), await hashOf("a local"));
+});
+
 test("syncOnce: the failure message counts files, not operation failures", async () => {
   // A conflict whose copy push and pull both fail reports two operation failures for one vault
   // path. The user facing message must count the one file, not the two operations.

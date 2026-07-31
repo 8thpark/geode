@@ -14,8 +14,9 @@ const REMOTE_ETAG_MESSAGE = "remote object has no etag";
 // ExecuteResult reports what executeSyncPlan carried out: completed holds every action fully
 // applied, failed the actions that weren't, failures the per file detail of why, concurrent
 // whether a file precondition proved the remote snapshot stale, and pushedFiles the FileState of
-// every path a completed action actually wrote to the bucket, hashed from those exact bytes so
-// the manifest built from it never names content the bucket doesn't hold.
+// every path actually written to the bucket, hashed from those exact bytes. pushedFiles is not
+// limited to completed actions: a conflict's copy push can succeed even when the rest of that
+// same action later fails, and the copy still needs to reach the manifest.
 export type ExecuteResult = {
   completed: SyncAction[];
   concurrent: boolean;
@@ -83,11 +84,14 @@ export async function executeSyncPlan(
       storage,
       now,
     );
+    // A conflict's copy push can succeed even when the rest of the action later fails (the pull,
+    // its integrity check, or the local write), so pushed is gathered regardless of outcome: it
+    // names only bytes actually written to the bucket, never contingent on the action as a whole.
+    for (const file of actionResult.pushed) {
+      pushedFiles.push(file);
+    }
     if (actionResult.failures.length === 0) {
       completed.push(action);
-      for (const file of actionResult.pushed) {
-        pushedFiles.push(file);
-      }
       continue;
     }
     failed.push(action);
