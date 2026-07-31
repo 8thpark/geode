@@ -110,6 +110,26 @@ test("createObsidianLocalWriter: a pull is staged to a hidden temp file and rena
   ]);
 });
 
+test("createObsidianLocalWriter: a pull into a path whose ancestors don't exist creates every folder level, not just the immediate parent", async () => {
+  const { adapter, files, ops } = fakeWriterAdapter({
+    renameOverwrites: true,
+    stagedRenameFails: false,
+    writeBinaryFails: false,
+  });
+  const writer = createObsidianLocalWriter(adapter);
+
+  await writer.writeFile("a/b/c/d.md", bytes("pulled content"));
+
+  assert.equal(files.get("a/b/c/d.md"), "pulled content");
+  assert.deepEqual(ops, [
+    "mkdir a",
+    "mkdir a/b",
+    "mkdir a/b/c",
+    "writeBinary a/b/c/.d.md.geode-tmp",
+    "rename a/b/c/.d.md.geode-tmp -> a/b/c/d.md",
+  ]);
+});
+
 test("createObsidianLocalWriter: overwriting an existing file replaces it through the temp rename", async () => {
   const { adapter, files, ops } = fakeWriterAdapter(
     { renameOverwrites: true, stagedRenameFails: false, writeBinaryFails: false },
