@@ -148,17 +148,23 @@ export async function flushOpenEditors(workspace: Workspace): Promise<void> {
 }
 
 // ensureParentDir creates path's parent folder, and any folders above it, before a write that
-// might land somewhere the vault has never had a file before. mkdir is assumed to create
-// intermediate folders the same way Obsidian's own folder creation does.
+// might land somewhere the vault has never had a file before. Each folder level is created in
+// turn rather than left to a single adapter.mkdir call on the deepest one, since Obsidian's public
+// API leaves whether mkdir recurses through missing intermediate folders undocumented, and mobile
+// adapters (Capacitor) are not known to match desktop's behavior here.
 async function ensureParentDir(adapter: DataAdapter, path: string): Promise<void> {
   const lastSlash = path.lastIndexOf("/");
   if (lastSlash === -1) {
     return;
   }
   const dir = path.slice(0, lastSlash);
-  const exists = await adapter.exists(dir);
-  if (!exists) {
-    await adapter.mkdir(dir);
+  let current = "";
+  for (const segment of dir.split("/")) {
+    current = current === "" ? segment : `${current}/${segment}`;
+    const exists = await adapter.exists(current);
+    if (!exists) {
+      await adapter.mkdir(current);
+    }
   }
 }
 
