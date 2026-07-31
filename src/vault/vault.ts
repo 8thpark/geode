@@ -6,6 +6,12 @@ import { endpointFor, type GeodeSettings, regionFor } from "../settings/settings
 // version field predates the marker and is this same format, version 1.
 export const SNAPSHOT_VERSION = 1;
 
+// SNAPSHOT_BYTE_BUDGET caps how many bytes takeSnapshot buffers across its concurrent reads, low
+// enough that a vault of large attachments cannot pile eight full files into memory at once and
+// breach a mobile memory ceiling mid snapshot. A single file larger than this is still read (it
+// has to be, there is no streaming read on the platform), just never alongside another.
+const SNAPSHOT_BYTE_BUDGET = 64 * 1024 * 1024;
+
 // Change describes one path whose state differs between two snapshots.
 export type Change = {
   path: string;
@@ -34,13 +40,17 @@ export type FileState = {
   hash: string;
 };
 
-// Reader lists files present in the vault right now, reads their bytes, and answers whether a
-// path currently exists, so a failed read on a present file is never mistaken for absence. The
-// real implementation wraps Obsidian's Vault API (see obsidian.ts); tests use an in-memory fake.
+// Reader lists files present in the vault right now, reads their bytes, answers whether a path
+// currently exists (so a failed read on a present file is never mistaken for absence), and reports
+// a single path's current size on demand — fresher than the listing, so a snapshot can reserve
+// memory against what it is about to read rather than a size that may have grown since. A vanished
+// path reports size 0, letting the read that follows raise the real disappearance error. The real
+// implementation wraps Obsidian's Vault API (see obsidian.ts); tests use an in-memory fake.
 export type Reader = {
   fileExists: (path: string) => Promise<boolean>;
   listFiles: () => Promise<FileInfo[]>;
   readFile: (path: string) => Promise<Uint8Array>;
+  size: (path: string) => Promise<number>;
 };
 
 // Snapshot is every file geode saw the last time it took a snapshot.
@@ -54,6 +64,13 @@ export type Snapshot = {
 export type Store = {
   read: () => Promise<Snapshot>;
   write: (snapshot: Snapshot) => Promise<void>;
+};
+
+// Hold is a live byteSemaphore reservation: resize reconciles it to the bytes actually read, since
+// a file can grow between listing and read, and release returns them to the budget.
+type Hold = {
+  release: () => void;
+  resize: (bytes: number) => void;
 };
 
 // byPath builds a lookup from path to file state, for matching a live file against what the
@@ -183,31 +200,118 @@ export function isSnapshot(value: unknown): value is Snapshot {
 // file whose size and mtime both match the previous snapshot reuses that hash instead of
 // rereading content — the same stat gated hashing rsync, git, and Syncthing all use, since mtime
 // and size alone aren't reliable enough to trust as identity, but are cheap enough to skip a
-// rehash when neither has moved. Concurrency is bounded by limit to avoid unbounded memory
-// pressure on large vaults.
+// rehash when neither has moved. Reads run at most concurrency at a time and reserve against a
+// size read just before each read, so a vault of large attachments serialises rather than piling
+// full files into memory at once; a stat gated skip reads nothing and reserves nothing.
+//
+// The byte bound is not absolute. size and readFile are separate operations, so a file that grows
+// in the window between them still allocates its whole buffer past the reservation, and no whole
+// file reader can prevent that without a streaming read the mobile platform does not offer. The
+// concurrency cap is the hard backstop: at most that many buffers are ever resident at once.
 export async function takeSnapshot(
   reader: Reader,
   previous: Snapshot,
   concurrency = 8,
+  byteBudget = SNAPSHOT_BYTE_BUDGET,
 ): Promise<Snapshot> {
   const previousByPath = byPath(previous.files);
   const liveFiles = await reader.listFiles();
+  const budget = byteSemaphore(byteBudget);
 
   const files = await mapWithConcurrency(liveFiles, concurrency, async (file) => {
     const known = previousByPath.get(file.path);
     if (known !== undefined && known.size === file.size && known.mtime === file.mtime) {
       return known;
     }
-    const bytes = await reader.readFile(file.path);
-    return {
-      path: file.path,
-      size: file.size,
-      mtime: file.mtime,
-      hash: await hashBytes(bytes),
-    };
+
+    // Reserve against the size read now, not the one listed at the start of the pass, so a file
+    // that has since grown cannot slip past the budget on a stale, smaller number; resize then
+    // corrects for any change in the narrow window between this probe and the read itself.
+    const reserved = await reader.size(file.path);
+    const hold = await budget.acquire(reserved);
+    try {
+      const bytes = await reader.readFile(file.path);
+      hold.resize(bytes.length);
+
+      return {
+        path: file.path,
+        size: file.size,
+        mtime: file.mtime,
+        hash: await hashBytes(bytes),
+      };
+    } finally {
+      hold.release();
+    }
   });
 
   return { files };
+}
+
+// byteSemaphore caps the bytes held by in-flight readers to budget. acquire reserves the caller's
+// size and resolves once it fits, returning a hold whose resize reconciles that reservation to the
+// bytes actually read and whose release hands the room back. Waiters are admitted strictly in
+// arrival order — a later small read never jumps a queued large one — and a file larger than the
+// whole budget is admitted only when nothing else is held, so it runs alone rather than blocking
+// forever. The bound holds only as far as the reserved size is honest, which is why takeSnapshot
+// reserves against a freshly read size rather than a stale listed one.
+function byteSemaphore(budget: number): { acquire: (bytes: number) => Promise<Hold> } {
+  let available = budget;
+  const waiters: Array<{ need: number; wake: () => void }> = [];
+
+  function admits(need: number): boolean {
+    if (need <= available) {
+      return true;
+    }
+
+    // Nothing else is resident, so an oversized read is let through alone rather than wedged.
+    return available === budget;
+  }
+
+  function drain(): void {
+    while (waiters.length > 0) {
+      const next = waiters[0];
+      if (!admits(next.need)) {
+        return;
+      }
+      waiters.shift();
+      available -= next.need;
+      next.wake();
+    }
+  }
+
+  function hold(reserved: number): Hold {
+    let held = reserved;
+
+    return {
+      release: (): void => {
+        available += held;
+        held = 0;
+        drain();
+      },
+      resize: (bytes: number): void => {
+        const freed = held - bytes;
+        available += freed;
+        held = bytes;
+        if (freed > 0) {
+          drain();
+        }
+      },
+    };
+  }
+
+  return {
+    acquire: (bytes: number): Promise<Hold> => {
+      if (waiters.length === 0 && admits(bytes)) {
+        available -= bytes;
+
+        return Promise.resolve(hold(bytes));
+      }
+
+      return new Promise<Hold>((resolve) => {
+        waiters.push({ need: bytes, wake: () => resolve(hold(bytes)) });
+      });
+    },
+  };
 }
 
 // mapWithConcurrency runs fn over each item with at most limit concurrent invocations, preserving
