@@ -1,18 +1,22 @@
 import type { ObjectMeta } from "./storage.ts";
 
-// ListPage is one page of a ListObjectsV2 response: the objects it carries and, when the listing
-// is truncated, the token that fetches the next page. nextContinuationToken is undefined once the
-// listing is complete.
+// ListPage is one successfully parsed page of a ListObjectsV2 response: the objects it carries
+// and, when the listing is truncated, the token that fetches the next page.
+// nextContinuationToken is undefined once the listing is complete.
 export type ListPage = {
   objects: ObjectMeta[];
   nextContinuationToken: string | undefined;
 };
 
+// ParsedListPage is the outcome of parsing a ListObjectsV2 XML response. ok is false when the
+// body doesn't match the shape this parser understands.
+export type ParsedListPage = { ok: true; page: ListPage } | { ok: false; message: string };
+
 // parseListObjectsXml extracts object keys, sizes, and last-modified timestamps from an S3
 // ListObjectsV2 XML response, along with the continuation token when the listing is truncated.
 // Regex rather than a DOM parser: the schema is narrow and stable, and DOMParser isn't available
 // outside a browser-like runtime, which would make this untestable under node:test.
-export function parseListObjectsXml(xml: string): ListPage {
+export function parseListObjectsXml(xml: string): ParsedListPage {
   const objects: ObjectMeta[] = [];
   const contentsPattern = /<Contents>([\s\S]*?)<\/Contents>/g;
   let match = contentsPattern.exec(xml);
@@ -27,6 +31,25 @@ export function parseListObjectsXml(xml: string): ListPage {
     match = contentsPattern.exec(xml);
   }
 
+  // A response with zero <Contents> matches is indistinguishable from a genuinely empty bucket,
+  // unless it's neither: an empty ListObjectsV2 response always still carries <KeyCount> or
+  // <IsTruncated>, so a body missing both too is a shape this parser doesn't understand (a
+  // namespace prefix or an attribute on <Contents> that the bare-tag regex above never matches).
+  // Returning an empty page for that would look exactly like an empty bucket, which would let a
+  // first sync proceed and silently orphan every file the listing failed to surface (#109).
+  if (
+    objects.length === 0 &&
+    xml.trim() !== "" &&
+    !hasTag(xml, "KeyCount") &&
+    !hasTag(xml, "IsTruncated")
+  ) {
+    return {
+      ok: false,
+      message:
+        "listing response has no <Contents>, <KeyCount>, or <IsTruncated>; unrecognized XML shape",
+    };
+  }
+
   // A token is only meaningful when IsTruncated is true. Guarding on both avoids looping forever
   // if a provider echoes a stale token on the final page.
   const truncated = fieldFrom(xml, "IsTruncated") === "true";
@@ -36,8 +59,8 @@ export function parseListObjectsXml(xml: string): ListPage {
     nextContinuationToken = token;
   }
   return {
-    objects,
-    nextContinuationToken,
+    ok: true,
+    page: { objects, nextContinuationToken },
   };
 }
 
@@ -88,4 +111,9 @@ function fieldFrom(block: string, tag: string): string {
     return "";
   }
   return found[1];
+}
+
+// hasTag reports whether a bare opening <tag> is present anywhere in the XML.
+function hasTag(xml: string, tag: string): boolean {
+  return new RegExp(`<${tag}>`).test(xml);
 }
