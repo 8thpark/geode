@@ -392,7 +392,38 @@ test("parseListObjectsXml fails loudly on a body with no recognizable listing ma
 
   assert.deepEqual(parseListObjectsXml(xml), {
     ok: false,
-    message:
-      "listing response has no <Contents>, <KeyCount>, or <IsTruncated>; unrecognized XML shape",
+    message: "listing response XML shape is unrecognized; refusing to guess it is empty",
+  });
+});
+
+test("parseListObjectsXml fails on an attribute-bearing Contents despite IsTruncated", () => {
+  // A namespace prefix isn't the only way a provider can dodge the strict <Contents> pattern: an
+  // attribute on the opening tag does too, and unlike a wholly unrecognized body, the rest of the
+  // response can still look completely ordinary, IsTruncated included. Checking only for
+  // IsTruncated's presence would wave this through as an empty bucket and orphan the entry it
+  // dropped, so the parser must instead notice that a Contents-shaped tag existed but never made
+  // it into the parsed objects.
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult>
+  <Contents encoding-type="url">
+    <Key>notes/a.md</Key>
+    <LastModified>2026-07-13T00:00:00.000Z</LastModified>
+    <Size>1</Size>
+  </Contents>
+  <IsTruncated>false</IsTruncated>
+</ListBucketResult>`;
+
+  assert.deepEqual(parseListObjectsXml(xml), {
+    ok: false,
+    message: "listing response XML shape is unrecognized; refusing to guess it is empty",
+  });
+});
+
+test("parseListObjectsXml fails loudly on a blank body", () => {
+  // A 200 response with an empty body is never a genuine ListObjectsV2 response, even for an
+  // empty bucket: the real thing is always a full XML document carrying at least IsTruncated.
+  assert.deepEqual(parseListObjectsXml(""), {
+    ok: false,
+    message: "listing response XML shape is unrecognized; refusing to guess it is empty",
   });
 });

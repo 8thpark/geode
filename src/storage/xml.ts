@@ -31,22 +31,20 @@ export function parseListObjectsXml(xml: string): ParsedListPage {
     match = contentsPattern.exec(xml);
   }
 
-  // A response with zero <Contents> matches is indistinguishable from a genuinely empty bucket,
-  // unless it's neither: an empty ListObjectsV2 response always still carries <KeyCount> or
-  // <IsTruncated>, so a body missing both too is a shape this parser doesn't understand (a
-  // namespace prefix or an attribute on <Contents> that the bare-tag regex above never matches).
-  // Returning an empty page for that would look exactly like an empty bucket, which would let a
-  // first sync proceed and silently orphan every file the listing failed to surface (#109).
-  if (
-    objects.length === 0 &&
-    xml.trim() !== "" &&
-    !hasTag(xml, "KeyCount") &&
-    !hasTag(xml, "IsTruncated")
-  ) {
+  // looseContentsCount counts every opening tag that looks like a Contents element (a namespace
+  // prefix or trailing attributes included), not just the exact bare form the strict pattern
+  // above requires. A mismatch against what actually got parsed means some entries were dropped
+  // silently: a provider whose <Contents> carries an attribute, or is namespace prefixed, still
+  // reports IsTruncated or KeyCount normally, so checking only for those markers' presence (as an
+  // earlier version of this guard did) would still wave a listing like that through as an empty
+  // bucket. A first sync over that result would then push local files and write a manifest that
+  // never mentions the entries the parser silently dropped, orphaning them forever (#109).
+  const looseContentsCount = looseTagCount(xml, "Contents");
+  const recognizable = hasTag(xml, "KeyCount") || hasTag(xml, "IsTruncated");
+  if (looseContentsCount !== objects.length || (objects.length === 0 && !recognizable)) {
     return {
       ok: false,
-      message:
-        "listing response has no <Contents>, <KeyCount>, or <IsTruncated>; unrecognized XML shape",
+      message: "listing response XML shape is unrecognized; refusing to guess it is empty",
     };
   }
 
@@ -116,4 +114,16 @@ function fieldFrom(block: string, tag: string): string {
 // hasTag reports whether a bare opening <tag> is present anywhere in the XML.
 function hasTag(xml: string, tag: string): boolean {
   return new RegExp(`<${tag}>`).test(xml);
+}
+
+// looseTagCount counts opening tags matching the given local name anywhere in the XML, regardless
+// of a namespace prefix or trailing attributes, deliberately looser than the exact <tag> form
+// fieldFrom and the Contents block pattern require.
+function looseTagCount(xml: string, tag: string): number {
+  const pattern = new RegExp(`<(?!/)[\\w:-]*${tag}\\b`, "g");
+  const found = xml.match(pattern);
+  if (found === null) {
+    return 0;
+  }
+  return found.length;
 }
