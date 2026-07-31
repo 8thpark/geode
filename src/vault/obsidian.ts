@@ -1,4 +1,4 @@
-import type { DataAdapter, Vault } from "obsidian";
+import type { DataAdapter, Vault, Workspace } from "obsidian";
 import type { GeodeSettings } from "../settings/settings.ts";
 import type { LocalWriter } from "../sync/execute.ts";
 import {
@@ -123,6 +123,28 @@ export function createObsidianStore(
       await adapter.write(statePath, encodeSnapshot(withFingerprint));
     },
   };
+}
+
+// flushOpenEditors forces every open markdown editor to write its current buffer to disk, closing
+// the window where Obsidian's own debounced autosave (TextFileView.requestSave, ~2s) leaves
+// keystrokes sitting in the editor only: checkLocalDrift reads through the Vault API, which only
+// ever sees bytes already on disk, so without this a pull can land on a path whose editor still
+// holds older content, and the next autosave then silently overwrites the pulled bytes with
+// content sync never saw and never checked. Called right before a snapshot is taken, so the
+// residual race is only whatever the user types in the moment between this flush and that read,
+// not however long has passed since Obsidian's own debounce last fired. A leaf whose view carries
+// no save (anything other than a text file view) is skipped rather than treated as an error.
+export async function flushOpenEditors(workspace: Workspace): Promise<void> {
+  const leaves = workspace.getLeavesOfType("markdown");
+  const flushes: Promise<void>[] = [];
+  for (const leaf of leaves) {
+    const view = leaf.view as unknown as { save?: () => Promise<void> };
+    if (typeof view.save !== "function") {
+      continue;
+    }
+    flushes.push(view.save());
+  }
+  await Promise.all(flushes);
 }
 
 // ensureParentDir creates path's parent folder, and any folders above it, before a write that
