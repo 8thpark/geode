@@ -309,11 +309,14 @@ test("parseListObjectsXml decodes XML entities in object keys", () => {
 </ListBucketResult>`;
 
   assert.deepEqual(parseListObjectsXml(xml), {
-    objects: [
-      { key: "notes/Foo & Bar (draft).md", size: 12, lastModified: "2026-07-13T00:00:00.000Z" },
-      { key: "notes/2 < 3 😀.md", size: 34, lastModified: "2026-07-13T00:01:00.000Z" },
-    ],
-    nextContinuationToken: undefined,
+    ok: true,
+    page: {
+      objects: [
+        { key: "notes/Foo & Bar (draft).md", size: 12, lastModified: "2026-07-13T00:00:00.000Z" },
+        { key: "notes/2 < 3 😀.md", size: 34, lastModified: "2026-07-13T00:01:00.000Z" },
+      ],
+      nextContinuationToken: undefined,
+    },
   });
 });
 
@@ -329,9 +332,10 @@ test("parseListObjectsXml surfaces the continuation token when the listing is tr
   <NextContinuationToken>1ueGcxLPRx1Tr/XYExHnhbYLgveDs2J/wm36Hy4vbOwM=</NextContinuationToken>
 </ListBucketResult>`;
 
-  const page = parseListObjectsXml(xml);
-  assert.equal(page.nextContinuationToken, "1ueGcxLPRx1Tr/XYExHnhbYLgveDs2J/wm36Hy4vbOwM=");
-  assert.equal(page.objects.length, 1);
+  const result = parseListObjectsXml(xml);
+  assert.ok(result.ok);
+  assert.equal(result.page.nextContinuationToken, "1ueGcxLPRx1Tr/XYExHnhbYLgveDs2J/wm36Hy4vbOwM=");
+  assert.equal(result.page.objects.length, 1);
 });
 
 test("parseListObjectsXml ignores the token on the final page", () => {
@@ -345,5 +349,81 @@ test("parseListObjectsXml ignores the token on the final page", () => {
   <IsTruncated>false</IsTruncated>
 </ListBucketResult>`;
 
-  assert.equal(parseListObjectsXml(xml).nextContinuationToken, undefined);
+  const result = parseListObjectsXml(xml);
+  assert.ok(result.ok);
+  assert.equal(result.page.nextContinuationToken, undefined);
+});
+
+test("parseListObjectsXml treats a bare IsTruncated marker as an empty bucket", () => {
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult>
+  <IsTruncated>false</IsTruncated>
+</ListBucketResult>`;
+
+  assert.deepEqual(parseListObjectsXml(xml), {
+    ok: true,
+    page: { objects: [], nextContinuationToken: undefined },
+  });
+});
+
+test("parseListObjectsXml treats a bare KeyCount marker as an empty bucket", () => {
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult>
+  <KeyCount>0</KeyCount>
+</ListBucketResult>`;
+
+  assert.deepEqual(parseListObjectsXml(xml), {
+    ok: true,
+    page: { objects: [], nextContinuationToken: undefined },
+  });
+});
+
+test("parseListObjectsXml fails loudly on a body with no recognizable listing markers", () => {
+  // A provider whose response uses a namespace prefix on <Contents> (or attributes this parser's
+  // bare-tag regex doesn't match) would otherwise parse to zero objects, indistinguishable from a
+  // genuinely empty bucket. That would let a first sync proceed and silently orphan every file the
+  // listing failed to surface (#109), so this shape must be refused rather than guessed at.
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <ns:Contents>
+    <ns:Key>notes/a.md</ns:Key>
+  </ns:Contents>
+</ListBucketResult>`;
+
+  assert.deepEqual(parseListObjectsXml(xml), {
+    ok: false,
+    message: "listing response XML shape is unrecognized; refusing to guess it is empty",
+  });
+});
+
+test("parseListObjectsXml fails on an attribute-bearing Contents despite IsTruncated", () => {
+  // A namespace prefix isn't the only way a provider can dodge the strict <Contents> pattern: an
+  // attribute on the opening tag does too, and unlike a wholly unrecognized body, the rest of the
+  // response can still look completely ordinary, IsTruncated included. Checking only for
+  // IsTruncated's presence would wave this through as an empty bucket and orphan the entry it
+  // dropped, so the parser must instead notice that a Contents-shaped tag existed but never made
+  // it into the parsed objects.
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult>
+  <Contents encoding-type="url">
+    <Key>notes/a.md</Key>
+    <LastModified>2026-07-13T00:00:00.000Z</LastModified>
+    <Size>1</Size>
+  </Contents>
+  <IsTruncated>false</IsTruncated>
+</ListBucketResult>`;
+
+  assert.deepEqual(parseListObjectsXml(xml), {
+    ok: false,
+    message: "listing response XML shape is unrecognized; refusing to guess it is empty",
+  });
+});
+
+test("parseListObjectsXml fails loudly on a blank body", () => {
+  // A 200 response with an empty body is never a genuine ListObjectsV2 response, even for an
+  // empty bucket: the real thing is always a full XML document carrying at least IsTruncated.
+  assert.deepEqual(parseListObjectsXml(""), {
+    ok: false,
+    message: "listing response XML shape is unrecognized; refusing to guess it is empty",
+  });
 });

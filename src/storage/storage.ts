@@ -460,9 +460,17 @@ async function s3ListObjects(
       };
     }
 
-    const page = parseListObjectsXml(new TextDecoder().decode(response.body));
-    objects.push(...page.objects);
-    continuationToken = page.nextContinuationToken;
+    const parsed = parseListObjectsXml(new TextDecoder().decode(response.body));
+    if (!parsed.ok) {
+      return {
+        ok: false,
+        status: "server",
+        message: parsed.message,
+        objects: [],
+      };
+    }
+    objects.push(...parsed.page.objects);
+    continuationToken = parsed.page.nextContinuationToken;
   } while (continuationToken !== undefined);
 
   return { ok: true, status: "ok", message: "", objects };
