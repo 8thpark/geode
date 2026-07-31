@@ -200,10 +200,14 @@ export function isSnapshot(value: unknown): value is Snapshot {
 // file whose size and mtime both match the previous snapshot reuses that hash instead of
 // rereading content — the same stat gated hashing rsync, git, and Syncthing all use, since mtime
 // and size alone aren't reliable enough to trust as identity, but are cheap enough to skip a
-// rehash when neither has moved. Reads run at most concurrency at a time and hold at most
-// byteBudget bytes of read content across them, so neither a vault of many files nor a vault of
-// large attachments drives unbounded memory pressure; a stat gated skip reads nothing and costs
-// neither budget.
+// rehash when neither has moved. Reads run at most concurrency at a time and reserve against a
+// size read just before each read, so a vault of large attachments serialises rather than piling
+// full files into memory at once; a stat gated skip reads nothing and reserves nothing.
+//
+// The byte bound is not absolute. size and readFile are separate operations, so a file that grows
+// in the window between them still allocates its whole buffer past the reservation, and no whole
+// file reader can prevent that without a streaming read the mobile platform does not offer. The
+// concurrency cap is the hard backstop: at most that many buffers are ever resident at once.
 export async function takeSnapshot(
   reader: Reader,
   previous: Snapshot,
