@@ -133,7 +133,7 @@ test("syncOnce: a manifest format this build doesn't know halts the pass before 
   writer.renameFile = async () => {
     throw new Error("unexpected local rename");
   };
-  writer.writeFile = async () => {
+  writer.stageFile = async () => {
     throw new Error("unexpected local write");
   };
 
@@ -478,10 +478,19 @@ test("syncOnce: a file edited mid sync is never overwritten by a pull, and the r
   files.set("b.md", "b v1");
   // Mirror pulls into the reader, as writing to a real vault would: the retry below re-snapshots
   // through the reader and must see what the first pass's completed pull actually left on disk.
-  const innerWrite = writer.writeFile;
-  writer.writeFile = async (path, data) => {
-    await innerWrite(path, data);
-    readerFiles[path] = new TextDecoder().decode(data);
+  // Mirrored on commit, not on staging, so the reader only ever sees content that reached the
+  // destination, exactly as the vault would.
+  const innerStage = writer.stageFile;
+  writer.stageFile = async (path, data) => {
+    const staged = await innerStage(path, data);
+
+    return {
+      commit: async () => {
+        await staged.commit();
+        readerFiles[path] = new TextDecoder().decode(data);
+      },
+      discard: staged.discard,
+    };
   };
   const inner = storage.getObject;
   let edited = false;
@@ -734,12 +743,19 @@ test("syncOnce: a failed pull records progress without the ancestor ever advanci
   const readerFiles: Record<string, string> = { "a.md": "a v1" };
   const reader = fakeReader(readerFiles);
   let lockA = true;
+  // The lock bites on commit rather than on staging: a lock is held on the destination, and
+  // staging only ever touches a temp file beside it.
   const writer: LocalWriter = {
-    writeFile: async (path, data) => {
-      if (path === "a.md" && lockA) {
-        throw new Error("EBUSY: resource busy or locked");
-      }
-      readerFiles[path] = new TextDecoder().decode(data);
+    stageFile: async (path, data) => {
+      return {
+        commit: async () => {
+          if (path === "a.md" && lockA) {
+            throw new Error("EBUSY: resource busy or locked");
+          }
+          readerFiles[path] = new TextDecoder().decode(data);
+        },
+        discard: async () => {},
+      };
     },
     deleteFile: async (path) => {
       delete readerFiles[path];

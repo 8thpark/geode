@@ -22,10 +22,11 @@ const MANIFEST_MISSING_HASH_MESSAGE = "manifest missing expected hash for this p
 // specific blob by the hash the plan already decided on, which by construction always "succeeds"
 // with exactly that content, and pullDelete has no bucket object of its own to check at all, so
 // neither can notice on its own that a newer manifest has since pointed the path elsewhere or
-// repopulated it; that is what manifestDrifted checks for immediately before each such local write
-// or delete. The one CAS the plan ultimately depends on either way is the manifest's own conditional
-// PUT (sync.ts), the backstop that still catches anything a mid pass check's own race window lets
-// through.
+// repopulated it; that is what manifestDrifted checks for, immediately before each such local
+// delete and, for a write, immediately before the staged commit that actually changes the path
+// (see commitPulledContent). The one CAS the plan ultimately depends on either way is the
+// manifest's own conditional PUT (sync.ts), the backstop that still catches anything a mid pass
+// check's own race window lets through.
 export type ExecuteResult = {
   completed: SyncAction[];
   failed: SyncAction[];
@@ -34,11 +35,25 @@ export type ExecuteResult = {
 };
 
 // LocalWriter applies changes decided by a sync to the local vault. The real implementation
-// writes through the vault adapter (see vault/obsidian.ts); tests use an in-memory fake.
+// writes through the vault adapter (see vault/obsidian.ts); tests use an in-memory fake. A pulled
+// write is split across stageFile and StagedWrite.commit rather than exposed as one call, so the
+// payload reaches disk before the drift checks run and only the commit is left after them.
 export type LocalWriter = {
-  writeFile: (path: string, data: Uint8Array) => Promise<void>;
+  stageFile: (path: string, data: Uint8Array) => Promise<StagedWrite>;
   deleteFile: (path: string) => Promise<void>;
   renameFile: (path: string, newPath: string) => Promise<void>;
+};
+
+// StagedWrite is pulled content already written to a staging file beside its destination, waiting
+// to either claim that path or be thrown away. Splitting a pull's local write at this seam is what
+// makes checkLocalDrift's guarantee real rather than nominal. Writing the payload is the slow part,
+// and it used to sit between the drift check and the destination actually changing, so the window
+// the check was meant to close still spanned however long the write took: on a large attachment,
+// long enough for an edit to land in it and be silently overwritten (#86). Staging first leaves
+// only commit's rename in that window.
+export type StagedWrite = {
+  commit: () => Promise<void>;
+  discard: () => Promise<void>;
 };
 
 // SyncFailure is one action that could not be carried out.
@@ -157,6 +172,64 @@ async function checkLocalDrift(
   return null;
 }
 
+// commitPulledContent lands fetched remote bytes on a local path, in the only order that leaves
+// both drift checks meaningful. The payload is staged first, so by the time either check runs the
+// destination is still untouched and all that remains is commit's rename; staging afterwards, as
+// this used to, meant the whole payload write sat between the last check and the path changing,
+// which on a large attachment is ample room for the edit the check exists to protect.
+//
+// The two checks are then ordered by what losing each race costs. A manifest that moved on is
+// caught again regardless by syncOnce's conditional manifest PUT, so slipping past this check
+// costs a spurious conflict copy on the next pass and nothing else. A local edit landing after
+// checkLocalDrift has no such backstop: the action reports success, its path advances in
+// state.json at the pulled hash, and nothing afterwards can tell the edit ever existed. The
+// unrecoverable one therefore goes last, closest to the commit.
+//
+// checkLocal is injected rather than derived here because a conflict's restore lands on a path its
+// own rename just vacated and so has nothing to verify against (see vacatedByRename).
+async function commitPulledContent(
+  path: string,
+  body: Uint8Array,
+  checkLocal: () => Promise<SyncFailure | null>,
+  localWriter: LocalWriter,
+  storage: StorageClient,
+  manifestEtag: string | null,
+): Promise<SyncFailure | null> {
+  const staged = await stageForWrite(localWriter, path, body);
+  if (!staged.ok) {
+    return staged.failure;
+  }
+  if (await manifestDrifted(storage, manifestEtag)) {
+    await discardStaged(staged.write);
+    return { path, message: MANIFEST_DRIFT_MESSAGE };
+  }
+  const drift = await checkLocal();
+  if (drift !== null) {
+    await discardStaged(staged.write);
+    return drift;
+  }
+  const failure = await applyLocalWrite(path, () => staged.write.commit());
+  if (failure !== null) {
+    await discardStaged(staged.write);
+    return failure;
+  }
+
+  return null;
+}
+
+// discardStaged throws away content staged for a write the checks went on to refuse. A discard
+// that itself fails is swallowed rather than reported: the caller is already returning the reason
+// the write was refused, which is the failure worth surfacing, and a staging path is deterministic,
+// so a leftover is reclaimed by the next write to the same path rather than accumulating (see
+// hiddenSiblingPath in vault/obsidian.ts).
+async function discardStaged(staged: StagedWrite): Promise<void> {
+  try {
+    await staged.discard();
+  } catch {
+    // Deliberately ignored, see above.
+  }
+}
+
 // ensureBlobStored makes sure a blob holding bytes exists in the bucket at hash's key, uploading
 // only when it doesn't. The key is derived from the content itself, so an object already there is
 // guaranteed byte identical to what the caller would otherwise upload: a rename or a duplicate
@@ -233,17 +306,13 @@ async function executeAction(
     if (!fetched.ok) {
       return { failures: [fetched.failure], pushed: [] };
     }
-    if (await manifestDrifted(storage, manifestEtag)) {
-      return { failures: [{ path: action.path, message: MANIFEST_DRIFT_MESSAGE }], pushed: [] };
-    }
-    // Checked last, immediately before the write: every check above this one is itself async and
-    // would otherwise widen the very race this exists to shrink (#86).
-    const drift = await checkLocalDrift(reader, action.path, localByPath.get(action.path));
-    if (drift !== null) {
-      return { failures: [drift], pushed: [] };
-    }
-    const failure = await applyLocalWrite(action.path, () =>
-      localWriter.writeFile(action.path, fetched.body),
+    const failure = await commitPulledContent(
+      action.path,
+      fetched.body,
+      () => checkLocalDrift(reader, action.path, localByPath.get(action.path)),
+      localWriter,
+      storage,
+      manifestEtag,
     );
     if (failure !== null) {
       return { failures: [failure], pushed: [] };
@@ -280,17 +349,13 @@ async function executeAction(
     if (!fetched.ok) {
       return { failures: [fetched.failure], pushed: [] };
     }
-    if (await manifestDrifted(storage, manifestEtag)) {
-      return { failures: [{ path: action.path, message: MANIFEST_DRIFT_MESSAGE }], pushed: [] };
-    }
-    // Checked last, immediately before the write: every check above this one is itself async and
-    // would otherwise widen the very race this exists to shrink (#86).
-    const drift = await checkLocalDrift(reader, action.path, localByPath.get(action.path));
-    if (drift !== null) {
-      return { failures: [drift], pushed: [] };
-    }
-    const failure = await applyLocalWrite(action.path, () =>
-      localWriter.writeFile(action.path, fetched.body),
+    const failure = await commitPulledContent(
+      action.path,
+      fetched.body,
+      () => checkLocalDrift(reader, action.path, localByPath.get(action.path)),
+      localWriter,
+      storage,
+      manifestEtag,
     );
     if (failure !== null) {
       return { failures: [failure], pushed: [] };
@@ -340,12 +405,13 @@ async function executeAction(
     failures.push(fetched.failure);
     return { failures, pushed: pushedFiles };
   }
-  if (await manifestDrifted(storage, manifestEtag)) {
-    failures.push({ path: action.path, message: MANIFEST_DRIFT_MESSAGE });
-    return { failures, pushed: pushedFiles };
-  }
-  const writeFailure = await applyLocalWrite(action.path, () =>
-    localWriter.writeFile(action.path, fetched.body),
+  const writeFailure = await commitPulledContent(
+    action.path,
+    fetched.body,
+    vacatedByRename,
+    localWriter,
+    storage,
+    manifestEtag,
   );
   if (writeFailure !== null) {
     failures.push(writeFailure);
@@ -361,10 +427,10 @@ function failedAction(path: string, message: string): ActionResult {
 
 // localFailureMessage turns whatever a local vault operation threw into a SyncFailure message.
 // readFile throws when a file vanishes between the snapshot and now (a user deleting it mid sync),
-// and writeFile/deleteFile/renameFile can throw on a disk full or permission error; routing all of
-// them through failures keeps executeSyncPlan's "errors are values" contract, so one bad local
-// operation is a per file failure like any storage error, not an exception that abandons the rest
-// of the pass.
+// and staging, committing, deleting or renaming can throw on a disk full or permission error;
+// routing all of them through failures keeps executeSyncPlan's "errors are values" contract, so one
+// bad local operation is a per file failure like any storage error, not an exception that abandons
+// the rest of the pass.
 function localFailureMessage(err: unknown): string {
   if (err instanceof Error) {
     return err.message;
@@ -421,10 +487,34 @@ async function pushedFile(path: string, bytes: Uint8Array, mtime: number): Promi
   return { path, size: bytes.length, mtime, hash: await hashBytes(bytes) };
 }
 
+// stageForWrite writes fetched bytes to their staging file, converting a thrown I/O error into the
+// same SyncFailure shape every other local operation reports. A failure here has touched nothing at
+// the destination, so there is no staged write to hand back and nothing to unwind.
+async function stageForWrite(
+  localWriter: LocalWriter,
+  path: string,
+  body: Uint8Array,
+): Promise<{ ok: true; write: StagedWrite } | { ok: false; failure: SyncFailure }> {
+  try {
+    return { ok: true, write: await localWriter.stageFile(path, body) };
+  } catch (err) {
+    return { ok: false, failure: { path, message: localFailureMessage(err) } };
+  }
+}
+
 // successfulAction returns the zero failure result for a completed action, pushed carrying the
 // FileState of any bytes it wrote to the bucket, empty for an action that pushed nothing.
 function successfulAction(pushed: FileState[] = []): ActionResult {
   return { failures: [], pushed };
+}
+
+// vacatedByRename is the local check for a conflict's restore, which lands on a path the same
+// action renamed away moments earlier. There is no snapshot entry left to verify content against
+// and nothing at the path to overwrite, so there is nothing to check. Named rather than inlined as
+// a null so the absence of a drift check on this one path reads as a decision rather than an
+// oversight.
+async function vacatedByRename(): Promise<SyncFailure | null> {
+  return null;
 }
 
 // verifyFetch hashes fetched bytes and compares against the expected hash, closing the gap

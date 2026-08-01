@@ -14,12 +14,29 @@ import type { LocalWriter } from "./execute.ts";
 export const empty: Snapshot = { files: [] };
 
 // fakeLocalWriter returns a LocalWriter backed by an in-memory map, and the map itself so tests
-// can assert on the result.
+// can assert on the result. Staged content is held aside and only reaches files on commit, the same
+// seam the real writer has, so a test asserting nothing landed on disk is really asserting the
+// destination was never touched rather than that a write happened to be skipped.
 export function fakeLocalWriter(): { writer: LocalWriter; files: Map<string, string> } {
   const files = new Map<string, string>();
+  const staged = new Map<string, string>();
   const writer: LocalWriter = {
-    writeFile: async (path, data) => {
-      files.set(path, new TextDecoder().decode(data));
+    stageFile: async (path, data) => {
+      staged.set(path, new TextDecoder().decode(data));
+
+      return {
+        commit: async () => {
+          const pending = staged.get(path);
+          if (pending === undefined) {
+            throw new Error(`nothing staged for ${path}`);
+          }
+          staged.delete(path);
+          files.set(path, pending);
+        },
+        discard: async () => {
+          staged.delete(path);
+        },
+      };
     },
     deleteFile: async (path) => {
       files.delete(path);

@@ -17,12 +17,30 @@ import {
 // staged to a hidden temp file and renamed into place, never written directly to its destination,
 // so an interrupted pull cannot leave torn bytes for the next snapshot to read as a local edit
 // and push to the bucket (#88).
+//
+// Staging and installing are separate calls rather than one writeFile, so the caller can run its
+// drift checks in between: the payload is already on disk by then, leaving only commit's rename
+// between the last check and the destination changing (see commitPulledContent in sync/execute.ts).
 export function createObsidianLocalWriter(adapter: DataAdapter): LocalWriter {
   return {
-    writeFile: async (path, data) => {
+    stageFile: async (path, data) => {
       await ensureParentDir(adapter, path);
       const buffer = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
-      await writeThroughTemp(adapter, path, buffer as ArrayBuffer);
+      const tempPath = hiddenSiblingPath(path, ".geode-tmp");
+      await adapter.writeBinary(tempPath, buffer as ArrayBuffer);
+
+      return {
+        commit: async () => {
+          await installStaged(adapter, tempPath, path);
+        },
+        discard: async () => {
+          const exists = await adapter.exists(tempPath);
+          if (!exists) {
+            return;
+          }
+          await adapter.remove(tempPath);
+        },
+      };
     },
     deleteFile: async (path) => {
       const exists = await adapter.exists(path);
@@ -204,19 +222,14 @@ async function replaceViaAside(
   await adapter.remove(asidePath);
 }
 
-// writeThroughTemp stages data at a hidden temp path beside its destination, then renames it into
-// place, so a crash mid write leaves the destination either untouched or fully written, never
-// holding torn bytes (#88). Desktop's adapter rename replaces an existing destination atomically;
-// a rename that fails while the destination exists is retried through replaceViaAside, shrinking
-// the exposure from the whole download and write to the instant between the two renames, where a
-// crash leaves the path absent and the next sync replans the pull instead of pushing corruption.
-async function writeThroughTemp(
-  adapter: DataAdapter,
-  path: string,
-  data: ArrayBuffer,
-): Promise<void> {
-  const tempPath = hiddenSiblingPath(path, ".geode-tmp");
-  await adapter.writeBinary(tempPath, data);
+// installStaged renames an already staged file onto its destination, the step that actually changes
+// what the vault holds, so a crash mid write leaves the destination either untouched or fully
+// written, never holding torn bytes (#88). Desktop's adapter rename replaces an existing
+// destination atomically; a rename that fails while the destination exists is retried through
+// replaceViaAside, shrinking the exposure from the whole download and write to the instant between
+// the two renames, where a crash leaves the path absent and the next sync replans the pull instead
+// of pushing corruption.
+async function installStaged(adapter: DataAdapter, tempPath: string, path: string): Promise<void> {
   try {
     await adapter.rename(tempPath, path);
   } catch (err) {

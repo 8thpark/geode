@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { DataAdapter, Workspace } from "obsidian";
 import { DEFAULT_SETTINGS } from "../settings/settings.ts";
+import type { LocalWriter } from "../sync/execute.ts";
 import { createObsidianLocalWriter, createObsidianStore, flushOpenEditors } from "./obsidian.ts";
 import { fingerprintSettings, type Snapshot } from "./vault.ts";
 
@@ -83,9 +84,16 @@ function fakeWriterAdapter(
   return { adapter: adapter as unknown as DataAdapter, files, ops };
 }
 
-// bytes encodes body for a writeFile call.
+// bytes encodes body for a staged write.
 function bytes(body: string): Uint8Array {
   return new TextEncoder().encode(body);
+}
+
+// writeThrough stages body at path and commits it, the two step sequence a pull runs its drift
+// checks between, collapsed for tests that only care about where the bytes end up.
+async function writeThrough(writer: LocalWriter, path: string, body: string): Promise<void> {
+  const staged = await writer.stageFile(path, bytes(body));
+  await staged.commit();
 }
 
 const STATE_PATH = "state.json";
@@ -99,7 +107,7 @@ test("createObsidianLocalWriter: a pull is staged to a hidden temp file and rena
   });
   const writer = createObsidianLocalWriter(adapter);
 
-  await writer.writeFile("notes/a.md", bytes("pulled content"));
+  await writeThrough(writer, "notes/a.md", "pulled content");
 
   assert.equal(files.get("notes/a.md"), "pulled content");
   assert.equal(files.has("notes/.a.md.geode-tmp"), false);
@@ -118,7 +126,7 @@ test("createObsidianLocalWriter: a pull into a path whose ancestors don't exist 
   });
   const writer = createObsidianLocalWriter(adapter);
 
-  await writer.writeFile("a/b/c/d.md", bytes("pulled content"));
+  await writeThrough(writer, "a/b/c/d.md", "pulled content");
 
   assert.equal(files.get("a/b/c/d.md"), "pulled content");
   assert.deepEqual(ops, [
@@ -137,7 +145,7 @@ test("createObsidianLocalWriter: overwriting an existing file replaces it throug
   );
   const writer = createObsidianLocalWriter(adapter);
 
-  await writer.writeFile("a.md", bytes("new content"));
+  await writeThrough(writer, "a.md", "new content");
 
   assert.equal(files.get("a.md"), "new content");
   assert.equal(files.has(".a.md.geode-tmp"), false);
@@ -151,7 +159,7 @@ test("createObsidianLocalWriter: an adapter whose rename refuses to overwrite re
   );
   const writer = createObsidianLocalWriter(adapter);
 
-  await writer.writeFile("a.md", bytes("new content"));
+  await writeThrough(writer, "a.md", "new content");
 
   assert.equal(files.get("a.md"), "new content");
   assert.equal(files.has(".a.md.geode-tmp"), false);
@@ -175,7 +183,7 @@ test("createObsidianLocalWriter: a rename that keeps failing for another reason 
   );
   const writer = createObsidianLocalWriter(adapter);
 
-  await assert.rejects(writer.writeFile("a.md", bytes("new content")));
+  await assert.rejects(writeThrough(writer, "a.md", "new content"));
 
   assert.equal(files.get("a.md"), "old content");
   assert.equal(files.has(".a.md.geode-old"), false);
@@ -197,9 +205,44 @@ test("createObsidianLocalWriter: a failed write of the staged bytes leaves the d
   );
   const writer = createObsidianLocalWriter(adapter);
 
-  await assert.rejects(writer.writeFile("a.md", bytes("new content")));
+  await assert.rejects(writeThrough(writer, "a.md", "new content"));
 
   assert.equal(files.get("a.md"), "old content");
+});
+
+test("createObsidianLocalWriter: discarding a staged write removes the temp file and never touches the destination", async () => {
+  // The path taken whenever a drift check refuses a pull after its payload is already staged: the
+  // staged bytes must go, and the destination must be exactly as it was, since the whole point of
+  // staging before the checks is that nothing at the destination has happened yet.
+  const { adapter, files, ops } = fakeWriterAdapter(
+    { renameOverwrites: true, stagedRenameFails: false, writeBinaryFails: false },
+    { "a.md": "old content" },
+  );
+  const writer = createObsidianLocalWriter(adapter);
+
+  const staged = await writer.stageFile("a.md", bytes("new content"));
+  await staged.discard();
+
+  assert.equal(files.get("a.md"), "old content");
+  assert.equal(files.has(".a.md.geode-tmp"), false);
+  assert.deepEqual(ops, ["writeBinary .a.md.geode-tmp", "remove .a.md.geode-tmp"]);
+});
+
+test("createObsidianLocalWriter: discarding a staged write twice is not an error", async () => {
+  // discardStaged runs on every refused path and its result is deliberately ignored, so a second
+  // discard (a retry, an unwind that already ran) must be a no-op rather than a throw over a temp
+  // file that is already gone.
+  const { adapter } = fakeWriterAdapter({
+    renameOverwrites: true,
+    stagedRenameFails: false,
+    writeBinaryFails: false,
+  });
+  const writer = createObsidianLocalWriter(adapter);
+
+  const staged = await writer.stageFile("a.md", bytes("new content"));
+  await staged.discard();
+
+  await assert.doesNotReject(staged.discard());
 });
 
 // fakeDeleteAdapter returns a DataAdapter for exercising deleteFile: trashSystemAvailable mimics an

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { hashBytes } from "../vault/vault.ts";
+import { hashBytes, type Reader } from "../vault/vault.ts";
 import { executeSyncPlan } from "./execute.ts";
 import { empty, fakeLocalWriter, fakeReader, fakeStorage, file, snapshot } from "./fake.ts";
 import { blobKeyFor, conflictCopyPath, MANIFEST_KEY, type SyncAction } from "./plan.ts";
@@ -605,15 +605,20 @@ test("executeSyncPlan: a conflict whose copy push fails is a failed action, even
 });
 
 test("executeSyncPlan: a pull whose local write throws is reported and doesn't stop the rest of the plan", async () => {
-  // writeFile can throw on a disk full or permission error. Like every storage failure, that must
+  // A commit can throw on a disk full or permission error. Like every storage failure, that must
   // be recorded as a per file failure rather than escaping the loop and abandoning b.md.
   const reader = fakeReader({});
   const { writer, files } = fakeLocalWriter();
-  writer.writeFile = async (path) => {
-    if (path === "a.md") {
-      throw new Error("EACCES: permission denied");
-    }
-    files.set(path, "pulled");
+  writer.stageFile = async (path) => {
+    return {
+      commit: async () => {
+        if (path === "a.md") {
+          throw new Error("EACCES: permission denied");
+        }
+        files.set(path, "pulled");
+      },
+      discard: async () => {},
+    };
   };
   const aHash = await hashOf("remote a");
   const bHash = await hashOf("remote b");
@@ -789,6 +794,191 @@ test("executeSyncPlan: pull proceeds when the manifest etag still matches what t
 
   assert.deepEqual(failures, []);
   assert.equal(files.get("a.md"), "hello");
+});
+
+test("executeSyncPlan: a pull whose local file is edited while its payload stages is refused, and the edit survives", async () => {
+  // The window this closes. Staging the payload used to happen after checkLocalDrift, inside the
+  // single writeFile call, so an edit landing during that write, which on a large attachment is
+  // nearly the whole pull, was checked for before it existed and then silently overwritten. Worse
+  // than a lost race elsewhere: the action reports success, so its path advances in state.json at
+  // the pulled hash and no later pass can tell the edit ever happened. Staging first is what puts
+  // the edit in front of the check rather than behind it.
+  const readerFiles: Record<string, string> = { "a.md": "as snapshotted" };
+  const reader = fakeReader(readerFiles);
+  const local = snapshot(file("a.md", await hashOf("as snapshotted")));
+  const { writer, files } = fakeLocalWriter();
+  let discarded = 0;
+  const innerStage = writer.stageFile;
+  writer.stageFile = async (path, data) => {
+    readerFiles["a.md"] = "edited while staging";
+    const staged = await innerStage(path, data);
+
+    return {
+      commit: staged.commit,
+      discard: async () => {
+        discarded++;
+        await staged.discard();
+      },
+    };
+  };
+  const hash = await hashOf("remote a");
+  const { storage } = fakeStorage({ [blobKeyFor(hash)]: "remote a" });
+  const remote = snapshot(file("a.md", hash));
+
+  const { failures, completed } = await executeSyncPlan(
+    [{ kind: "pull", path: "a.md" }],
+    local,
+    reader,
+    writer,
+    storage,
+    1,
+    remote,
+  );
+
+  assert.deepEqual(failures, [
+    { path: "a.md", message: "changed locally mid sync; sync again to reconcile" },
+  ]);
+  assert.deepEqual(completed, []);
+  assert.equal(files.has("a.md"), false);
+  assert.equal(readerFiles["a.md"], "edited while staging");
+  assert.equal(discarded, 1);
+});
+
+test("executeSyncPlan: a pull stages its payload before both drift checks and commits only after them", async () => {
+  // The ordering the whole fix turns on, asserted directly because every other test here can only
+  // observe its consequences. Staging last would put the payload write between the final check and
+  // the destination changing; running the manifest HEAD last would put the local read, the slow
+  // check, in front of it instead. Only this order leaves each check with nothing but the commit's
+  // rename ahead of it, and puts the unrecoverable check (local) closest to that rename.
+  const ops: string[] = [];
+  const baseReader = fakeReader({});
+  const reader: Reader = {
+    ...baseReader,
+    fileExists: async (path) => {
+      ops.push("checkLocal");
+      return baseReader.fileExists(path);
+    },
+  };
+  const { writer, files } = fakeLocalWriter();
+  const innerStage = writer.stageFile;
+  writer.stageFile = async (path, data) => {
+    ops.push("stage");
+    const staged = await innerStage(path, data);
+
+    return {
+      commit: async () => {
+        ops.push("commit");
+        await staged.commit();
+      },
+      discard: staged.discard,
+    };
+  };
+  const hash = await hashOf("hello");
+  const { storage } = fakeStorage({ [blobKeyFor(hash)]: "hello", [MANIFEST_KEY]: "current" });
+  const innerHead = storage.headObject;
+  storage.headObject = async (key) => {
+    if (key === MANIFEST_KEY) {
+      ops.push("checkManifest");
+    }
+    return innerHead(key);
+  };
+  const manifestHead = await storage.headObject(MANIFEST_KEY);
+  ops.length = 0;
+  const remote = snapshot(file("a.md", hash));
+
+  const { failures } = await executeSyncPlan(
+    [{ kind: "pull", path: "a.md" }],
+    empty,
+    reader,
+    writer,
+    storage,
+    1,
+    remote,
+    manifestHead.etag,
+  );
+
+  assert.deepEqual(failures, []);
+  assert.deepEqual(ops, ["stage", "checkManifest", "checkLocal", "commit"]);
+  assert.equal(files.get("a.md"), "hello");
+});
+
+test("executeSyncPlan: a pull refused by manifest drift discards its staged payload", async () => {
+  // A refused write must not leave its staging file behind holding a copy of remote content. The
+  // path is deterministic so a leftover would eventually be reclaimed, but "eventually" means the
+  // next pull of the same path, which may never come.
+  const reader = fakeReader({});
+  const { writer, files } = fakeLocalWriter();
+  let discarded = 0;
+  const innerStage = writer.stageFile;
+  writer.stageFile = async (path, data) => {
+    const staged = await innerStage(path, data);
+
+    return {
+      commit: staged.commit,
+      discard: async () => {
+        discarded++;
+        await staged.discard();
+      },
+    };
+  };
+  const hash = await hashOf("hello");
+  const { storage } = fakeStorage({ [blobKeyFor(hash)]: "hello", [MANIFEST_KEY]: "irrelevant" });
+  const remote = snapshot(file("a.md", hash));
+
+  const { failures } = await executeSyncPlan(
+    [{ kind: "pull", path: "a.md" }],
+    empty,
+    reader,
+    writer,
+    storage,
+    1,
+    remote,
+    '"stale-etag"',
+  );
+
+  assert.deepEqual(failures, [
+    { path: "a.md", message: "changed remotely mid sync; sync again to reconcile" },
+  ]);
+  assert.equal(files.has("a.md"), false);
+  assert.equal(discarded, 1);
+});
+
+test("executeSyncPlan: a discard that itself fails never masks the failure that refused the write", async () => {
+  // discardStaged swallows its own errors on purpose: the caller is already returning the reason
+  // the write was refused, and that reason is the one worth reporting. A throwing discard must not
+  // replace it, nor escape the loop and abandon the rest of the plan.
+  const reader = fakeReader({});
+  const { writer, files } = fakeLocalWriter();
+  const innerStage = writer.stageFile;
+  writer.stageFile = async (path, data) => {
+    const staged = await innerStage(path, data);
+
+    return {
+      commit: staged.commit,
+      discard: async () => {
+        throw new Error("EACCES: cannot remove staged file");
+      },
+    };
+  };
+  const hash = await hashOf("hello");
+  const { storage } = fakeStorage({ [blobKeyFor(hash)]: "hello", [MANIFEST_KEY]: "irrelevant" });
+  const remote = snapshot(file("a.md", hash));
+
+  const { failures } = await executeSyncPlan(
+    [{ kind: "pull", path: "a.md" }],
+    empty,
+    reader,
+    writer,
+    storage,
+    1,
+    remote,
+    '"stale-etag"',
+  );
+
+  assert.deepEqual(failures, [
+    { path: "a.md", message: "changed remotely mid sync; sync again to reconcile" },
+  ]);
+  assert.equal(files.has("a.md"), false);
 });
 
 test("executeSyncPlan: a conflict restore refuses when the manifest has moved on, and the local edit survives as a copy", async () => {
