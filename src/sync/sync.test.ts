@@ -481,8 +481,8 @@ test("syncOnce: a file edited mid sync is never overwritten by a pull, and the r
   // Mirrored on commit, not on staging, so the reader only ever sees content that reached the
   // destination, exactly as the vault would.
   const innerStage = writer.stageFile;
-  writer.stageFile = async (path, data) => {
-    const staged = await innerStage(path, data);
+  writer.stageFile = async (path, data, mode) => {
+    const staged = await innerStage(path, data, mode);
 
     return {
       commit: async () => {

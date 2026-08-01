@@ -72,7 +72,7 @@ function newDevice(): Device {
 // byte length so a same millisecond, same size rewrite can never hide a change from mtime based
 // detection.
 async function writeLocal(d: Device, path: string, body: string): Promise<void> {
-  const staged = await d.writer.stageFile(path, new TextEncoder().encode(body));
+  const staged = await d.writer.stageFile(path, new TextEncoder().encode(body), "replace");
   await staged.commit();
 }
 

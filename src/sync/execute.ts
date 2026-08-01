@@ -3,8 +3,11 @@ import { byPath, type FileState, hashBytes, type Reader, type Snapshot } from ".
 import { blobKeyFor, conflictCopyPath, MANIFEST_KEY, type SyncAction } from "./plan.ts";
 
 // DRIFT_MESSAGE is the failure reported when a local file changed after the snapshot an action
-// was planned from; the next sync re-snapshots and replans the path as a conflict.
-const DRIFT_MESSAGE = "changed locally mid sync; sync again to reconcile";
+// was planned from; the next sync re-snapshots and replans the path as a conflict. Exported
+// because a "create" mode commit reports the same thing from inside the writer, where a file that
+// appeared at the destination is visible to the adapter alone (see installStaged in
+// vault/obsidian.ts), and both are the same event to a user: something changed underneath us.
+export const DRIFT_MESSAGE = "changed locally mid sync; sync again to reconcile";
 
 const HASH_MISMATCH_MESSAGE = "fetched bytes do not match manifest hash; sync again to reconcile";
 const MANIFEST_DRIFT_MESSAGE = "changed remotely mid sync; sync again to reconcile";
@@ -37,9 +40,11 @@ export type ExecuteResult = {
 // LocalWriter applies changes decided by a sync to the local vault. The real implementation
 // writes through the vault adapter (see vault/obsidian.ts); tests use an in-memory fake. A pulled
 // write is split across stageFile and StagedWrite.commit rather than exposed as one call, so the
-// payload reaches disk before the drift checks run and only the commit is left after them.
+// payload reaches disk before the drift checks run and only the commit is left after them. The
+// write's WriteMode is declared at staging rather than passed to commit, so what the write is
+// allowed to do to its destination is stated once, where the write itself is described.
 export type LocalWriter = {
-  stageFile: (path: string, data: Uint8Array) => Promise<StagedWrite>;
+  stageFile: (path: string, data: Uint8Array, mode: WriteMode) => Promise<StagedWrite>;
   deleteFile: (path: string) => Promise<void>;
   renameFile: (path: string, newPath: string) => Promise<void>;
 };
@@ -61,6 +66,21 @@ export type SyncFailure = {
   path: string;
   message: string;
 };
+
+// WriteMode says what a staged write may do to its destination when it commits. "replace" installs
+// over whatever is there, which is what an ordinary pull wants: the path's old content is exactly
+// what the plan decided to move on from. "create" refuses to commit if anything is at the path, for
+// a write whose premise is that the path is empty; a conflict's restore lands on a path the same
+// action renamed away moments earlier, so a file sitting there now was created in the window since,
+// holds content no conflict copy preserved and no snapshot describes, and must not be replaced.
+//
+// The vacancy is checked by the writer rather than by a caller's drift check because only the
+// writer can see the destination as it actually is: a filesystem stat through the adapter, which
+// sees a file the instant it appears, where a Reader check goes through Obsidian's file index,
+// which lags the very rename this action just made and would refuse sound restores as often as it
+// caught real ones. Checking inside the writer also puts the check as close to the rename as the
+// adapter allows, a syscall rather than the fetch-and-stage a caller's own checks sit behind.
+export type WriteMode = "replace" | "create";
 
 type ActionResult = {
   failures: SyncFailure[];
@@ -186,16 +206,19 @@ async function checkLocalDrift(
 // unrecoverable one therefore goes last, closest to the commit.
 //
 // checkLocal is injected rather than derived here because a conflict's restore lands on a path its
-// own rename just vacated and so has nothing to verify against (see vacatedByRename).
+// own rename just vacated and so has no snapshot content to verify against (see vacatedByRename);
+// mode is what guards that path instead, refusing the commit outright if the destination turns out
+// not to be empty after all.
 async function commitPulledContent(
   path: string,
   body: Uint8Array,
+  mode: WriteMode,
   checkLocal: () => Promise<SyncFailure | null>,
   localWriter: LocalWriter,
   storage: StorageClient,
   manifestEtag: string | null,
 ): Promise<SyncFailure | null> {
-  const staged = await stageForWrite(localWriter, path, body);
+  const staged = await stageForWrite(localWriter, path, body, mode);
   if (!staged.ok) {
     return staged.failure;
   }
@@ -309,6 +332,7 @@ async function executeAction(
     const failure = await commitPulledContent(
       action.path,
       fetched.body,
+      "replace",
       () => checkLocalDrift(reader, action.path, localByPath.get(action.path)),
       localWriter,
       storage,
@@ -343,7 +367,9 @@ async function executeAction(
 
   // conflict, deletedSide "local": the user deleted their copy, so there is no local edit to
   // preserve; the remote edit simply wins and is restored onto the local path. The snapshot has
-  // no entry here, so any file found now was recreated after it and must not be overwritten.
+  // no entry here, so any file found now was recreated after it and must not be overwritten: the
+  // drift check catches one the snapshot's Reader can see, and the "create" commit catches one
+  // created too recently for that Reader to have indexed yet.
   if (action.deletedSide === "local") {
     const fetched = await pullBlob(storage, action.path, remoteByPath.get(action.path));
     if (!fetched.ok) {
@@ -352,6 +378,7 @@ async function executeAction(
     const failure = await commitPulledContent(
       action.path,
       fetched.body,
+      "create",
       () => checkLocalDrift(reader, action.path, localByPath.get(action.path)),
       localWriter,
       storage,
@@ -408,6 +435,7 @@ async function executeAction(
   const writeFailure = await commitPulledContent(
     action.path,
     fetched.body,
+    "create",
     vacatedByRename,
     localWriter,
     storage,
@@ -494,9 +522,10 @@ async function stageForWrite(
   localWriter: LocalWriter,
   path: string,
   body: Uint8Array,
+  mode: WriteMode,
 ): Promise<{ ok: true; write: StagedWrite } | { ok: false; failure: SyncFailure }> {
   try {
-    return { ok: true, write: await localWriter.stageFile(path, body) };
+    return { ok: true, write: await localWriter.stageFile(path, body, mode) };
   } catch (err) {
     return { ok: false, failure: { path, message: localFailureMessage(err) } };
   }
@@ -508,11 +537,14 @@ function successfulAction(pushed: FileState[] = []): ActionResult {
   return { failures: [], pushed };
 }
 
-// vacatedByRename is the local check for a conflict's restore, which lands on a path the same
-// action renamed away moments earlier. There is no snapshot entry left to verify content against
-// and nothing at the path to overwrite, so there is nothing to check. Named rather than inlined as
-// a null so the absence of a drift check on this one path reads as a decision rather than an
-// oversight.
+// vacatedByRename is the content check for a conflict's restore, which lands on a path the same
+// action renamed away moments earlier. There is no snapshot entry left to compare bytes against,
+// so this one has nothing to check and says so. What it must not do is conclude that the path is
+// therefore still empty: the rename is followed by a blob push, a fetch and a staged write, and
+// anything the user or another plugin creates at that path in the meantime holds content no
+// conflict copy preserved. That is the "create" commit's job, immediately before the rename that
+// would otherwise replace it. Named rather than inlined as a null so the absence of a content
+// check on this one path reads as a decision rather than an oversight.
 async function vacatedByRename(): Promise<SyncFailure | null> {
   return null;
 }

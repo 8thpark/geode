@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { DataAdapter, Workspace } from "obsidian";
 import { DEFAULT_SETTINGS } from "../settings/settings.ts";
-import type { LocalWriter } from "../sync/execute.ts";
+import type { LocalWriter, WriteMode } from "../sync/execute.ts";
 import { createObsidianLocalWriter, createObsidianStore, flushOpenEditors } from "./obsidian.ts";
 import { fingerprintSettings, type Snapshot } from "./vault.ts";
 
@@ -90,9 +90,15 @@ function bytes(body: string): Uint8Array {
 }
 
 // writeThrough stages body at path and commits it, the two step sequence a pull runs its drift
-// checks between, collapsed for tests that only care about where the bytes end up.
-async function writeThrough(writer: LocalWriter, path: string, body: string): Promise<void> {
-  const staged = await writer.stageFile(path, bytes(body));
+// checks between, collapsed for tests that only care about where the bytes end up. mode defaults to
+// the ordinary pull's "replace"; the "create" cases pass it explicitly.
+async function writeThrough(
+  writer: LocalWriter,
+  path: string,
+  body: string,
+  mode: WriteMode = "replace",
+): Promise<void> {
+  const staged = await writer.stageFile(path, bytes(body), mode);
   await staged.commit();
 }
 
@@ -148,6 +154,40 @@ test("createObsidianLocalWriter: overwriting an existing file replaces it throug
   await writeThrough(writer, "a.md", "new content");
 
   assert.equal(files.get("a.md"), "new content");
+  assert.equal(files.has(".a.md.geode-tmp"), false);
+  assert.deepEqual(ops, ["writeBinary .a.md.geode-tmp", "rename .a.md.geode-tmp -> a.md"]);
+});
+
+test("createObsidianLocalWriter: a create write onto an occupied destination refuses, never touching what is there", async () => {
+  // A conflict's restore stages its bytes for a path its own rename vacated moments earlier, so a
+  // file at that path was created in the window since and holds content no conflict copy
+  // preserved. The commit must refuse rather than rename over it, and must refuse before the
+  // rename, not after: the destination's own bytes are never in play.
+  const { adapter, files, ops } = fakeWriterAdapter(
+    { renameOverwrites: true, stagedRenameFails: false, writeBinaryFails: false },
+    { "a.md": "recreated mid sync" },
+  );
+  const writer = createObsidianLocalWriter(adapter);
+
+  await assert.rejects(writeThrough(writer, "a.md", "restored content", "create"), {
+    message: "changed locally mid sync; sync again to reconcile",
+  });
+
+  assert.equal(files.get("a.md"), "recreated mid sync");
+  assert.deepEqual(ops, ["writeBinary .a.md.geode-tmp"]);
+});
+
+test("createObsidianLocalWriter: a create write onto a free path renames straight in, with no aside dance", async () => {
+  const { adapter, files, ops } = fakeWriterAdapter({
+    renameOverwrites: true,
+    stagedRenameFails: false,
+    writeBinaryFails: false,
+  });
+  const writer = createObsidianLocalWriter(adapter);
+
+  await writeThrough(writer, "a.md", "restored content", "create");
+
+  assert.equal(files.get("a.md"), "restored content");
   assert.equal(files.has(".a.md.geode-tmp"), false);
   assert.deepEqual(ops, ["writeBinary .a.md.geode-tmp", "rename .a.md.geode-tmp -> a.md"]);
 });
@@ -220,7 +260,7 @@ test("createObsidianLocalWriter: discarding a staged write removes the temp file
   );
   const writer = createObsidianLocalWriter(adapter);
 
-  const staged = await writer.stageFile("a.md", bytes("new content"));
+  const staged = await writer.stageFile("a.md", bytes("new content"), "replace");
   await staged.discard();
 
   assert.equal(files.get("a.md"), "old content");
@@ -239,7 +279,7 @@ test("createObsidianLocalWriter: discarding a staged write twice is not an error
   });
   const writer = createObsidianLocalWriter(adapter);
 
-  const staged = await writer.stageFile("a.md", bytes("new content"));
+  const staged = await writer.stageFile("a.md", bytes("new content"), "replace");
   await staged.discard();
 
   await assert.doesNotReject(staged.discard());

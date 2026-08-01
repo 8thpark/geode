@@ -8,7 +8,7 @@ import type {
   StorageClient,
 } from "../storage/storage.ts";
 import type { FileState, Reader, Snapshot } from "../vault/vault.ts";
-import type { LocalWriter } from "./execute.ts";
+import { DRIFT_MESSAGE, type LocalWriter } from "./execute.ts";
 
 // empty is the zero snapshot: a vault with no files.
 export const empty: Snapshot = { files: [] };
@@ -16,12 +16,14 @@ export const empty: Snapshot = { files: [] };
 // fakeLocalWriter returns a LocalWriter backed by an in-memory map, and the map itself so tests
 // can assert on the result. Staged content is held aside and only reaches files on commit, the same
 // seam the real writer has, so a test asserting nothing landed on disk is really asserting the
-// destination was never touched rather than that a write happened to be skipped.
+// destination was never touched rather than that a write happened to be skipped. A "create" write
+// refuses an occupied destination exactly as the real writer's adapter stat does, so a test can
+// drive the case the real one exists for: a path recreated after a conflict's rename vacated it.
 export function fakeLocalWriter(): { writer: LocalWriter; files: Map<string, string> } {
   const files = new Map<string, string>();
   const staged = new Map<string, string>();
   const writer: LocalWriter = {
-    stageFile: async (path, data) => {
+    stageFile: async (path, data, mode) => {
       staged.set(path, new TextDecoder().decode(data));
 
       return {
@@ -29,6 +31,9 @@ export function fakeLocalWriter(): { writer: LocalWriter; files: Map<string, str
           const pending = staged.get(path);
           if (pending === undefined) {
             throw new Error(`nothing staged for ${path}`);
+          }
+          if (mode === "create" && files.has(path)) {
+            throw new Error(DRIFT_MESSAGE);
           }
           staged.delete(path);
           files.set(path, pending);

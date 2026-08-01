@@ -462,6 +462,111 @@ test("executeSyncPlan: a conflict restore onto a path recreated after the snapsh
   assert.equal(files.get("a.md"), "recreated after snapshot");
 });
 
+test("executeSyncPlan: a conflict restore onto a path recreated after its own rename is refused, and the recreated file survives", async () => {
+  // The window the "create" commit exists for. Between the rename that vacates the path and the
+  // commit that lands the remote version on it sit a blob push, a fetch and a staged write: ample
+  // room for the user, or another plugin, to create a note at the same path. That file is not the
+  // local edit the conflict copy preserved, no snapshot describes it, and nothing anywhere else
+  // holds its content, so the restore must refuse rather than replace it and report success.
+  const reader = fakeReader({ "a.md": "local edit" });
+  const { writer, files } = fakeLocalWriter();
+  files.set("a.md", "local edit");
+  const innerRename = writer.renameFile;
+  writer.renameFile = async (path, newPath) => {
+    await innerRename(path, newPath);
+    files.set(path, "recreated mid sync");
+  };
+  const remoteHash = await hashOf("remote edit");
+  const { storage, objects } = fakeStorage({ [blobKeyFor(remoteHash)]: "remote edit" });
+  const remote = snapshot(file("a.md", remoteHash));
+  const now = Date.parse("2026-07-14T10:00:00.000Z");
+
+  const { completed, failures, pushedFiles } = await executeSyncPlan(
+    [{ kind: "conflict", path: "a.md", deletedSide: "none" }],
+    empty,
+    reader,
+    writer,
+    storage,
+    now,
+    remote,
+  );
+
+  assert.deepEqual(failures, [
+    { path: "a.md", message: "changed locally mid sync; sync again to reconcile" },
+  ]);
+  assert.deepEqual(completed, []);
+  assert.equal(files.get("a.md"), "recreated mid sync");
+  // Neither of the other two versions is lost either: the local edit is still under its copy name
+  // and in the bucket, and the remote version was never on this device to begin with. The next
+  // sync sees the recreated file as a local change and replans the path as an ordinary conflict.
+  const copyHash = await hashOf("local edit");
+  assert.equal(files.get(conflictCopyPath("a.md", now)), "local edit");
+  assert.equal(objects.get(blobKeyFor(copyHash)), "local edit");
+  assert.deepEqual(pushedFiles, [
+    {
+      path: conflictCopyPath("a.md", now),
+      size: "local edit".length,
+      mtime: now,
+      hash: copyHash,
+    },
+  ]);
+});
+
+test("executeSyncPlan: a conflict restore is refused by its commit even when the recreated file is too new for the reader to see", async () => {
+  // checkLocalDrift reads through Obsidian's file index, which lags a file by however long the
+  // index takes to notice it; the writer's own stat does not. A file already on disk but not yet
+  // indexed must still stop the restore, which is exactly what the "create" commit is for and
+  // what a Reader based check could never manage on its own.
+  const reader = fakeReader({});
+  const { writer, files } = fakeLocalWriter();
+  files.set("a.md", "created but not yet indexed");
+  const hash = await hashOf("remote edit");
+  const { storage } = fakeStorage({ [blobKeyFor(hash)]: "remote edit" });
+  const remote = snapshot(file("a.md", hash));
+  const now = Date.parse("2026-07-14T10:00:00.000Z");
+
+  const { failures } = await executeSyncPlan(
+    [{ kind: "conflict", path: "a.md", deletedSide: "local" }],
+    empty,
+    reader,
+    writer,
+    storage,
+    now,
+    remote,
+  );
+
+  assert.deepEqual(failures, [
+    { path: "a.md", message: "changed locally mid sync; sync again to reconcile" },
+  ]);
+  assert.equal(files.get("a.md"), "created but not yet indexed");
+});
+
+test("executeSyncPlan: an ordinary pull still replaces the file its plan decided to move on from", async () => {
+  // The counterpart to the restore's "create": a pull's whole job is to install over the path's
+  // previous content, which checkLocalDrift has just confirmed is what the snapshot saw. Refusing
+  // an occupied destination here would break every update of an existing note.
+  const reader = fakeReader({ "a.md": "as snapshotted" });
+  const local = snapshot(file("a.md", await hashOf("as snapshotted")));
+  const { writer, files } = fakeLocalWriter();
+  files.set("a.md", "as snapshotted");
+  const hash = await hashOf("remote edit");
+  const { storage } = fakeStorage({ [blobKeyFor(hash)]: "remote edit" });
+  const remote = snapshot(file("a.md", hash));
+
+  const { failures } = await executeSyncPlan(
+    [{ kind: "pull", path: "a.md" }],
+    local,
+    reader,
+    writer,
+    storage,
+    1,
+    remote,
+  );
+
+  assert.deepEqual(failures, []);
+  assert.equal(files.get("a.md"), "remote edit");
+});
+
 test("executeSyncPlan: a conflict with nothing remote to pull preserves the local edit as a copy and reports no failure", async () => {
   const reader = fakeReader({ "a.md": "local edit" });
   const { writer, files } = fakeLocalWriter();
@@ -809,9 +914,9 @@ test("executeSyncPlan: a pull whose local file is edited while its payload stage
   const { writer, files } = fakeLocalWriter();
   let discarded = 0;
   const innerStage = writer.stageFile;
-  writer.stageFile = async (path, data) => {
+  writer.stageFile = async (path, data, mode) => {
     readerFiles["a.md"] = "edited while staging";
-    const staged = await innerStage(path, data);
+    const staged = await innerStage(path, data, mode);
 
     return {
       commit: staged.commit,
@@ -861,9 +966,9 @@ test("executeSyncPlan: a pull stages its payload before both drift checks and co
   };
   const { writer, files } = fakeLocalWriter();
   const innerStage = writer.stageFile;
-  writer.stageFile = async (path, data) => {
+  writer.stageFile = async (path, data, mode) => {
     ops.push("stage");
-    const staged = await innerStage(path, data);
+    const staged = await innerStage(path, data, mode);
 
     return {
       commit: async () => {
@@ -910,8 +1015,8 @@ test("executeSyncPlan: a pull refused by manifest drift discards its staged payl
   const { writer, files } = fakeLocalWriter();
   let discarded = 0;
   const innerStage = writer.stageFile;
-  writer.stageFile = async (path, data) => {
-    const staged = await innerStage(path, data);
+  writer.stageFile = async (path, data, mode) => {
+    const staged = await innerStage(path, data, mode);
 
     return {
       commit: staged.commit,
@@ -950,8 +1055,8 @@ test("executeSyncPlan: a discard that itself fails never masks the failure that 
   const reader = fakeReader({});
   const { writer, files } = fakeLocalWriter();
   const innerStage = writer.stageFile;
-  writer.stageFile = async (path, data) => {
-    const staged = await innerStage(path, data);
+  writer.stageFile = async (path, data, mode) => {
+    const staged = await innerStage(path, data, mode);
 
     return {
       commit: staged.commit,

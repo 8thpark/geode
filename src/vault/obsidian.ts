@@ -1,6 +1,6 @@
 import type { DataAdapter, Vault, Workspace } from "obsidian";
 import type { GeodeSettings } from "../settings/settings.ts";
-import type { LocalWriter } from "../sync/execute.ts";
+import { DRIFT_MESSAGE, type LocalWriter, type WriteMode } from "../sync/execute.ts";
 import {
   decodeSnapshot,
   encodeSnapshot,
@@ -23,7 +23,7 @@ import {
 // between the last check and the destination changing (see commitPulledContent in sync/execute.ts).
 export function createObsidianLocalWriter(adapter: DataAdapter): LocalWriter {
   return {
-    stageFile: async (path, data) => {
+    stageFile: async (path, data, mode) => {
       await ensureParentDir(adapter, path);
       const buffer = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
       const tempPath = hiddenSiblingPath(path, ".geode-tmp");
@@ -31,7 +31,7 @@ export function createObsidianLocalWriter(adapter: DataAdapter): LocalWriter {
 
       return {
         commit: async () => {
-          await installStaged(adapter, tempPath, path);
+          await installStaged(adapter, tempPath, path, mode);
         },
         discard: async () => {
           const exists = await adapter.exists(tempPath);
@@ -229,7 +229,29 @@ async function replaceViaAside(
 // replaceViaAside, shrinking the exposure from the whole download and write to the instant between
 // the two renames, where a crash leaves the path absent and the next sync replans the pull instead
 // of pushing corruption.
-async function installStaged(adapter: DataAdapter, tempPath: string, path: string): Promise<void> {
+//
+// A "create" write refuses that replacement entirely: its caller staged these bytes for a path it
+// had reason to believe was empty, so a file being there means one appeared since, and installing
+// over it would destroy content nothing else holds. The existence check is the adapter's own stat,
+// the only view that sees a file the moment it lands rather than when Obsidian's index catches up,
+// and it sits one call before the rename, which is as tight as an adapter with no create-exclusive
+// rename allows. Throwing is how every failure leaves this layer; executeSyncPlan turns it back
+// into an ordinary per file failure the moment it crosses the boundary.
+async function installStaged(
+  adapter: DataAdapter,
+  tempPath: string,
+  path: string,
+  mode: WriteMode,
+): Promise<void> {
+  if (mode === "create") {
+    const occupied = await adapter.exists(path);
+    if (occupied) {
+      throw new Error(DRIFT_MESSAGE);
+    }
+    await adapter.rename(tempPath, path);
+
+    return;
+  }
   try {
     await adapter.rename(tempPath, path);
   } catch (err) {
