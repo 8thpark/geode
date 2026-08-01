@@ -1,5 +1,6 @@
 import { ItemView, type WorkspaceLeaf } from "obsidian";
 import type { LogBus, LogEntry, LogSink } from "./log.ts";
+import { selectionOverlaps } from "./selection.ts";
 
 // LOG_VIEW_TYPE identifies geode's log pane to Obsidian's workspace leaf API.
 export const LOG_VIEW_TYPE = "geode-log-view";
@@ -30,9 +31,9 @@ function renderRow(list: HTMLElement, entry: LogEntry): void {
 
 // GeodeLogView renders geode's persisted log as a plain, most recent first list, updating live as
 // entries are logged. The pane is always a straight render of what the sink holds: every change
-// re-reads and redraws rather than mutating the DOM in place, so the pane can never drift from the
-// persisted log. Read only: it has no way to write log entries, only display what the sink
-// recorded.
+// re-reads and redraws rather than mutating the DOM in place. A redraw waits while the user has
+// selected log text, then catches up from the sink as soon as that selection clears. Read only: it
+// has no way to write log entries, only display what the sink recorded.
 export class GeodeLogView extends ItemView {
   private sink: LogSink;
   private bus: LogBus;
@@ -40,6 +41,7 @@ export class GeodeLogView extends ItemView {
   // refreshQueued records that another pass is owed because an entry arrived while one was running.
   private refreshInFlight: Promise<void> | null = null;
   private refreshQueued = false;
+  private renderDeferred = false;
 
   constructor(leaf: WorkspaceLeaf, sink: LogSink, bus: LogBus) {
     super(leaf);
@@ -65,6 +67,16 @@ export class GeodeLogView extends ItemView {
     // then still triggers a refresh, rather than being missed until the pane is reopened. register
     // runs the unsubscribe on pane close, so a closed view stops receiving entries.
     this.register(this.bus.subscribe(() => void this.refresh()));
+    this.registerDomEvent(document, "selectionchange", () => {
+      if (!this.renderDeferred) {
+        return;
+      }
+      if (selectionOverlaps(this.contentEl, document.getSelection())) {
+        return;
+      }
+      this.renderDeferred = false;
+      void this.refresh();
+    });
     await this.refresh();
   }
 
@@ -108,6 +120,11 @@ export class GeodeLogView extends ItemView {
   // render does the actual read and draw, split out so runRefresh can own the coalescing loop.
   private async render(): Promise<void> {
     const entries = await this.sink.read();
+    if (selectionOverlaps(this.contentEl, document.getSelection())) {
+      this.renderDeferred = true;
+      return;
+    }
+    this.renderDeferred = false;
     renderLogView(this.contentEl, entries);
   }
 }
