@@ -1,5 +1,12 @@
 import type { StorageClient } from "../storage/storage.ts";
-import { byPath, type FileState, hashBytes, type Reader, type Snapshot } from "../vault/vault.ts";
+import {
+  byPath,
+  type FileStat,
+  type FileState,
+  hashBytes,
+  type Reader,
+  type Snapshot,
+} from "../vault/vault.ts";
 import { blobKeyFor, conflictCopyPath, MANIFEST_KEY, type SyncAction } from "./plan.ts";
 
 // DRIFT_MESSAGE is the failure reported when a local file changed after the snapshot an action
@@ -87,17 +94,10 @@ type ActionResult = {
   pushed: FileState[];
 };
 
-// LocalCheck is the outcome of checkLocalDrift: the failure to report, or what the path was
-// holding at the moment its content was verified, for confirmLocalUnchanged to compare against
+// LocalCheck is the outcome of checkLocalDrift: the failure to report, or the stat the path
+// carried at the moment its content was verified, for confirmLocalUnchanged to compare against
 // once the remaining checks have run.
-type LocalCheck = { ok: true; seen: LocalStat } | { ok: false; failure: SyncFailure };
-
-// LocalStat is what the vault index says about a path: whether anything is there, and how many
-// bytes it holds. An absent path is present false at size zero, never a null to unpack.
-type LocalStat = {
-  present: boolean;
-  size: number;
-};
+type LocalCheck = { ok: true; seen: FileStat } | { ok: false; failure: SyncFailure };
 
 // executeSyncPlan carries out every action against reader/localWriter (the local vault) and
 // storage (the remote bucket), and reports what completed and what couldn't be, so one failed
@@ -187,9 +187,9 @@ async function checkLocalDrift(
   path: string,
   expected: FileState | undefined,
 ): Promise<LocalCheck> {
-  const exists = await reader.fileExists(path);
-  if (!exists) {
-    return { ok: true, seen: { present: false, size: 0 } };
+  const before = await reader.stat(path);
+  if (!before.present) {
+    return { ok: true, seen: before };
   }
   let bytes: Uint8Array;
   try {
@@ -204,7 +204,9 @@ async function checkLocalDrift(
     return { ok: false, failure: { path, message: DRIFT_MESSAGE } };
   }
 
-  return { ok: true, seen: { present: true, size: bytes.length } };
+  // Read back after the content, not before it, so the stat handed on describes the file as of the
+  // instant these exact bytes were verified rather than as of whenever the read began.
+  return { ok: true, seen: await reader.stat(path) };
 }
 
 // commitPulledContent lands fetched remote bytes on a local path, in the only order that leaves
@@ -264,29 +266,28 @@ async function commitPulledContent(
 }
 
 // confirmLocalUnchanged is the last look at a path before it is written over or deleted, run after
-// the manifest check so nothing but the mutation itself follows it. It compares the path against
-// what checkLocalDrift saw moments earlier, using only what the vault index already holds
-// (existence and size) and never rereading content: the hash has already proved those bytes were
-// the snapshot's, and the whole point of this one is to be cheap enough to sit last, so the
-// manifest check is not left standing behind a whole file read. A path confirmed absent must still
-// be absent; one confirmed to hold the snapshot's content must still hold exactly that many bytes.
+// the manifest check so nothing but the mutation itself follows it. It compares the path's stat
+// against the one checkLocalDrift recorded when it verified the content, and never rereads: the
+// hash has already proved those bytes were the snapshot's, and the whole point of this one is to
+// be cheap enough to sit last, so the manifest check is not left standing behind a whole file read.
 //
-// What it cannot see is a rewrite landing in this window that keeps the byte length exactly, which
-// is why it is a second line behind the hash rather than a replacement for it. That residue spans
-// one network round trip, and the create commit closes the appearing-file half of it entirely.
+// Size alone would not do. A typo fixed in place rewrites a note without changing its length, so
+// an mtime comparison is what actually makes this a guard rather than a formality; size is kept
+// beside it because a rewrite inside the same clock tick moves one when it cannot move the other.
+// This is the same stat pair takeSnapshot gates its rehash on, used here in the conservative
+// direction: it can only ever refuse a write, so an mtime that moved without the content moving
+// costs one replanned pass, never a wrong answer.
 async function confirmLocalUnchanged(
   reader: Reader,
   path: string,
-  seen: LocalStat,
+  seen: FileStat,
 ): Promise<SyncFailure | null> {
-  const present = await reader.fileExists(path);
-  if (present !== seen.present) {
-    return { path, message: DRIFT_MESSAGE };
-  }
-  if (!present) {
-    return null;
-  }
-  if ((await reader.size(path)) !== seen.size) {
+  const current = await reader.stat(path);
+  if (
+    current.present !== seen.present ||
+    current.size !== seen.size ||
+    current.mtime !== seen.mtime
+  ) {
     return { path, message: DRIFT_MESSAGE };
   }
 

@@ -38,6 +38,16 @@ export type FileInfo = {
   mtime: number;
 };
 
+// FileStat is everything the vault index knows about one path without reading it: whether anything
+// is there at all, and the size and mtime it carries if so. An absent path is present false with
+// zero values rather than a null to unpack, so callers compare fields instead of branching on
+// absence first.
+export type FileStat = {
+  present: boolean;
+  size: number;
+  mtime: number;
+};
+
 // FileState is what geode remembers about one vault file as of the last snapshot.
 export type FileState = {
   path: string;
@@ -46,17 +56,19 @@ export type FileState = {
   hash: string;
 };
 
-// Reader lists files present in the vault right now, reads their bytes, answers whether a path
-// currently exists (so a failed read on a present file is never mistaken for absence), and reports
-// a single path's current size on demand — fresher than the listing, so a snapshot can reserve
-// memory against what it is about to read rather than a size that may have grown since. A vanished
-// path reports size 0, letting the read that follows raise the real disappearance error. The real
+// Reader lists files present in the vault right now, reads their bytes, and reports what the index
+// already knows about a single path without touching its content. stat answers all three of the
+// questions sync asks between reads: whether the path is there at all (so a failed read on a
+// present file is never mistaken for absence), how big it is right now (fresher than the listing,
+// so a snapshot reserves memory against what it is about to read rather than a size that may have
+// grown since), and when it last changed (so a pull can confirm nothing moved underneath it
+// without rereading the file, see confirmLocalUnchanged in sync/execute.ts). A vanished path
+// reports a zero stat, letting the read that follows raise the real disappearance error. The real
 // implementation wraps Obsidian's Vault API (see obsidian.ts); tests use an in-memory fake.
 export type Reader = {
-  fileExists: (path: string) => Promise<boolean>;
   listFiles: () => Promise<FileInfo[]>;
   readFile: (path: string) => Promise<Uint8Array>;
-  size: (path: string) => Promise<number>;
+  stat: (path: string) => Promise<FileStat>;
 };
 
 // Snapshot is every file geode saw the last time it took a snapshot.
@@ -237,9 +249,10 @@ export async function takeSnapshot(
 
     // Reserve against the size read now, not the one listed at the start of the pass, so a file
     // that has since grown cannot slip past the budget on a stale, smaller number; resize then
-    // corrects for any change in the narrow window between this probe and the read itself.
-    const reserved = await reader.size(file.path);
-    const hold = await budget.acquire(reserved);
+    // corrects for any change in the narrow window between this probe and the read itself. A path
+    // that has vanished reserves nothing and lets the read raise the real error.
+    const live = await reader.stat(file.path);
+    const hold = await budget.acquire(live.size);
     try {
       const bytes = await reader.readFile(file.path);
       hold.resize(bytes.length);

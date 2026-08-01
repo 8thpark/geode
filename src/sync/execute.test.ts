@@ -964,12 +964,12 @@ test("executeSyncPlan: a pull stages its payload, then checks cheapest-last, and
   const reader: Reader = {
     ...baseReader,
     readFile: async (path) => {
-      ops.push("checkLocal");
+      ops.push("hashLocal");
       return baseReader.readFile(path);
     },
-    size: async (path) => {
-      ops.push("confirmLocal");
-      return baseReader.size(path);
+    stat: async (path) => {
+      ops.push("statLocal");
+      return baseReader.stat(path);
     },
   };
   const { writer, files } = fakeLocalWriter();
@@ -1017,7 +1017,17 @@ test("executeSyncPlan: a pull stages its payload, then checks cheapest-last, and
   );
 
   assert.deepEqual(failures, []);
-  assert.deepEqual(ops, ["stage", "checkLocal", "checkManifest", "confirmLocal", "commit"]);
+  // The stat either side of hashLocal is checkLocalDrift bracketing its own read; the one after
+  // checkManifest is the confirmation, and nothing but the commit follows it.
+  assert.deepEqual(ops, [
+    "stage",
+    "statLocal",
+    "hashLocal",
+    "statLocal",
+    "checkManifest",
+    "statLocal",
+    "commit",
+  ]);
   assert.equal(files.get("a.md"), "hello");
 });
 
@@ -1066,6 +1076,96 @@ test("executeSyncPlan: a pull whose local file is edited while the manifest chec
   assert.deepEqual(completed, []);
   assert.equal(files.get("a.md"), "as snapshotted");
   assert.equal(readerFiles["a.md"], "edited during the manifest check");
+});
+
+test("executeSyncPlan: a pull refused when the edit landing during the manifest check keeps the byte length", async () => {
+  // A typo fixed in place rewrites a note without changing its length, so an existence and size
+  // comparison would wave it through and commit the pulled bytes over it: success reported, the
+  // path advanced in state.json at the pulled hash, the edit gone with nothing able to tell it
+  // ever existed. The mtime is what makes the final confirmation a guard rather than a formality.
+  const readerFiles: Record<string, string> = { "a.md": "hello world" };
+  const readerMtimes: Record<string, number> = { "a.md": 1 };
+  const reader = fakeReader(readerFiles, readerMtimes);
+  const local = snapshot({
+    path: "a.md",
+    size: "hello world".length,
+    mtime: 1,
+    hash: await hashOf("hello world"),
+  });
+  const { writer, files } = fakeLocalWriter();
+  files.set("a.md", "hello world");
+  const hash = await hashOf("remote a");
+  const { storage } = fakeStorage({ [blobKeyFor(hash)]: "remote a", [MANIFEST_KEY]: "current" });
+  const head = await storage.headObject(MANIFEST_KEY);
+  const innerHead = storage.headObject;
+  storage.headObject = async (key) => {
+    if (key === MANIFEST_KEY) {
+      readerFiles["a.md"] = "hello werld";
+      readerMtimes["a.md"] = 2;
+    }
+    return innerHead(key);
+  };
+  const remote = snapshot(file("a.md", hash));
+
+  const { failures, completed } = await executeSyncPlan(
+    [{ kind: "pull", path: "a.md" }],
+    local,
+    reader,
+    writer,
+    storage,
+    1,
+    remote,
+    head.etag,
+  );
+
+  assert.equal("hello werld".length, "hello world".length);
+  assert.deepEqual(failures, [
+    { path: "a.md", message: "changed locally mid sync; sync again to reconcile" },
+  ]);
+  assert.deepEqual(completed, []);
+  assert.equal(files.get("a.md"), "hello world");
+});
+
+test("executeSyncPlan: a pullDelete refused when the edit landing during the manifest check keeps the byte length", async () => {
+  // The same rewrite guarding a deletion, where losing it trashes the file the user was mid edit
+  // on rather than overwriting one save.
+  const readerFiles: Record<string, string> = { "a.md": "hello world" };
+  const readerMtimes: Record<string, number> = { "a.md": 1 };
+  const reader = fakeReader(readerFiles, readerMtimes);
+  const local = snapshot({
+    path: "a.md",
+    size: "hello world".length,
+    mtime: 1,
+    hash: await hashOf("hello world"),
+  });
+  const { writer, files } = fakeLocalWriter();
+  files.set("a.md", "hello world");
+  const { storage } = fakeStorage({ [MANIFEST_KEY]: "current" });
+  const head = await storage.headObject(MANIFEST_KEY);
+  const innerHead = storage.headObject;
+  storage.headObject = async (key) => {
+    if (key === MANIFEST_KEY) {
+      readerFiles["a.md"] = "hello werld";
+      readerMtimes["a.md"] = 2;
+    }
+    return innerHead(key);
+  };
+
+  const { failures } = await executeSyncPlan(
+    [{ kind: "pullDelete", path: "a.md" }],
+    local,
+    reader,
+    writer,
+    storage,
+    1,
+    empty,
+    head.etag,
+  );
+
+  assert.deepEqual(failures, [
+    { path: "a.md", message: "changed locally mid sync; sync again to reconcile" },
+  ]);
+  assert.equal(files.get("a.md"), "hello world");
 });
 
 test("executeSyncPlan: a pullDelete whose local file is edited while the manifest check is in flight is refused", async () => {

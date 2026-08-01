@@ -57,16 +57,28 @@ export function fakeLocalWriter(): { writer: LocalWriter; files: Map<string, str
   return { writer, files };
 }
 
-// fakeReader returns a Reader backed by an in-memory map of path to content.
-export function fakeReader(files: Record<string, string>): Reader {
+// fakeReader returns a Reader backed by an in-memory map of path to content. mtimes carries the
+// modification time of any path a test needs one for, defaulting to 1: a test simulating a mid sync
+// edit sets both maps, exactly as a real editor save moves both content and mtime, which is what
+// lets a same length rewrite still read as a change.
+export function fakeReader(
+  files: Record<string, string>,
+  mtimes: Record<string, number> = {},
+): Reader {
+  function mtimeOf(path: string): number {
+    const known = mtimes[path];
+    if (known === undefined) {
+      return 1;
+    }
+
+    return known;
+  }
+
   return {
-    fileExists: async (path) => {
-      return files[path] !== undefined;
-    },
     listFiles: async () => {
       const list = [];
       for (const [path, content] of Object.entries(files)) {
-        list.push({ path, size: content.length, mtime: 1 });
+        list.push({ path, size: content.length, mtime: mtimeOf(path) });
       }
       return list;
     },
@@ -77,12 +89,13 @@ export function fakeReader(files: Record<string, string>): Reader {
       }
       return new TextEncoder().encode(content);
     },
-    size: async (path) => {
+    stat: async (path) => {
       const content = files[path];
       if (content === undefined) {
-        return 0;
+        return { present: false, size: 0, mtime: 0 };
       }
-      return content.length;
+
+      return { present: true, size: content.length, mtime: mtimeOf(path) };
     },
   };
 }

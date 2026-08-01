@@ -116,8 +116,8 @@ test("readRemoteManifest: a non 404 failure is reported, never guessed at as emp
 
 test("syncOnce: a manifest format this build doesn't know halts the pass before any sync work", async () => {
   const reader = fakeReader({ "local.md": "local" });
-  reader.fileExists = async () => {
-    throw new Error("unexpected local existence check");
+  reader.stat = async () => {
+    throw new Error("unexpected local stat");
   };
   reader.listFiles = async () => {
     throw new Error("unexpected local listing");

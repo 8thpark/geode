@@ -70,9 +70,6 @@ export function createObsidianLocalWriter(adapter: DataAdapter): LocalWriter {
 // lives inside .obsidian/plugins/geode/) never shows up as a vault file to snapshot.
 export function createObsidianReader(vault: Vault): Reader {
   return {
-    fileExists: async (path) => {
-      return vault.getFileByPath(path) !== null;
-    },
     listFiles: async () => {
       const files: FileInfo[] = [];
       for (const file of vault.getFiles()) {
@@ -88,12 +85,15 @@ export function createObsidianReader(vault: Vault): Reader {
       const buffer = await vault.readBinary(file);
       return new Uint8Array(buffer);
     },
-    size: async (path) => {
+    // Both fields come from the TFile the vault already holds in memory, so this is an index
+    // lookup rather than a filesystem call: cheap enough to run immediately before a destructive
+    // write, which is the whole reason a pull can confirm a path is untouched without rereading it.
+    stat: async (path) => {
       const file = vault.getFileByPath(path);
       if (file === null) {
-        return 0;
+        return { present: false, size: 0, mtime: 0 };
       }
-      return file.stat.size;
+      return { present: true, size: file.stat.size, mtime: file.stat.mtime };
     },
   };
 }

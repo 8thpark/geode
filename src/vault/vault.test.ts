@@ -21,9 +21,6 @@ function fakeReader(files: Record<string, { content: string; mtime: number }>): 
 } {
   let reads = 0;
   const reader: Reader = {
-    fileExists: async (path) => {
-      return files[path] !== undefined;
-    },
     listFiles: async () => {
       const list: FileInfo[] = [];
       for (const [path, file] of Object.entries(files)) {
@@ -39,12 +36,12 @@ function fakeReader(files: Record<string, { content: string; mtime: number }>): 
       }
       return new TextEncoder().encode(file.content);
     },
-    size: async (path) => {
+    stat: async (path) => {
       const file = files[path];
       if (file === undefined) {
-        return 0;
+        return { present: false, size: 0, mtime: 0 };
       }
-      return file.content.length;
+      return { present: true, size: file.content.length, mtime: file.mtime };
     },
   };
   return { reader, readCount: () => reads };
@@ -200,9 +197,6 @@ test("takeSnapshot: concurrency is bounded by the limit", async () => {
   let inflight = 0;
   let peakInflight = 0;
   const reader: Reader = {
-    fileExists: async (path) => {
-      return files[path] !== undefined;
-    },
     listFiles: async () => {
       const list: FileInfo[] = [];
       for (const [path, file] of Object.entries(files)) {
@@ -223,12 +217,12 @@ test("takeSnapshot: concurrency is bounded by the limit", async () => {
       }
       return new TextEncoder().encode(file.content);
     },
-    size: async (path) => {
+    stat: async (path) => {
       const file = files[path];
       if (file === undefined) {
-        return 0;
+        return { present: false, size: 0, mtime: 0 };
       }
-      return file.content.length;
+      return { present: true, size: file.content.length, mtime: file.mtime };
     },
   };
 
@@ -249,9 +243,6 @@ test("takeSnapshot: in-flight bytes are bounded by the byte budget", async () =>
   let inflightBytes = 0;
   let peakBytes = 0;
   const reader: Reader = {
-    fileExists: async (path) => {
-      return files[path] !== undefined;
-    },
     listFiles: async () => {
       const list: FileInfo[] = [];
       for (const [path, file] of Object.entries(files)) {
@@ -273,12 +264,12 @@ test("takeSnapshot: in-flight bytes are bounded by the byte budget", async () =>
 
       return new TextEncoder().encode(file.content);
     },
-    size: async (path) => {
+    stat: async (path) => {
       const file = files[path];
       if (file === undefined) {
-        return 0;
+        return { present: false, size: 0, mtime: 0 };
       }
-      return file.content.length;
+      return { present: true, size: file.content.length, mtime: file.mtime };
     },
   };
 
@@ -308,7 +299,6 @@ test("takeSnapshot: a small read does not jump a queued large read", async () =>
   const sizes: Record<string, number> = { hog: 60, big: 60, small: 10 };
   const started: string[] = [];
   const reader: Reader = {
-    fileExists: async () => true,
     // hog fills most of the budget and is held open; big cannot fit and queues; small then arrives
     // and, with fair admission, must wait behind big rather than slipping into the gap hog left.
     listFiles: async () => [
@@ -324,8 +314,8 @@ test("takeSnapshot: a small read does not jump a queued large read", async () =>
 
       return new Uint8Array(sizes[path]);
     },
-    size: async (path) => {
-      return sizes[path];
+    stat: async (path) => {
+      return { present: true, size: sizes[path], mtime: 1 };
     },
   };
 
@@ -351,9 +341,6 @@ test("takeSnapshot: growth since listing is bounded by the fresh size", async ()
   let inflightBytes = 0;
   let peakBytes = 0;
   const reader: Reader = {
-    fileExists: async (path) => {
-      return files[path] !== undefined;
-    },
     // Every file lists as 10 bytes but has since grown to 400. Reserving on the listed 10 would let
     // several read at once and blow past the budget; reserving on the fresh size read now must not.
     listFiles: async () => {
@@ -377,12 +364,12 @@ test("takeSnapshot: growth since listing is bounded by the fresh size", async ()
 
       return new Uint8Array(file.actual);
     },
-    size: async (path) => {
+    stat: async (path) => {
       const file = files[path];
       if (file === undefined) {
-        return 0;
+        return { present: false, size: 0, mtime: 0 };
       }
-      return file.actual;
+      return { present: true, size: file.actual, mtime: file.mtime };
     },
   };
 
