@@ -1,7 +1,7 @@
 import type { App } from "obsidian";
 import { Plugin, setIcon, setTooltip } from "obsidian";
 import { createLogSink } from "./log/adapter";
-import { createLogger, type Logger, type LogSink } from "./log/log";
+import { createLogBus, createLogger, type LogBus, type Logger, type LogSink } from "./log/log";
 import { GeodeLogView, LOG_VIEW_TYPE } from "./log/view";
 import {
   DEFAULT_SETTINGS,
@@ -10,12 +10,14 @@ import {
   normalizeSettings,
 } from "./settings/settings";
 import { GeodeSettingTab } from "./settings/tab";
-import { createS3Client } from "./storage/storage";
+import { obsidianTransport } from "./storage/obsidian";
+import { createS3Client, probeConditionalWrites } from "./storage/storage";
 import { syncOnce } from "./sync/sync";
 import {
   createObsidianLocalWriter,
   createObsidianReader,
   createObsidianStore,
+  flushOpenEditors,
 } from "./vault/obsidian";
 import { diffSnapshots, takeSnapshot } from "./vault/vault";
 
@@ -72,20 +74,28 @@ export default class GeodePlugin extends Plugin {
   settings: GeodeSettings = DEFAULT_SETTINGS;
   // Assigned in onload, which Obsidian always runs before any other plugin method.
   logger!: Logger;
+  private logBus!: LogBus;
   private logSink!: LogSink;
   private statusBarEl!: HTMLElement;
   private refreshTimer: number | undefined;
   private refreshInFlight: Promise<void> | null = null;
   private refreshQueued = false;
   private syncing = false;
+  // The manifest compare-and-swap that keeps overlapping syncs from clobbering each other (#83)
+  // only holds if the provider honours conditional writes. testConnection probes for this, but
+  // nothing forces a user to run it, so sync verifies once per session before it trusts the CAS
+  // and refuses to run rather than silently lose edits on a provider that ignores preconditions
+  // (#108). Reset on saveSettings so switching provider re-verifies.
+  private conditionalWritesVerified = false;
 
   async onload() {
     await this.loadSettings();
 
     this.logSink = createLogSink(this.app.vault.adapter, this.manifest.dir, MAX_LOG_LINES);
-    this.logger = createLogger(this.logSink, LOG_MIN_LEVEL);
+    this.logBus = createLogBus();
+    this.logger = createLogger(this.logSink, LOG_MIN_LEVEL, this.logBus.emit);
 
-    this.registerView(LOG_VIEW_TYPE, (leaf) => new GeodeLogView(leaf, this.logSink));
+    this.registerView(LOG_VIEW_TYPE, (leaf) => new GeodeLogView(leaf, this.logSink, this.logBus));
     this.addCommand({
       id: "logs",
       name: "Logs",
@@ -203,11 +213,37 @@ export default class GeodePlugin extends Plugin {
   // runSync does the actual work of syncNow, split out so syncNow can own the in flight guard
   // and status bar bookkeeping around it without this getting lost in indentation.
   private async runSync(dir: string): Promise<void> {
-    const secretAccessKey = this.app.secretStorage.getSecret(this.settings.secretId) ?? "";
-    const storage = createS3Client(this.settings, secretAccessKey);
-    const stateStore = createObsidianStore(this.app.vault.adapter, `${dir}/state.json`);
+    const secretAccessKey = this.app.secretStorage.getSecret(this.settings.secretId);
+    if (secretAccessKey === null || secretAccessKey === "") {
+      this.logger.error(`sync: secret access key not found for ID "${this.settings.secretId}"`);
+      this.setSyncStatus("error", "secret access key not found; open settings to reconfigure");
+      return;
+    }
+
+    const storage = createS3Client(this.settings, secretAccessKey, obsidianTransport);
+
+    if (!this.conditionalWritesVerified) {
+      const probe = await probeConditionalWrites(storage);
+      if (!probe.ok) {
+        this.logger.error(`sync: conditional write check failed: ${probe.message}`);
+        this.setSyncStatus("error", probe.message);
+        return;
+      }
+      this.conditionalWritesVerified = true;
+      this.logger.info("sync: conditional write support verified");
+    }
+
+    const stateStore = createObsidianStore(
+      this.app.vault.adapter,
+      `${dir}/state.json`,
+      this.settings,
+    );
     const reader = createObsidianReader(this.app.vault, this.settings.ignorePatterns);
     const localWriter = createObsidianLocalWriter(this.app.vault.adapter);
+
+    // Flush every open editor to disk right before the snapshot below reads the vault, so a file
+    // mid edit is never invisible to this pass's drift checks (see flushOpenEditors).
+    await flushOpenEditors(this.app.workspace);
 
     const previous = await stateStore.read();
     const outcome = await syncOnce(previous, reader, localWriter, storage, Date.now());
@@ -236,6 +272,9 @@ export default class GeodePlugin extends Plugin {
 
   async saveSettings() {
     await this.saveData(this.settings);
+    // A settings change may point at a different provider, so the next sync must re-verify
+    // conditional write support rather than trust the last provider's result.
+    this.conditionalWritesVerified = false;
     this.logger.info("settings saved");
   }
 
@@ -288,7 +327,7 @@ export default class GeodePlugin extends Plugin {
       return;
     }
 
-    const store = createObsidianStore(this.app.vault.adapter, `${dir}/state.json`);
+    const store = createObsidianStore(this.app.vault.adapter, `${dir}/state.json`, this.settings);
     const reader = createObsidianReader(this.app.vault, this.settings.ignorePatterns);
 
     // Both callers fire this and forget (void), so a rejection here would surface as an

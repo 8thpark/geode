@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DEFAULT_SETTINGS, type GeodeSettings } from "../settings/settings.ts";
-import { createS3Client, testConnection } from "./storage.ts";
+import { createS3Client, fetchTransport, testConnection } from "./storage.ts";
 
 const SECRET_ACCESS_KEY = "geodedev";
 
@@ -19,13 +19,13 @@ const liveSettings: GeodeSettings = {
 };
 
 test("testConnection: succeeds against a real bucket", async () => {
-  const result = await testConnection(liveSettings, SECRET_ACCESS_KEY);
+  const result = await testConnection(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
   assert.equal(result.ok, true);
   assert.equal(result.status, "ok");
 });
 
 test("putObject then getObject round trips the same bytes", async () => {
-  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
   const body = new TextEncoder().encode("hello geode");
 
   const putResult = await client.putObject("notes/hello.md", body);
@@ -39,7 +39,7 @@ test("putObject then getObject round trips the same bytes", async () => {
 });
 
 test("getObject returns the object's etag for a later conditional put", async () => {
-  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
   await client.putObject("etag-test/note.md", new TextEncoder().encode("v1"));
 
   const getResult = await client.getObject("etag-test/note.md");
@@ -48,7 +48,7 @@ test("getObject returns the object's etag for a later conditional put", async ()
 });
 
 test("putObject ifAbsent creates a missing key but is rejected once the key exists", async () => {
-  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
   const key = `conditional-test/absent-${Date.now()}.md`;
 
   const first = await client.putObject(key, new TextEncoder().encode("v1"), { kind: "ifAbsent" });
@@ -62,7 +62,7 @@ test("putObject ifAbsent creates a missing key but is rejected once the key exis
 });
 
 test("putObject ifMatch succeeds with the current etag and is rejected once it goes stale", async () => {
-  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
   const key = "conditional-test/match.md";
   try {
     await client.putObject(key, new TextEncoder().encode("v1"));
@@ -93,7 +93,7 @@ test("putObject ifMatch succeeds with the current etag and is rejected once it g
 });
 
 test("getObject on a missing key fails without a body", async () => {
-  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
   const result = await client.getObject("does/not/exist.md");
   assert.equal(result.ok, false);
   assert.equal(result.status, "not_found");
@@ -101,7 +101,7 @@ test("getObject on a missing key fails without a body", async () => {
 });
 
 test("deleteObject removes an object", async () => {
-  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
   await client.putObject("notes/to-delete.md", new TextEncoder().encode("bye"));
 
   const deleteResult = await client.deleteObject("notes/to-delete.md");
@@ -113,8 +113,40 @@ test("deleteObject removes an object", async () => {
   assert.equal(getResult.status, "not_found");
 });
 
+test("headObject reports ok for an existing key without returning a body", async () => {
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
+  const key = "head-test/exists.md";
+  await client.putObject(key, new TextEncoder().encode("present"));
+
+  const headResult = await client.headObject(key);
+  assert.equal(headResult.ok, true);
+  assert.equal(headResult.status, "ok");
+  assert.notEqual(headResult.etag, null);
+
+  await client.deleteObject(key);
+});
+
+test("headObject on a missing key fails with not_found", async () => {
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
+
+  const headResult = await client.headObject("head-test/does-not-exist.md");
+  assert.equal(headResult.ok, false);
+  assert.equal(headResult.status, "not_found");
+});
+
+test("headObject round-trips a key with SigV4-sensitive characters", async () => {
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
+  const key = "head-test/Don't stop! (really).md";
+  await client.putObject(key, new TextEncoder().encode("tricky key"));
+
+  const headResult = await client.headObject(key);
+  assert.equal(headResult.ok, true);
+
+  await client.deleteObject(key);
+});
+
 test("listObjects returns only keys under the given prefix", async () => {
-  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
   await client.putObject("list-test/a.md", new TextEncoder().encode("a"));
   await client.putObject("list-test/b.md", new TextEncoder().encode("b"));
   await client.putObject("list-test-other/c.md", new TextEncoder().encode("c"));
@@ -131,7 +163,7 @@ test("listObjects returns only keys under the given prefix", async () => {
 });
 
 test("listObjects with no prefix returns everything", async () => {
-  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
   await client.putObject("unprefixed.md", new TextEncoder().encode("x"));
 
   const result = await client.listObjects();
@@ -148,7 +180,7 @@ test("listObjects with no prefix returns everything", async () => {
 });
 
 test("listObjects pages past the 1,000 key response cap", async () => {
-  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
   const prefix = "paging-test/";
   const total = 1001;
 
@@ -181,7 +213,7 @@ test("listObjects pages past the 1,000 key response cap", async () => {
 });
 
 test("putObject/getObject round-trips a key containing a space and ampersand", async () => {
-  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
   const body = new TextEncoder().encode("special chars");
 
   const putResult = await client.putObject("encode-test/Foo & Bar.md", body);
@@ -192,8 +224,34 @@ test("putObject/getObject round-trips a key containing a space and ampersand", a
   assert.deepEqual(getResult.body, body);
 });
 
+test("putObject/getObject round-trips a key with SigV4-sensitive characters ! ' ( ) *", async () => {
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
+  const body = new TextEncoder().encode("sigv4 edge");
+  const key = "encode-test/Don't forget! (draft) *.md";
+
+  const putResult = await client.putObject(key, body);
+  assert.equal(putResult.ok, true);
+
+  const getResult = await client.getObject(key);
+  assert.equal(getResult.ok, true);
+  assert.deepEqual(getResult.body, body);
+
+  // The listing must hand back the exact key the vault knows, or sync would treat the object as
+  // a phantom remote file and the real note as locally new.
+  const listResult = await client.listObjects("encode-test/Don't");
+  assert.equal(listResult.ok, true);
+  const keys: string[] = [];
+  for (const object of listResult.objects) {
+    keys.push(object.key);
+  }
+  assert.deepEqual(keys, [key]);
+
+  const deleteResult = await client.deleteObject(key);
+  assert.equal(deleteResult.ok, true);
+});
+
 test("putObject/getObject round-trips a key containing a hash and percent", async () => {
-  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
   const body = new TextEncoder().encode("edge cases");
 
   const putResult = await client.putObject("encode-test/100% #special.md", body);

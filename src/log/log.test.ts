@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  createLogBus,
   createLogger,
   createMemorySink,
   formatLogLine,
@@ -9,6 +10,12 @@ import {
   parseLogLine,
   trimLogLines,
 } from "./log.ts";
+
+// settle lets the fire-and-forget append promises, and the onEntry notifications chained off
+// them, run to completion before an assertion inspects what a listener saw.
+function settle(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
 
 test("formatLogLine and parseLogLine round trip", () => {
   const entry: LogEntry = {
@@ -32,6 +39,64 @@ test("parseLogLine preserves tabs inside the message", () => {
   const parsed = parseLogLine(formatLogLine(entry));
 
   assert.deepEqual(parsed, entry);
+});
+
+const messageRoundTripCases: { message: string; label: string }[] = [
+  { label: "embedded newline", message: "error\nstacktrace" },
+  { label: "embedded CR", message: "line1\rline2" },
+  { label: "literal backslash-n", message: "path\\nother" },
+  { label: "both literal backslash-n and real newline", message: "path\\nother\nand more" },
+  { label: "multiple newlines", message: "a\nb\nc" },
+  { label: "CRLF", message: "line1\r\nline2" },
+];
+
+for (const { message, label } of messageRoundTripCases) {
+  test(`formatLogLine/parseLogLine round trip: ${label}`, () => {
+    const entry: LogEntry = {
+      time: Date.parse("2026-07-14T10:00:00.000Z"),
+      level: "error",
+      message,
+    };
+
+    const parsed = parseLogLine(formatLogLine(entry));
+
+    assert.deepEqual(parsed, entry);
+  });
+}
+
+test("formatLogLine produces a single physical line for a message with newlines", () => {
+  const entry: LogEntry = {
+    time: Date.parse("2026-07-14T10:00:00.000Z"),
+    level: "error",
+    message: "ENOENT\n  at readFileSync",
+  };
+
+  const line = formatLogLine(entry);
+
+  assert.equal(line.includes("\n"), false);
+});
+
+test("parseLogLine survives the adapter's split-on-newline path", () => {
+  const entry: LogEntry = {
+    time: Date.parse("2026-07-14T10:00:00.000Z"),
+    level: "error",
+    message: "sync: ENOENT\n  at readFileSync\n  at load",
+  };
+
+  const persisted = `${formatLogLine(entry)}\n`;
+
+  const entries: LogEntry[] = [];
+  for (const line of persisted.split("\n")) {
+    if (line !== "") {
+      const parsed = parseLogLine(line);
+      if (parsed !== undefined) {
+        entries.push(parsed);
+      }
+    }
+  }
+
+  assert.equal(entries.length, 1);
+  assert.deepEqual(entries[0], entry);
 });
 
 const malformedLines = [
@@ -164,4 +229,84 @@ test("createLogger: debug messages persist once minLevel is debug", async () => 
     messages.push(entry.message);
   }
   assert.deepEqual(messages, ["verbose detail"]);
+});
+
+test("createLogger: onEntry receives each persisted entry once the append settles", async () => {
+  const sink = createMemorySink(10);
+  const seen: string[] = [];
+  const logger = createLogger(sink, "debug", (entry) => seen.push(entry.message));
+
+  logger.info("first");
+  logger.warn("second");
+  await settle();
+
+  assert.deepEqual(seen, ["first", "second"]);
+});
+
+test("createLogger: onEntry is not called for entries below minLevel", async () => {
+  const sink = createMemorySink(10);
+  const seen: string[] = [];
+  const logger = createLogger(sink, "warn", (entry) => seen.push(entry.message));
+
+  logger.debug("noisy");
+  logger.info("still noisy");
+  logger.warn("worth keeping");
+  await settle();
+
+  assert.deepEqual(seen, ["worth keeping"]);
+});
+
+test("createLogger: a throwing onEntry does not break logging or persistence", async () => {
+  const sink = createMemorySink(10);
+  const logger = createLogger(sink, "debug", () => {
+    throw new Error("listener boom");
+  });
+
+  logger.info("still logged");
+  await settle();
+
+  const messages: string[] = [];
+  for (const entry of await sink.read()) {
+    messages.push(entry.message);
+  }
+  assert.deepEqual(messages, ["still logged"]);
+});
+
+test("createLogBus: emit delivers the entry to every subscriber", () => {
+  const bus = createLogBus();
+  const first: LogEntry[] = [];
+  const second: LogEntry[] = [];
+  bus.subscribe((entry) => first.push(entry));
+  bus.subscribe((entry) => second.push(entry));
+
+  const entry: LogEntry = { time: 1, level: "info", message: "hello" };
+  bus.emit(entry);
+
+  assert.deepEqual(first, [entry]);
+  assert.deepEqual(second, [entry]);
+});
+
+test("createLogBus: unsubscribing stops further delivery", () => {
+  const bus = createLogBus();
+  const seen: string[] = [];
+  const unsubscribe = bus.subscribe((entry) => seen.push(entry.message));
+
+  bus.emit({ time: 1, level: "info", message: "before" });
+  unsubscribe();
+  bus.emit({ time: 2, level: "info", message: "after" });
+
+  assert.deepEqual(seen, ["before"]);
+});
+
+test("createLogBus: one throwing listener does not stop the others", () => {
+  const bus = createLogBus();
+  const seen: string[] = [];
+  bus.subscribe(() => {
+    throw new Error("listener boom");
+  });
+  bus.subscribe((entry) => seen.push(entry.message));
+
+  bus.emit({ time: 1, level: "info", message: "delivered" });
+
+  assert.deepEqual(seen, ["delivered"]);
 });

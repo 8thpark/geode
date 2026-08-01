@@ -1,9 +1,10 @@
 {
   "id": "geode",
   "name": "Geode",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "minAppVersion": "1.11.4",
-  "description": "Remote sync, MCP, and an API for your Obsidian vault.",
+  "description": "Easy, secure access to your Obsidian vault from anywhere, for humans and agents.",
   "author": "8thpark",
+  "authorUrl": "https://geode.so",
   "isDesktopOnly": false
 }

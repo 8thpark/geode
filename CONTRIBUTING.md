@@ -48,9 +48,11 @@ Two tiers, two commands:
 - `npm run test:integration` — integration tests, real HTTP against a real S3 compatible server
   (MinIO). Brings up `docker-compose.yml` itself if it isn't already running, so there's no
   manual pre-step; safe to run repeatedly regardless of current state. Runs against the
-  `geode-test` bucket (separate from `geode-dev`, so automated runs don't collide with whatever
-  you're doing manually in Obsidian). Still requires Docker installed and Colima (or your
-  alternative) started — it can bring the *stack* up, not the VM underneath it.
+  `geode-test` bucket (storage tests) and `geode-sync-test` (sync tests, which wipe their bucket
+  between scenarios and so need it to themselves), both separate from `geode-dev` so automated
+  runs don't collide with whatever you're doing manually in Obsidian. Still requires Docker
+  installed and Colima (or your alternative) started — it can bring the *stack* up, not the VM
+  underneath it.
 
 Both tiers use the exact same `docker-compose.yml` MinIO setup as interactive dev — one S3
 compatible server, not a second hand-rolled fake to keep in sync.
@@ -84,10 +86,15 @@ With `npm run dev` running:
 5. Run `Geode: Sync` from the command palette, or click the status bar icon bottom right, to
    push and pull against the storage server. Check the result either in the `Geode: Logs` pane or
    directly in the bucket:
+
    ```bash
    docker compose run --rm --entrypoint sh create-bucket -c \
      "mc alias set local http://minio:9000 geodedev geodedev && mc ls local/geode-dev"
    ```
+
+   Object keys are content addressed (`.geode/blobs/<sha256>`), not vault paths, so this listing
+   won't show your note names; `.geode/manifest.json` is what maps a path to the blob holding its
+   content.
 
 Obsidian's plugin data file (`data.json`), geode's own vault state file (`state.json`), and its
 log file (`geode.log`), all of which land at the repo root because the dev vault symlinks the
@@ -121,3 +128,36 @@ valid from the Linux side.
 By contributing, you agree your contribution is licensed under this repository's
 [LICENSE](./LICENSE) and that the project may relicense it as Geode evolves. This keeps future
 licensing changes possible without tracking down every past contributor.
+
+## Versioning
+
+The project follows [Semantic Versioning](https://semver.org/). Release tags are never prefixed
+with `v` (e.g. `0.1.0`), matching Obsidian's
+[manifest](https://docs.obsidian.md/Reference/Manifest) specification. Pre-releases before an
+official version carry a `-beta.N` suffix, e.g. `0.1.0-beta.1`. Before `1.0.0` anything may change
+and the public API should not be considered stable; we aim to avoid churn, but early is early.
+
+The version number is duplicated in `package.json` and `manifest.json`; bump both together for
+every release. The README's version badge reads `package.json`, and Obsidian reads `manifest.json`.
+
+## Releasing
+
+Releases are cut by pushing a tag; a workflow does the mechanical work and leaves you a draft to
+launch. The steps:
+
+1. Bump `package.json` and `manifest.json` to the new version (they must agree, `check-versions`
+   enforces it), open a PR, merge to `main`.
+2. Tag the merged commit and push it, no `v` prefix: `git tag 0.1.0 && git push origin 0.1.0`.
+   A `-beta.N` suffix marks a pre-release, e.g. `0.1.0-beta.2`.
+3. The tag push triggers [`release.yml`](./.github/workflows/release.yml), which rebuilds the
+   artifacts from the tagged commit (validating the tag against `manifest.json` and secret-scanning
+   the exact bytes), signs them with keyless [build provenance](https://docs.github.com/actions/security-guides/using-artifact-attestations-to-establish-provenance-for-builds),
+   and creates a **draft** GitHub release with the assets, a per-asset signed provenance bundle
+   (`<asset>.sigstore.json`), and generated notes as a skeleton attached. A `-beta.N` tag is
+   marked pre-release automatically.
+4. Open the draft, rewrite the generated notes into real release notes, then publish. Editing notes
+   and publishing is metadata only, so it never invalidates the signature over the asset bytes.
+
+There is no long-lived signing key: provenance is signed keylessly against the workflow's GitHub
+identity and recorded in a public transparency log. See [SECURITY.md](./SECURITY.md) for how anyone
+verifies a downloaded release.

@@ -1,14 +1,15 @@
-import type { PutCondition, StorageClient } from "../storage/storage.ts";
+import type { ObjectMeta, PutCondition, StorageClient } from "../storage/storage.ts";
 import {
   byPath,
+  decodeSnapshot,
+  encodeSnapshot,
   type FileState,
-  isSnapshot,
   type Reader,
   type Snapshot,
   takeSnapshot,
 } from "../vault/vault.ts";
 import { executeSyncPlan, type LocalWriter, type SyncFailure } from "./execute.ts";
-import { MANIFEST_KEY, manifestAfterSync, planSync, type SyncAction } from "./plan.ts";
+import { BLOB_PREFIX, MANIFEST_KEY, manifestAfterSync, planSync, type SyncAction } from "./plan.ts";
 
 // SyncOutcome is the result of a single sync pass. On success it carries the new snapshot to
 // persist as the next sync's starting point and how many actions were applied; on failure it
@@ -19,7 +20,12 @@ import { MANIFEST_KEY, manifestAfterSync, planSync, type SyncAction } from "./pl
 // manifest never uploaded, or never got that far).
 export type SyncOutcome =
   | { ok: true; snapshot: Snapshot; changeCount: number }
-  | { ok: false; message: string; failures: SyncFailure[]; snapshot: Snapshot | null };
+  | {
+      ok: false;
+      message: string;
+      failures: SyncFailure[];
+      snapshot: Snapshot | null;
+    };
 
 // adoptLiveStats returns manifest with each entry swapped for the live vault's entry at the same
 // path wherever the content hashes match, so state.json carries local size and mtime and the next
@@ -46,7 +52,10 @@ export function adoptLiveStats(manifest: Snapshot, live: Snapshot): Snapshot {
 // has ever been written, the safe assumption for a first sync against an empty bucket, so that's
 // treated as an empty snapshot flagged firstSync. Any other failure (network, auth, a real 5xx)
 // is reported as an error rather than ever guessed at as "remote is empty" — getting that guess
-// wrong would look exactly like every previously known remote file had just been deleted.
+// wrong would look exactly like every previously known remote file had just been deleted. A
+// manifest carrying a format version this build does not know (#91) also refuses the pass:
+// syncing against a bucket written in a newer format could mangle it, and the fix is updating
+// the plugin, not starting over.
 //
 // firstSync distinguishes "no manifest has ever been written" from "a manifest exists and is
 // genuinely empty": syncOnce must ignore the local ancestor in the former (nothing has ever been
@@ -66,13 +75,14 @@ export async function readRemoteManifest(
   const fetched = await storage.getObject(MANIFEST_KEY);
 
   if (fetched.ok && fetched.body !== null) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(new TextDecoder().decode(fetched.body));
-    } catch {
-      return { ok: false, message: "remote manifest is corrupt" };
-    }
-    if (!isSnapshot(parsed)) {
+    const decoded = decodeSnapshot(new TextDecoder().decode(fetched.body));
+    if (!decoded.ok) {
+      if (decoded.reason === "unsupportedVersion") {
+        return {
+          ok: false,
+          message: "remote manifest is a format this version of geode can't read",
+        };
+      }
       return { ok: false, message: "remote manifest is corrupt" };
     }
     // Every S3 compatible server returns an ETag on a successful read; without one (a stripping
@@ -82,12 +92,10 @@ export async function readRemoteManifest(
     if (fetched.etag === null) {
       return { ok: false, message: "remote manifest has no etag" };
     }
-    return { ok: true, snapshot: parsed, firstSync: false, etag: fetched.etag };
+    return { ok: true, snapshot: decoded.snapshot, firstSync: false, etag: fetched.etag };
   }
 
-  // TODO(#41): GetResult conflates 404 with every other failure; swap this for a real status
-  // once that's fixed, rather than sniffing the message text for a status code.
-  if (fetched.message.includes("(404)")) {
+  if (fetched.status === "not_found") {
     return { ok: true, snapshot: { files: [] }, firstSync: true };
   }
   return { ok: false, message: fetched.message };
@@ -150,21 +158,74 @@ export async function syncOnce(
 
   const local = await takeSnapshot(reader, ancestor);
 
-  const actions = planSync(ancestor, local, remote.snapshot);
-  const executed = await executeSyncPlan(actions, local, reader, localWriter, storage, now);
+  // A missing manifest usually means a fresh bucket, but not always: a lifecycle rule, manual
+  // cleanup, or partial restore can remove the manifest while blob objects survive (#109). Unlike
+  // the plaintext path keyed layout this replaced, that survival is not automatically a hazard: a
+  // blob's key is its own content hash, so a survivor whose hash matches something the local
+  // vault still holds needs no recovery at all, the ordinary push below finds it already there
+  // (one HEAD, no re-upload) and the manifest this pass writes describes it correctly. What
+  // remains dangerous is a survivor whose hash matches nothing local: unexplained content this
+  // device cannot account for, most plausibly a different vault's data that once shared this
+  // bucket, or the very race #109 first named.
+  //
+  // This is reported rather than refused outright. An earlier version blocked the whole pass on
+  // any unexplained survivor, but that has no path back to a clean state when the explanation is
+  // mundane rather than sinister: an interrupted first sync leaves a blob behind, the local file
+  // it belonged to is deleted before the retry, and now nothing local will ever explain it again.
+  // Since remote.firstSync only flips to false once a manifest actually lands, a hard refusal here
+  // never writes one, so every retry hits the identical refusal forever, a permanent deadlock over
+  // an entirely ordinary local edit, worse than the silent stranding #109 fixed. Proceeding lets a
+  // real first sync complete and end firstSync state, at the cost that content #109 would have
+  // caught explicitly now stays unreferenced instead: still sitting in the bucket, never destroyed,
+  // just unreachable through any manifest until someone notices this failure and investigates.
+  const remoteView = remote.snapshot;
+  const strandedFailures: SyncFailure[] = [];
+  if (remote.firstSync) {
+    const listed = await storage.listObjects(BLOB_PREFIX);
+    if (!listed.ok) {
+      return { ok: false, message: listed.message, failures: [], snapshot: null };
+    }
+    for (const key of unexplainedBlobs(listed.objects, local)) {
+      strandedFailures.push({ path: key, message: "in the bucket but not in the local vault" });
+    }
+  }
+
+  // A pull family action re-checks this etag immediately before it writes fetched content locally
+  // (execute.ts's manifestDrifted), so a manifest another device replaces mid pass is caught before
+  // stale content lands on disk rather than only afterward, when this pass's own manifest upload
+  // fails. null on a first sync: there is no manifest yet for a pull to have gone stale against.
+  let manifestEtag: string | null = null;
+  if (!remote.firstSync) {
+    manifestEtag = remote.etag;
+  }
+  const actions = planSync(ancestor, local, remoteView);
+  const executed = await executeSyncPlan(
+    actions,
+    local,
+    reader,
+    localWriter,
+    storage,
+    now,
+    remoteView,
+    manifestEtag,
+  );
 
   // The manifest is derived from what the plan just did to the bucket, never from a fresh disk
   // snapshot: a file edited while the plan ran would land in a re-snapshot claiming content the
   // bucket never received, the edit would then never upload (state.json already agrees with the
   // manifest), and another device could later push the stale bucket copy back over it (#84). The
   // re-snapshot here only refreshes stats, so a mid sync edit keeps its bucket entry and reads as
-  // a local change on the next pass. Only completed actions feed in, so a failed action's path
-  // keeps the entry the bucket really holds; the manifest is uploaded even when some actions
-  // failed, so one bad file never leaves the rest of the pass's pushes invisible to every other
-  // device (#87).
-  const manifest = manifestAfterSync(local, remote.snapshot, executed.completed, now);
+  // a local change on the next pass. completed is only consulted for pushDelete, so a failed
+  // delete's path keeps the entry the bucket really holds; every pushed entry is recorded at the
+  // hash executed.pushedFiles carries, hashed from the bytes executeSyncPlan actually wrote to the
+  // bucket rather than this local snapshot or the owning action's own success, so neither an edit
+  // landing between the snapshot and a push's own read nor a conflict's copy succeeding while its
+  // restore fails ever leaves the manifest silent about content the bucket really holds. The
+  // manifest is uploaded even when some actions failed, so one bad file never leaves the rest of
+  // the pass's pushes invisible to every other device (#87).
+  const manifest = manifestAfterSync(remoteView, executed.completed, executed.pushedFiles);
   const final = adoptLiveStats(manifest, await takeSnapshot(reader, local));
-  const manifestBody = new TextEncoder().encode(JSON.stringify(final));
+  const manifestBody = new TextEncoder().encode(encodeSnapshot(final));
 
   // The upload is conditional on the remote manifest still being exactly what this pass read at
   // the start (or still absent, on a first sync). An unconditional put would last-writer-win
@@ -186,19 +247,50 @@ export async function syncOnce(
         snapshot: null,
       };
     }
-    return { ok: false, message: uploaded.message, failures: executed.failures, snapshot: null };
+    return {
+      ok: false,
+      message: uploaded.message,
+      failures: executed.failures,
+      snapshot: null,
+    };
   }
 
   // The count comes from failed (one entry per planned path), not failures: a conflict can report
   // two operation failures (copy push and pull) for the same file, and the message counts files.
-  if (executed.failed.length > 0) {
+  // strandedFailures adds to it without adding to failed: there is no action, planned or
+  // otherwise, for a path a stranded blob doesn't have, so there is nothing for revertFailedPaths
+  // to revert; it is folded in here purely so the pass reports itself failed and names what it
+  // could not explain, rather than returning ok on a first sync that left content unreferenced.
+  if (executed.failed.length > 0 || strandedFailures.length > 0) {
     return {
       ok: false,
-      message: `${executed.failed.length} file(s) failed to sync`,
-      failures: executed.failures,
+      message: `${executed.failed.length + strandedFailures.length} file(s) failed to sync`,
+      failures: [...executed.failures, ...strandedFailures],
       snapshot: revertFailedPaths(final, ancestor, executed.failed),
     };
   }
 
   return { ok: true, snapshot: final, changeCount: actions.length };
+}
+
+// unexplainedBlobs returns the blob keys a first sync cannot account for: survivors whose content
+// hash matches nothing in the local vault, so nothing this pass is about to do would ever
+// reference them. Every other survivor, whose hash a local file already carries, needs no special
+// handling: the ordinary push below finds it already there and folds it into the manifest for
+// free. Exported for its tests; syncOnce is the only production caller.
+export function unexplainedBlobs(objects: ObjectMeta[], local: Snapshot): string[] {
+  const localHashes = new Set<string>();
+  for (const entry of local.files) {
+    localHashes.add(entry.hash);
+  }
+
+  const unexplained: string[] = [];
+  for (const object of objects) {
+    const hash = object.key.slice(BLOB_PREFIX.length);
+    if (!localHashes.has(hash)) {
+      unexplained.push(object.key);
+    }
+  }
+
+  return unexplained;
 }

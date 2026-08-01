@@ -1,7 +1,16 @@
-import type { DataAdapter, Vault } from "obsidian";
+import type { DataAdapter, Vault, Workspace } from "obsidian";
 import { shouldIgnore } from "../ignore.ts";
-import type { LocalWriter } from "../sync/execute.ts";
-import { type FileInfo, isSnapshot, type Reader, type Snapshot, type Store } from "./vault.ts";
+import type { GeodeSettings } from "../settings/settings.ts";
+import { DRIFT_MESSAGE, type LocalWriter, type WriteMode } from "../sync/execute.ts";
+import {
+  decodeSnapshot,
+  encodeSnapshot,
+  type FileInfo,
+  fingerprintSettings,
+  type Reader,
+  type Snapshot,
+  type Store,
+} from "./vault.ts";
 
 // createObsidianLocalWriter returns a LocalWriter that applies pulled remote changes straight
 // through the low level data adapter, rather than the Vault API, since a path pulled down for
@@ -9,19 +18,46 @@ import { type FileInfo, isSnapshot, type Reader, type Snapshot, type Store } fro
 // staged to a hidden temp file and renamed into place, never written directly to its destination,
 // so an interrupted pull cannot leave torn bytes for the next snapshot to read as a local edit
 // and push to the bucket (#88).
+//
+// Staging and installing are separate calls rather than one writeFile, so the caller can run its
+// drift checks in between: the payload is already on disk by then, leaving only commit's rename
+// between the last check and the destination changing (see commitPulledContent in sync/execute.ts).
 export function createObsidianLocalWriter(adapter: DataAdapter): LocalWriter {
   return {
-    writeFile: async (path, data) => {
+    stageFile: async (path, data, mode) => {
       await ensureParentDir(adapter, path);
       const buffer = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
-      await writeThroughTemp(adapter, path, buffer as ArrayBuffer);
+      const tempPath = hiddenSiblingPath(path, ".geode-tmp");
+      await adapter.writeBinary(tempPath, buffer as ArrayBuffer);
+
+      return {
+        commit: async () => {
+          await installStaged(adapter, tempPath, path, mode);
+        },
+        discard: async () => {
+          const exists = await adapter.exists(tempPath);
+          if (!exists) {
+            return;
+          }
+          await adapter.remove(tempPath);
+        },
+      };
     },
     deleteFile: async (path) => {
       const exists = await adapter.exists(path);
       if (!exists) {
         return;
       }
-      await adapter.remove(path);
+      // A pulled deletion is moved to trash, never hard removed, so a delete that turns out to be
+      // a mistake stays recoverable on this device (#53), mirroring what Obsidian does for a
+      // manual delete. System trash is tried first and the vault-local .trash folder is the
+      // fallback when the OS has no trash (mobile, a headless host), so the file is always
+      // recoverable somewhere rather than gone.
+      const trashed = await adapter.trashSystem(path);
+      if (trashed) {
+        return;
+      }
+      await adapter.trashLocal(path);
     },
     renameFile: async (path, newPath) => {
       await ensureParentDir(adapter, newPath);
@@ -35,9 +71,6 @@ export function createObsidianLocalWriter(adapter: DataAdapter): LocalWriter {
 // lives inside .obsidian/plugins/geode/) never shows up as a vault file to snapshot.
 export function createObsidianReader(vault: Vault, ignorePatterns: string[]): Reader {
   return {
-    fileExists: async (path) => {
-      return vault.getFileByPath(path) !== null;
-    },
     listFiles: async () => {
       const files: FileInfo[] = [];
       for (const file of vault.getFiles()) {
@@ -59,13 +92,30 @@ export function createObsidianReader(vault: Vault, ignorePatterns: string[]): Re
       const buffer = await vault.readBinary(file);
       return new Uint8Array(buffer);
     },
+    // Both fields come from the TFile the vault already holds in memory, so this is an index
+    // lookup rather than a filesystem call: cheap enough to run immediately before a destructive
+    // write, which is the whole reason a pull can confirm a path is untouched without rereading it.
+    stat: async (path) => {
+      const file = vault.getFileByPath(path);
+      if (file === null) {
+        return { present: false, size: 0, mtime: 0 };
+      }
+      return { present: true, size: file.stat.size, mtime: file.stat.mtime };
+    },
   };
 }
 
 // createObsidianStore returns a Store that persists the snapshot at statePath via the
-// vault adapter. A missing or unparseable file is treated as "no snapshot yet" rather than an
-// error, since the safest fallback for corrupt state is to start fresh, not to crash sync.
-export function createObsidianStore(adapter: DataAdapter, statePath: string): Store {
+// vault adapter. A missing, unparseable, or unsupported-version file is treated as "no snapshot
+// yet" rather than an error, since the safest fallback for unusable state is to start fresh, not
+// to crash sync: an empty ancestor can at worst produce conflict copies, never data loss, and a
+// state.json from a newer format only ever appears alongside a newer format manifest, which
+// readRemoteManifest refuses before the ancestor matters.
+export function createObsidianStore(
+  adapter: DataAdapter,
+  statePath: string,
+  settings: GeodeSettings,
+): Store {
   const empty: Snapshot = { files: [] };
 
   return {
@@ -74,34 +124,72 @@ export function createObsidianStore(adapter: DataAdapter, statePath: string): St
       if (!exists) {
         return empty;
       }
+      let raw: string;
       try {
-        const parsed: unknown = JSON.parse(await adapter.read(statePath));
-        if (isSnapshot(parsed)) {
-          return parsed;
-        }
-        return empty;
+        raw = await adapter.read(statePath);
       } catch {
         return empty;
       }
+      const decoded = decodeSnapshot(raw);
+      if (!decoded.ok) {
+        return empty;
+      }
+      if (decoded.snapshot.settingsFingerprint !== fingerprintSettings(settings)) {
+        return empty;
+      }
+
+      return decoded.snapshot;
     },
     write: async (snapshot) => {
-      await adapter.write(statePath, JSON.stringify(snapshot));
+      const withFingerprint: Snapshot = {
+        ...snapshot,
+        settingsFingerprint: fingerprintSettings(settings),
+      };
+      await adapter.write(statePath, encodeSnapshot(withFingerprint));
     },
   };
 }
 
+// flushOpenEditors forces every open markdown editor to write its current buffer to disk, closing
+// the window where Obsidian's own debounced autosave (TextFileView.requestSave, ~2s) leaves
+// keystrokes sitting in the editor only: checkLocalDrift reads through the Vault API, which only
+// ever sees bytes already on disk, so without this a pull can land on a path whose editor still
+// holds older content, and the next autosave then silently overwrites the pulled bytes with
+// content sync never saw and never checked. Called right before a snapshot is taken, so the
+// residual race is only whatever the user types in the moment between this flush and that read,
+// not however long has passed since Obsidian's own debounce last fired. A leaf whose view carries
+// no save (anything other than a text file view) is skipped rather than treated as an error.
+export async function flushOpenEditors(workspace: Workspace): Promise<void> {
+  const leaves = workspace.getLeavesOfType("markdown");
+  const flushes: Promise<void>[] = [];
+  for (const leaf of leaves) {
+    const view = leaf.view as unknown as { save?: () => Promise<void> };
+    if (typeof view.save !== "function") {
+      continue;
+    }
+    flushes.push(view.save());
+  }
+  await Promise.all(flushes);
+}
+
 // ensureParentDir creates path's parent folder, and any folders above it, before a write that
-// might land somewhere the vault has never had a file before. mkdir is assumed to create
-// intermediate folders the same way Obsidian's own folder creation does.
+// might land somewhere the vault has never had a file before. Each folder level is created in
+// turn rather than left to a single adapter.mkdir call on the deepest one, since Obsidian's public
+// API leaves whether mkdir recurses through missing intermediate folders undocumented, and mobile
+// adapters (Capacitor) are not known to match desktop's behavior here.
 async function ensureParentDir(adapter: DataAdapter, path: string): Promise<void> {
   const lastSlash = path.lastIndexOf("/");
   if (lastSlash === -1) {
     return;
   }
   const dir = path.slice(0, lastSlash);
-  const exists = await adapter.exists(dir);
-  if (!exists) {
-    await adapter.mkdir(dir);
+  let current = "";
+  for (const segment of dir.split("/")) {
+    current = current === "" ? segment : `${current}/${segment}`;
+    const exists = await adapter.exists(current);
+    if (!exists) {
+      await adapter.mkdir(current);
+    }
   }
 }
 
@@ -141,19 +229,36 @@ async function replaceViaAside(
   await adapter.remove(asidePath);
 }
 
-// writeThroughTemp stages data at a hidden temp path beside its destination, then renames it into
-// place, so a crash mid write leaves the destination either untouched or fully written, never
-// holding torn bytes (#88). Desktop's adapter rename replaces an existing destination atomically;
-// a rename that fails while the destination exists is retried through replaceViaAside, shrinking
-// the exposure from the whole download and write to the instant between the two renames, where a
-// crash leaves the path absent and the next sync replans the pull instead of pushing corruption.
-async function writeThroughTemp(
+// installStaged renames an already staged file onto its destination, the step that actually changes
+// what the vault holds, so a crash mid write leaves the destination either untouched or fully
+// written, never holding torn bytes (#88). Desktop's adapter rename replaces an existing
+// destination atomically; a rename that fails while the destination exists is retried through
+// replaceViaAside, shrinking the exposure from the whole download and write to the instant between
+// the two renames, where a crash leaves the path absent and the next sync replans the pull instead
+// of pushing corruption.
+//
+// A "create" write refuses that replacement entirely: its caller staged these bytes for a path it
+// had reason to believe was empty, so a file being there means one appeared since, and installing
+// over it would destroy content nothing else holds. The existence check is the adapter's own stat,
+// the only view that sees a file the moment it lands rather than when Obsidian's index catches up,
+// and it sits one call before the rename, which is as tight as an adapter with no create-exclusive
+// rename allows. Throwing is how every failure leaves this layer; executeSyncPlan turns it back
+// into an ordinary per file failure the moment it crosses the boundary.
+async function installStaged(
   adapter: DataAdapter,
+  tempPath: string,
   path: string,
-  data: ArrayBuffer,
+  mode: WriteMode,
 ): Promise<void> {
-  const tempPath = hiddenSiblingPath(path, ".geode-tmp");
-  await adapter.writeBinary(tempPath, data);
+  if (mode === "create") {
+    const occupied = await adapter.exists(path);
+    if (occupied) {
+      throw new Error(DRIFT_MESSAGE);
+    }
+    await adapter.rename(tempPath, path);
+
+    return;
+  }
   try {
     await adapter.rename(tempPath, path);
   } catch (err) {
