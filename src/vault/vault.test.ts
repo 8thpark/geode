@@ -21,9 +21,6 @@ function fakeReader(files: Record<string, { content: string; mtime: number }>): 
 } {
   let reads = 0;
   const reader: Reader = {
-    fileExists: async (path) => {
-      return files[path] !== undefined;
-    },
     listFiles: async () => {
       const list: FileInfo[] = [];
       for (const [path, file] of Object.entries(files)) {
@@ -39,12 +36,12 @@ function fakeReader(files: Record<string, { content: string; mtime: number }>): 
       }
       return new TextEncoder().encode(file.content);
     },
-    size: async (path) => {
+    stat: async (path) => {
       const file = files[path];
       if (file === undefined) {
-        return 0;
+        return { present: false, size: 0, mtime: 0 };
       }
-      return file.content.length;
+      return { present: true, size: file.content.length, mtime: file.mtime };
     },
   };
   return { reader, readCount: () => reads };
@@ -129,22 +126,31 @@ test("encodeSnapshot: the wire format carries the version marker and round-trips
   assert.deepEqual(decodeSnapshot(raw), { ok: true, snapshot });
 });
 
-test("decodeSnapshot: version handling accepts the marker, treats absence as version 1, and refuses the unknown", () => {
+test("decodeSnapshot: only the current version is accepted; version 1, missing, and newer are all refused", () => {
   const files = [{ path: "a.md", size: 1, mtime: 2, hash: "h" }];
   const cases: { name: string; raw: string; want: DecodedSnapshot }[] = [
     {
       name: "the current versioned format",
-      raw: JSON.stringify({ version: 1, files }),
+      raw: JSON.stringify({ version: 2, files }),
       want: { ok: true, snapshot: { files } },
     },
     {
-      name: "a pre-marker snapshot with no version field, version 1 by definition",
+      // Version 1, plaintext path keyed storage, predates the marker (#91) and is version 1 by
+      // definition. Its JSON shape is identical to version 2's (both are `{files: [...]}`), only
+      // the marker distinguishes them, so this build refuses it rather than misread its paths as
+      // content addressed keys.
+      name: "a pre-marker snapshot with no version field",
       raw: JSON.stringify({ files }),
-      want: { ok: true, snapshot: { files } },
+      want: { ok: false, reason: "unsupportedVersion" },
+    },
+    {
+      name: "an explicit version 1, plaintext path keyed storage",
+      raw: JSON.stringify({ version: 1, files }),
+      want: { ok: false, reason: "unsupportedVersion" },
     },
     {
       name: "a version from a newer build",
-      raw: JSON.stringify({ version: 2, files }),
+      raw: JSON.stringify({ version: 3, files }),
       want: { ok: false, reason: "unsupportedVersion" },
     },
     {
@@ -152,7 +158,7 @@ test("decodeSnapshot: version handling accepts the marker, treats absence as ver
       // itself (files as an encrypted blob, say), and it must read as "needs a newer build",
       // never as corrupt.
       name: "a newer version whose shape this build does not understand",
-      raw: JSON.stringify({ version: 2, files: "ciphertext" }),
+      raw: JSON.stringify({ version: 3, files: "ciphertext" }),
       want: { ok: false, reason: "unsupportedVersion" },
     },
     {
@@ -162,8 +168,16 @@ test("decodeSnapshot: version handling accepts the marker, treats absence as ver
     },
     { name: "bytes that aren't JSON", raw: "not json", want: { ok: false, reason: "corrupt" } },
     {
-      name: "JSON of the wrong shape",
-      raw: JSON.stringify({ version: 1 }),
+      name: "JSON of the wrong shape at the current version",
+      raw: JSON.stringify({ version: 2 }),
+      want: { ok: false, reason: "corrupt" },
+    },
+    {
+      // Genuinely malformed data with no version field must still read as corrupt, not as "an old
+      // but well formed version 1 manifest": shape is checked before the missing-version case is
+      // resolved to unsupportedVersion.
+      name: "JSON of the wrong shape with no version field",
+      raw: JSON.stringify({}),
       want: { ok: false, reason: "corrupt" },
     },
   ];
@@ -183,9 +197,6 @@ test("takeSnapshot: concurrency is bounded by the limit", async () => {
   let inflight = 0;
   let peakInflight = 0;
   const reader: Reader = {
-    fileExists: async (path) => {
-      return files[path] !== undefined;
-    },
     listFiles: async () => {
       const list: FileInfo[] = [];
       for (const [path, file] of Object.entries(files)) {
@@ -206,12 +217,12 @@ test("takeSnapshot: concurrency is bounded by the limit", async () => {
       }
       return new TextEncoder().encode(file.content);
     },
-    size: async (path) => {
+    stat: async (path) => {
       const file = files[path];
       if (file === undefined) {
-        return 0;
+        return { present: false, size: 0, mtime: 0 };
       }
-      return file.content.length;
+      return { present: true, size: file.content.length, mtime: file.mtime };
     },
   };
 
@@ -232,9 +243,6 @@ test("takeSnapshot: in-flight bytes are bounded by the byte budget", async () =>
   let inflightBytes = 0;
   let peakBytes = 0;
   const reader: Reader = {
-    fileExists: async (path) => {
-      return files[path] !== undefined;
-    },
     listFiles: async () => {
       const list: FileInfo[] = [];
       for (const [path, file] of Object.entries(files)) {
@@ -256,12 +264,12 @@ test("takeSnapshot: in-flight bytes are bounded by the byte budget", async () =>
 
       return new TextEncoder().encode(file.content);
     },
-    size: async (path) => {
+    stat: async (path) => {
       const file = files[path];
       if (file === undefined) {
-        return 0;
+        return { present: false, size: 0, mtime: 0 };
       }
-      return file.content.length;
+      return { present: true, size: file.content.length, mtime: file.mtime };
     },
   };
 
@@ -291,7 +299,6 @@ test("takeSnapshot: a small read does not jump a queued large read", async () =>
   const sizes: Record<string, number> = { hog: 60, big: 60, small: 10 };
   const started: string[] = [];
   const reader: Reader = {
-    fileExists: async () => true,
     // hog fills most of the budget and is held open; big cannot fit and queues; small then arrives
     // and, with fair admission, must wait behind big rather than slipping into the gap hog left.
     listFiles: async () => [
@@ -307,8 +314,8 @@ test("takeSnapshot: a small read does not jump a queued large read", async () =>
 
       return new Uint8Array(sizes[path]);
     },
-    size: async (path) => {
-      return sizes[path];
+    stat: async (path) => {
+      return { present: true, size: sizes[path], mtime: 1 };
     },
   };
 
@@ -334,9 +341,6 @@ test("takeSnapshot: growth since listing is bounded by the fresh size", async ()
   let inflightBytes = 0;
   let peakBytes = 0;
   const reader: Reader = {
-    fileExists: async (path) => {
-      return files[path] !== undefined;
-    },
     // Every file lists as 10 bytes but has since grown to 400. Reserving on the listed 10 would let
     // several read at once and blow past the budget; reserving on the fresh size read now must not.
     listFiles: async () => {
@@ -360,12 +364,12 @@ test("takeSnapshot: growth since listing is bounded by the fresh size", async ()
 
       return new Uint8Array(file.actual);
     },
-    size: async (path) => {
+    stat: async (path) => {
       const file = files[path];
       if (file === undefined) {
-        return 0;
+        return { present: false, size: 0, mtime: 0 };
       }
-      return file.actual;
+      return { present: true, size: file.actual, mtime: file.mtime };
     },
   };
 

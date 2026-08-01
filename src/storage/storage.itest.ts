@@ -113,51 +113,36 @@ test("deleteObject removes an object", async () => {
   assert.equal(getResult.status, "not_found");
 });
 
-test("copyObject duplicates the bytes under a new key, leaving the source intact", async () => {
+test("headObject reports ok for an existing key without returning a body", async () => {
   const client = createS3Client(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
-  const body = new TextEncoder().encode("copy me");
-  await client.putObject("copy-test/source.md", body);
+  const key = "head-test/exists.md";
+  await client.putObject(key, new TextEncoder().encode("present"));
 
-  const copyResult = await client.copyObject("copy-test/source.md", "copy-test/dest.md");
-  assert.equal(copyResult.ok, true);
-  assert.equal(copyResult.status, "ok");
-
-  const dest = await client.getObject("copy-test/dest.md");
-  assert.equal(dest.ok, true);
-  assert.deepEqual(dest.body, body);
-  const source = await client.getObject("copy-test/source.md");
-  assert.equal(source.ok, true);
-
-  await client.deleteObject("copy-test/source.md");
-  await client.deleteObject("copy-test/dest.md");
-});
-
-test("copyObject round-trips a source key with SigV4-sensitive characters", async () => {
-  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
-  const key = "copy-test/Don't stop! (really).md";
-  const body = new TextEncoder().encode("tricky source");
-  await client.putObject(key, body);
-
-  const copyResult = await client.copyObject(key, "copy-test/tricky-dest.md");
-  assert.equal(copyResult.ok, true);
-
-  const dest = await client.getObject("copy-test/tricky-dest.md");
-  assert.equal(dest.ok, true);
-  assert.deepEqual(dest.body, body);
+  const headResult = await client.headObject(key);
+  assert.equal(headResult.ok, true);
+  assert.equal(headResult.status, "ok");
+  assert.notEqual(headResult.etag, null);
 
   await client.deleteObject(key);
-  await client.deleteObject("copy-test/tricky-dest.md");
 });
 
-test("copyObject of a missing source fails with not_found, never a phantom empty object", async () => {
+test("headObject on a missing key fails with not_found", async () => {
   const client = createS3Client(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
 
-  const copyResult = await client.copyObject("copy-test/does-not-exist.md", "copy-test/nope.md");
-  assert.equal(copyResult.ok, false);
-  assert.equal(copyResult.status, "not_found");
+  const headResult = await client.headObject("head-test/does-not-exist.md");
+  assert.equal(headResult.ok, false);
+  assert.equal(headResult.status, "not_found");
+});
 
-  const dest = await client.getObject("copy-test/nope.md");
-  assert.equal(dest.ok, false);
+test("headObject round-trips a key with SigV4-sensitive characters", async () => {
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
+  const key = "head-test/Don't stop! (really).md";
+  await client.putObject(key, new TextEncoder().encode("tricky key"));
+
+  const headResult = await client.headObject(key);
+  assert.equal(headResult.ok, true);
+
+  await client.deleteObject(key);
 });
 
 test("listObjects returns only keys under the given prefix", async () => {

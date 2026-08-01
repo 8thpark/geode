@@ -1,25 +1,47 @@
 import type {
-  CopyResult,
   DeleteResult,
   GetResult,
+  HeadResult,
   ListResult,
   ObjectMeta,
   PutResult,
   StorageClient,
 } from "../storage/storage.ts";
 import type { FileState, Reader, Snapshot } from "../vault/vault.ts";
-import type { LocalWriter } from "./execute.ts";
+import { DRIFT_MESSAGE, type LocalWriter } from "./execute.ts";
 
 // empty is the zero snapshot: a vault with no files.
 export const empty: Snapshot = { files: [] };
 
 // fakeLocalWriter returns a LocalWriter backed by an in-memory map, and the map itself so tests
-// can assert on the result.
+// can assert on the result. Staged content is held aside and only reaches files on commit, the same
+// seam the real writer has, so a test asserting nothing landed on disk is really asserting the
+// destination was never touched rather than that a write happened to be skipped. A "create" write
+// refuses an occupied destination exactly as the real writer's adapter stat does, so a test can
+// drive the case the real one exists for: a path recreated after a conflict's rename vacated it.
 export function fakeLocalWriter(): { writer: LocalWriter; files: Map<string, string> } {
   const files = new Map<string, string>();
+  const staged = new Map<string, string>();
   const writer: LocalWriter = {
-    writeFile: async (path, data) => {
-      files.set(path, new TextDecoder().decode(data));
+    stageFile: async (path, data, mode) => {
+      staged.set(path, new TextDecoder().decode(data));
+
+      return {
+        commit: async () => {
+          const pending = staged.get(path);
+          if (pending === undefined) {
+            throw new Error(`nothing staged for ${path}`);
+          }
+          if (mode === "create" && files.has(path)) {
+            throw new Error(DRIFT_MESSAGE);
+          }
+          staged.delete(path);
+          files.set(path, pending);
+        },
+        discard: async () => {
+          staged.delete(path);
+        },
+      };
     },
     deleteFile: async (path) => {
       files.delete(path);
@@ -35,16 +57,28 @@ export function fakeLocalWriter(): { writer: LocalWriter; files: Map<string, str
   return { writer, files };
 }
 
-// fakeReader returns a Reader backed by an in-memory map of path to content.
-export function fakeReader(files: Record<string, string>): Reader {
+// fakeReader returns a Reader backed by an in-memory map of path to content. mtimes carries the
+// modification time of any path a test needs one for, defaulting to 1: a test simulating a mid sync
+// edit sets both maps, exactly as a real editor save moves both content and mtime, which is what
+// lets a same length rewrite still read as a change.
+export function fakeReader(
+  files: Record<string, string>,
+  mtimes: Record<string, number> = {},
+): Reader {
+  function mtimeOf(path: string): number {
+    const known = mtimes[path];
+    if (known === undefined) {
+      return 1;
+    }
+
+    return known;
+  }
+
   return {
-    fileExists: async (path) => {
-      return files[path] !== undefined;
-    },
     listFiles: async () => {
       const list = [];
       for (const [path, content] of Object.entries(files)) {
-        list.push({ path, size: content.length, mtime: 1 });
+        list.push({ path, size: content.length, mtime: mtimeOf(path) });
       }
       return list;
     },
@@ -55,12 +89,13 @@ export function fakeReader(files: Record<string, string>): Reader {
       }
       return new TextEncoder().encode(content);
     },
-    size: async (path) => {
+    stat: async (path) => {
       const content = files[path];
       if (content === undefined) {
-        return 0;
+        return { present: false, size: 0, mtime: 0 };
       }
-      return content.length;
+
+      return { present: true, size: content.length, mtime: mtimeOf(path) };
     },
   };
 }
@@ -120,15 +155,21 @@ export function fakeStorage(objects: Record<string, string> = {}): {
         etag,
       };
     },
-    copyObject: async (sourceKey, destKey): Promise<CopyResult> => {
-      const content = store.get(sourceKey);
-      if (content === undefined) {
-        return { ok: false, status: "not_found", message: "Storage rejected the copy (404)" };
+    headObject: async (key): Promise<HeadResult> => {
+      if (!store.has(key)) {
+        return {
+          ok: false,
+          status: "not_found",
+          message: "Storage rejected the head (404)",
+          etag: null,
+        };
       }
-      revision++;
-      etags.set(destKey, `"v${revision}"`);
-      store.set(destKey, content);
-      return { ok: true, status: "ok", message: "" };
+      let etag: string | null = null;
+      const stored = etags.get(key);
+      if (stored !== undefined) {
+        etag = stored;
+      }
+      return { ok: true, status: "ok", message: "", etag };
     },
     deleteObject: async (key): Promise<DeleteResult> => {
       store.delete(key);

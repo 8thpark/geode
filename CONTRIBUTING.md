@@ -92,6 +92,10 @@ With `npm run dev` running:
      "mc alias set local http://minio:9000 geodedev geodedev && mc ls local/geode-dev"
    ```
 
+   Object keys are content addressed (`.geode/blobs/<sha256>`), not vault paths, so this listing
+   won't show your note names; `.geode/manifest.json` is what maps a path to the blob holding its
+   content.
+
 Obsidian's plugin data file (`data.json`), geode's own vault state file (`state.json`), and its
 log file (`geode.log`), all of which land at the repo root because the dev vault symlinks the
 whole repo in as the plugin folder, are gitignored and should never be committed. The MinIO

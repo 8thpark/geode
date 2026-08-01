@@ -16,9 +16,15 @@ import {
   createObsidianReader,
   createObsidianStore,
 } from "../vault/obsidian.ts";
-import { type Reader, type Store, takeSnapshot } from "../vault/vault.ts";
+import {
+  decodeSnapshot,
+  hashBytes,
+  type Reader,
+  type Store,
+  takeSnapshot,
+} from "../vault/vault.ts";
 import type { LocalWriter } from "./execute.ts";
-import { conflictCopyPath, MANIFEST_KEY } from "./plan.ts";
+import { blobKeyFor, conflictCopyPath, MANIFEST_KEY } from "./plan.ts";
 import { type SyncOutcome, syncOnce } from "./sync.ts";
 
 const SECRET = "geodedev";
@@ -28,9 +34,10 @@ const liveSettings: GeodeSettings = {
   provider: "custom",
   endpoint: "http://localhost:4568",
   region: "us-east-1",
-  // sync.itest has this bucket to itself: syncOnce's first sync path lists the whole bucket
-  // (#109), so sharing geode-test with storage.itest's leftover objects would trip the orphan
-  // refusal in every scenario here.
+  // sync.itest has this bucket to itself: syncOnce's first sync path lists the reserved blob
+  // prefix and refuses over anything it can't explain (#109), so sharing geode-test with
+  // storage.itest's leftover objects (harmless there, since none live under that prefix) is not
+  // worth the risk of a future test tripping the same refusal here.
   bucket: "geode-sync-test",
   accessKeyId: "geodedev",
 };
@@ -65,7 +72,8 @@ function newDevice(): Device {
 // byte length so a same millisecond, same size rewrite can never hide a change from mtime based
 // detection.
 async function writeLocal(d: Device, path: string, body: string): Promise<void> {
-  await d.writer.writeFile(path, new TextEncoder().encode(body));
+  const staged = await d.writer.stageFile(path, new TextEncoder().encode(body), "replace");
+  await staged.commit();
 }
 
 // readLocal returns a device file's contents, or undefined if it isn't there.
@@ -75,6 +83,12 @@ async function readLocal(d: Device, path: string): Promise<string | undefined> {
   } catch {
     return undefined;
   }
+}
+
+// hashOf returns the real content hash of text, for reading back the blob a given piece of
+// content lives under.
+async function hashOf(text: string): Promise<string> {
+  return hashBytes(new TextEncoder().encode(text));
 }
 
 // deleteLocal removes a file from a device's vault, the way a user deleting a note in Obsidian
@@ -195,9 +209,9 @@ test("sync: a two device conflict pushes the copy so the other device pulls it c
     assert.equal(await readLocal(b, "three/note.md"), "A edit");
     assert.equal(await readLocal(b, copyPath), "B side edit");
 
-    // Regression guard: the conflict copy reached the bucket, so the manifest B uploaded is not
-    // referencing a phantom object.
-    const remoteCopy = await storage.getObject(copyPath);
+    // Regression guard: the conflict copy's blob reached the bucket, so the manifest B uploaded is
+    // not referencing content that doesn't exist.
+    const remoteCopy = await storage.getObject(blobKeyFor(await hashOf("B side edit")));
     assert.equal(remoteCopy.ok, true);
     assert.equal(new TextDecoder().decode(remoteCopy.body ?? new Uint8Array()), "B side edit");
 
@@ -242,9 +256,13 @@ test("sync: a file deleted independently on both devices converges without a con
     assert.equal(await readLocal(a, "four/note.md"), undefined);
     assert.equal(await readLocal(b, "four/note.md"), undefined);
 
-    // No conflict copy was invented for a deletion both sides already agreed on.
-    const listed = await storage.listObjects("four/");
-    assert.deepEqual(listed.objects, []);
+    // No conflict copy was invented for a deletion both sides already agreed on: the converged
+    // manifest describes no files at all.
+    const manifestBody = await storage.getObject(MANIFEST_KEY);
+    assert.equal(manifestBody.ok, true);
+    const decoded = decodeSnapshot(new TextDecoder().decode(manifestBody.body ?? new Uint8Array()));
+    assert.ok(decoded.ok);
+    assert.deepEqual(decoded.snapshot.files, []);
   } finally {
     cleanup(a, b);
   }
@@ -300,9 +318,9 @@ test("sync: a stale state.json from an older build never deletes the vault on th
     assert.equal(await readLocal(a, "seven/one.md"), "first note");
     assert.equal(await readLocal(a, "seven/two.md"), "second note");
 
-    // Both files reached the bucket rather than being wiped from it.
-    const one = await storage.getObject("seven/one.md");
-    const two = await storage.getObject("seven/two.md");
+    // Both files' blobs reached the bucket rather than being wiped from it.
+    const one = await storage.getObject(blobKeyFor(await hashOf("first note")));
+    const two = await storage.getObject(blobKeyFor(await hashOf("second note")));
     assert.equal(new TextDecoder().decode(one.body ?? new Uint8Array()), "first note");
     assert.equal(new TextDecoder().decode(two.body ?? new Uint8Array()), "second note");
 
@@ -366,11 +384,14 @@ test("sync: two devices syncing at overlapping times never silently delete a fil
   }
 });
 
-test("sync: a deleted manifest with surviving objects refuses a first sync instead of orphaning them", async () => {
-  // Reproduces #109. A syncs a note up, then the manifest alone is deleted (a bucket lifecycle
-  // rule, manual cleanup, a partial restore) while the object survives. B, never synced, then
-  // sees what looks like a first sync; before the fix it pushed its own files and wrote a fresh
-  // manifest that never mentioned A's note, orphaning it forever.
+test("sync: a deleted manifest with unexplained blobs reports and proceeds, rather than deadlocking B forever", async () => {
+  // Reproduces #109 for content addressed storage, and the regression an outright refusal here
+  // caused. A syncs a note up, then the manifest alone is deleted (a bucket lifecycle rule, manual
+  // cleanup, a partial restore) while its blob survives. B, never synced, then sees what looks
+  // like a first sync; its local vault has no file whose content explains that blob (a's note was
+  // never B's). A hard refusal here never writes a manifest, so every future attempt of B's would
+  // hit the identical refusal forever; the pass must instead proceed, push B's own files, and
+  // report the stranded content as a failure rather than silently going ok.
   await resetRemote();
   const a = newDevice();
   const b = newDevice();
@@ -383,31 +404,36 @@ test("sync: a deleted manifest with surviving objects refuses a first sync inste
 
     const outcome = await sync(b);
     assert.ok(!outcome.ok);
-    assert.equal(outcome.message, "bucket has files but no manifest; sync would orphan them");
+    const survivorKey = blobKeyFor(await hashOf("a's note"));
     assert.deepEqual(outcome.failures, [
-      { path: "nine/from-a.md", message: "in the bucket but not in the local vault" },
+      { path: survivorKey, message: "in the bucket but not in the local vault" },
     ]);
 
-    // Nothing was pushed and no manifest was written; A's object is untouched.
-    const kept = await storage.getObject("nine/from-a.md");
+    // B's own file still pushed and a manifest still landed; A's blob is untouched, unreferenced
+    // but not destroyed.
+    const kept = await storage.getObject(survivorKey);
     assert.equal(new TextDecoder().decode(kept.body ?? new Uint8Array()), "a's note");
-    assert.equal((await storage.getObject("nine/from-b.md")).ok, false);
-    assert.equal((await storage.getObject(MANIFEST_KEY)).ok, false);
+    assert.equal((await storage.getObject(blobKeyFor(await hashOf("b's note")))).ok, true);
+    assert.equal((await storage.getObject(MANIFEST_KEY)).ok, true);
+
+    // B is not stuck: the next sync is ordinary, not a repeat of the same refusal.
+    assert.equal((await sync(b)).ok, true);
   } finally {
     cleanup(a, b);
   }
 });
 
-test("sync: a deleted manifest over a divergent object conflicts instead of wedging the sync", async () => {
+test("sync: a deleted manifest over locally diverged content reports and proceeds, rather than guessing a conflict", async () => {
   // A and B share a synced note, then the manifest alone is deleted (a lifecycle rule, manual
-  // cleanup) and B edits the note before its next sync. B sees objects and no manifest, so the
-  // path it is about to push already exists remotely holding different bytes. Before the fix that
-  // push's ifAbsent precondition failed, the 412 read as another device syncing, and B was told to
-  // sync again forever: nothing changed between attempts, so every retry failed identically.
+  // cleanup) and B edits the note before its next sync. Under the plaintext path keyed layout this
+  // replaced, the surviving object's key was the path itself, so this case could be resolved
+  // automatically as a conflict. Under content addressed storage the manifest was the only place
+  // that ever recorded which path a hash belonged to, so B's now-edited local file no longer
+  // explains the surviving blob, and the pass has no path information left to construct a
+  // conflict from; it proceeds with B's edit as a plain push and reports the stranded original.
   await resetRemote();
   const a = newDevice();
   const b = newDevice();
-  const now = Date.parse("2026-07-14T11:00:00.000Z");
   try {
     await writeLocal(a, "ten/note.md", "from A");
     assert.equal((await sync(a)).ok, true);
@@ -416,22 +442,22 @@ test("sync: a deleted manifest over a divergent object conflicts instead of wedg
     await storage.deleteObject(MANIFEST_KEY);
     await writeLocal(b, "ten/note.md", "B's own edit");
 
-    const outcome = await sync(b, now);
-    assert.equal(outcome.ok, true);
+    const outcome = await sync(b);
+    assert.ok(!outcome.ok);
+    const survivorKey = blobKeyFor(await hashOf("from A"));
+    assert.deepEqual(outcome.failures, [
+      { path: survivorKey, message: "in the bucket but not in the local vault" },
+    ]);
 
-    // The surviving object keeps the path on both sides, B's edit survives as a conflict copy, and
-    // the manifest B wrote describes both, so A converges on the same view rather than orphaning
-    // anything.
-    const copyPath = conflictCopyPath("ten/note.md", now);
-    assert.equal(await readLocal(b, "ten/note.md"), "from A");
-    assert.equal(await readLocal(b, copyPath), "B's own edit");
-    assert.equal((await sync(a)).ok, true);
-    assert.equal(await readLocal(a, "ten/note.md"), "from A");
-    assert.equal(await readLocal(a, copyPath), "B's own edit");
+    // A's original content is untouched, unreferenced but not destroyed; B's edit still pushed
+    // under its own path.
+    const kept = await storage.getObject(survivorKey);
+    assert.equal(new TextDecoder().decode(kept.body ?? new Uint8Array()), "from A");
+    assert.equal(await readLocal(b, "ten/note.md"), "B's own edit");
+    assert.equal((await storage.getObject(MANIFEST_KEY)).ok, true);
 
-    // And the pass that used to wedge is now genuinely idle on both devices.
+    // B is not stuck: the next sync is ordinary, not a repeat of the same refusal.
     assert.equal((await sync(b)).ok, true);
-    assert.equal((await sync(a)).ok, true);
   } finally {
     cleanup(a, b);
   }

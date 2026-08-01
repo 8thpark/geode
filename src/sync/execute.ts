@@ -1,36 +1,71 @@
-import type { PutCondition, StorageClient } from "../storage/storage.ts";
-import { byPath, type FileState, hashBytes, type Reader, type Snapshot } from "../vault/vault.ts";
-import { conflictCopyPath, type SyncAction, trashKeyFor } from "./plan.ts";
+import type { StorageClient } from "../storage/storage.ts";
+import {
+  byPath,
+  type FileStat,
+  type FileState,
+  hashBytes,
+  type Reader,
+  type Snapshot,
+} from "../vault/vault.ts";
+import { blobKeyFor, conflictCopyPath, MANIFEST_KEY, type SyncAction } from "./plan.ts";
 
 // DRIFT_MESSAGE is the failure reported when a local file changed after the snapshot an action
-// was planned from; the next sync re-snapshots and replans the path as a conflict.
-const DRIFT_MESSAGE = "changed locally mid sync; sync again to reconcile";
+// was planned from; the next sync re-snapshots and replans the path as a conflict. Exported
+// because a "create" mode commit reports the same thing from inside the writer, where a file that
+// appeared at the destination is visible to the adapter alone (see installStaged in
+// vault/obsidian.ts), and both are the same event to a user: something changed underneath us.
+export const DRIFT_MESSAGE = "changed locally mid sync; sync again to reconcile";
 
-const REMOTE_DRIFT_MESSAGE = "changed remotely mid sync; sync again to reconcile";
 const HASH_MISMATCH_MESSAGE = "fetched bytes do not match manifest hash; sync again to reconcile";
+const MANIFEST_DRIFT_MESSAGE = "changed remotely mid sync; sync again to reconcile";
 const MANIFEST_MISSING_HASH_MESSAGE = "manifest missing expected hash for this path";
-const REMOTE_ETAG_MESSAGE = "remote object has no etag";
 
 // ExecuteResult reports what executeSyncPlan carried out: completed holds every action fully
-// applied, failed the actions that weren't, failures the per file detail of why, concurrent
-// whether a file precondition proved the remote snapshot stale, and pushedFiles the FileState of
-// every path actually written to the bucket, hashed from those exact bytes. pushedFiles is not
-// limited to completed actions: a conflict's copy push can succeed even when the rest of that
-// same action later fails, and the copy still needs to reach the manifest.
+// applied, failed the actions that weren't, failures the per file detail of why, and pushedFiles
+// the FileState of every path a blob now exists under, hashed from those exact bytes. pushedFiles
+// is not limited to completed actions: a conflict's copy push can succeed even when the rest of
+// that same action later fails, and the copy still needs to reach the manifest. There is no
+// concurrency flag: a remote side write is either additive (a blob keyed by its own hash, which a
+// losing race still leaves holding the right bytes) or, for pushDelete, touches no bucket object at
+// all, so neither can ever discover on its own that the plan's remote view went stale mid pass. The
+// pull family (pull, pullDelete, and a conflict's restore) is different: a pull's own fetch reads a
+// specific blob by the hash the plan already decided on, which by construction always "succeeds"
+// with exactly that content, and pullDelete has no bucket object of its own to check at all, so
+// neither can notice on its own that a newer manifest has since pointed the path elsewhere or
+// repopulated it; that is what manifestDrifted checks for, with nothing left between it and the
+// local change but an index lookup (see commitPulledContent for the ordering and why every check
+// is arranged cheapest-last). The one CAS the plan ultimately depends on either way is the
+// manifest's own conditional PUT (sync.ts), the backstop that still catches anything a mid pass
+// check's own race window lets through.
 export type ExecuteResult = {
   completed: SyncAction[];
-  concurrent: boolean;
   failed: SyncAction[];
   failures: SyncFailure[];
   pushedFiles: FileState[];
 };
 
 // LocalWriter applies changes decided by a sync to the local vault. The real implementation
-// writes through the vault adapter (see vault/obsidian.ts); tests use an in-memory fake.
+// writes through the vault adapter (see vault/obsidian.ts); tests use an in-memory fake. A pulled
+// write is split across stageFile and StagedWrite.commit rather than exposed as one call, so the
+// payload reaches disk before the drift checks run and only the commit is left after them. The
+// write's WriteMode is declared at staging rather than passed to commit, so what the write is
+// allowed to do to its destination is stated once, where the write itself is described.
 export type LocalWriter = {
-  writeFile: (path: string, data: Uint8Array) => Promise<void>;
+  stageFile: (path: string, data: Uint8Array, mode: WriteMode) => Promise<StagedWrite>;
   deleteFile: (path: string) => Promise<void>;
   renameFile: (path: string, newPath: string) => Promise<void>;
+};
+
+// StagedWrite is pulled content already written to a staging file beside its destination, waiting
+// to either claim that path or be thrown away. Splitting a pull's local write at this seam is what
+// makes checkLocalDrift's guarantee real rather than nominal. Writing the payload is the slow part,
+// and it used to sit between the drift check and the destination actually changing, so the window
+// the check was meant to close still spanned however long the write took: on a large attachment,
+// long enough for an edit to land in it and be silently overwritten (#86). Staging first leaves
+// only commit's rename in that window.
+export type StagedWrite = {
+  commit: () => Promise<void>;
+  discard: () => Promise<void>;
 };
 
 // SyncFailure is one action that could not be carried out.
@@ -39,24 +74,41 @@ export type SyncFailure = {
   message: string;
 };
 
+// WriteMode says what a staged write may do to its destination when it commits. "replace" installs
+// over whatever is there, which is what an ordinary pull wants: the path's old content is exactly
+// what the plan decided to move on from. "create" refuses to commit if anything is at the path, for
+// a write whose premise is that the path is empty; a conflict's restore lands on a path the same
+// action renamed away moments earlier, so a file sitting there now was created in the window since,
+// holds content no conflict copy preserved and no snapshot describes, and must not be replaced.
+//
+// The vacancy is checked by the writer rather than by a caller's drift check because only the
+// writer can see the destination as it actually is: a filesystem stat through the adapter, which
+// sees a file the instant it appears, where a Reader check goes through Obsidian's file index,
+// which lags the very rename this action just made and would refuse sound restores as often as it
+// caught real ones. Checking inside the writer also puts the check as close to the rename as the
+// adapter allows, a syscall rather than the fetch-and-stage a caller's own checks sit behind.
+export type WriteMode = "replace" | "create";
+
 type ActionResult = {
-  concurrent: boolean;
   failures: SyncFailure[];
   pushed: FileState[];
 };
 
-type PutConditionResult =
-  | { ok: true; kind: "done" }
-  | { ok: true; kind: "put"; condition: PutCondition }
-  | { ok: false; concurrent: boolean; failure: SyncFailure };
+// LocalCheck is the outcome of checkLocalDrift: the failure to report, or the stat the path
+// carried at the moment its content was verified, for confirmLocalUnchanged to compare against
+// once the remaining checks have run.
+type LocalCheck = { ok: true; seen: FileStat } | { ok: false; failure: SyncFailure };
 
 // executeSyncPlan carries out every action against reader/localWriter (the local vault) and
 // storage (the remote bucket), and reports what completed and what couldn't be, so one failed
 // file never discards the progress of the rest of the pass (#87). local is the snapshot the plan
 // was made from, so each destructive local write can first check the file hasn't changed since
 // (#86). now is passed in rather than read internally so a conflict's copy name is deterministic
-// under test. remote is the manifest the plan was made from, used to make file PUTs conditional;
-// its empty default makes callers that lack a remote view create-only rather than overwrite.
+// under test. remote is the manifest the plan was made from, giving each action the hash its
+// path is expected to hold; its empty default suits callers with no remote view. manifestEtag is
+// the etag of that same manifest read, checked again immediately before a pull family write so a
+// manifest that moved on mid pass is caught before stale content lands on disk (see
+// manifestDrifted); null skips the check for callers with no manifest read to compare against.
 export async function executeSyncPlan(
   actions: SyncAction[],
   local: Snapshot,
@@ -65,9 +117,9 @@ export async function executeSyncPlan(
   storage: StorageClient,
   now: number,
   remote: Snapshot = { files: [] },
+  manifestEtag: string | null = null,
 ): Promise<ExecuteResult> {
   const completed: SyncAction[] = [];
-  let concurrent = false;
   const failed: SyncAction[] = [];
   const failures: SyncFailure[] = [];
   const pushedFiles: FileState[] = [];
@@ -83,6 +135,7 @@ export async function executeSyncPlan(
       localWriter,
       storage,
       now,
+      manifestEtag,
     );
     // A conflict's copy push can succeed even when the rest of the action later fails (the pull,
     // its integrity check, or the local write), so pushed is gathered regardless of outcome: it
@@ -95,18 +148,12 @@ export async function executeSyncPlan(
       continue;
     }
     failed.push(action);
-    if (actionResult.concurrent) {
-      concurrent = true;
-    }
     for (const failure of actionResult.failures) {
       failures.push(failure);
     }
-    if (actionResult.concurrent) {
-      break;
-    }
   }
 
-  return { completed, concurrent, failed, failures, pushedFiles };
+  return { completed, failed, failures, pushedFiles };
 }
 
 // applyLocalWrite runs one localWriter mutation, converting a thrown I/O error into a SyncFailure
@@ -129,38 +176,168 @@ async function applyLocalWrite(path: string, op: () => Promise<void>): Promise<S
 // conflict, which is where the conflict copy machinery lives. Only a confirmed absent path, or
 // content that still hashes to the snapshot's entry, is safe to write over: a file that exists
 // but cannot be read is refused with the read's own error, never treated as absent, since
-// deleting content that was never verified is the exact hole this check closes. Checking right
-// before the destructive write shrinks the unguardable race to the moment between this check and
-// the write itself, rather than the whole plan execution.
+// deleting content that was never verified is the exact hole this check closes.
+//
+// A passing check hands back what it saw rather than a bare null, because reading and hashing a
+// whole file is far too slow to be the last thing before the write; confirmLocalUnchanged compares
+// against this observation once the cheaper checks have run, so the content guarantee reaches all
+// the way to the mutation instead of ending wherever this check happened to sit.
 async function checkLocalDrift(
   reader: Reader,
   path: string,
   expected: FileState | undefined,
-): Promise<SyncFailure | null> {
-  const exists = await reader.fileExists(path);
-  if (!exists) {
-    return null;
+): Promise<LocalCheck> {
+  const before = await reader.stat(path);
+  if (!before.present) {
+    return { ok: true, seen: before };
   }
   let bytes: Uint8Array;
   try {
     bytes = await reader.readFile(path);
   } catch (err) {
-    return { path, message: localFailureMessage(err) };
+    return { ok: false, failure: { path, message: localFailureMessage(err) } };
   }
   if (expected === undefined) {
-    return { path, message: DRIFT_MESSAGE };
+    return { ok: false, failure: { path, message: DRIFT_MESSAGE } };
   }
   if ((await hashBytes(bytes)) !== expected.hash) {
+    return { ok: false, failure: { path, message: DRIFT_MESSAGE } };
+  }
+
+  // Read back after the content, not before it, so the stat handed on describes the file as of the
+  // instant these exact bytes were verified rather than as of whenever the read began.
+  return { ok: true, seen: await reader.stat(path) };
+}
+
+// commitPulledContent lands fetched remote bytes on a local path, in the only order that leaves
+// every check meaningful. The payload is staged first, so by the time any check runs the
+// destination is still untouched and all that remains is commit's rename; staging afterwards, as
+// this used to, meant the whole payload write sat between the last check and the path changing,
+// which on a large attachment is ample room for the edit the checks exist to protect.
+//
+// The three checks then run cheapest-last, which is the only arrangement that leaves none of them
+// standing behind another's slow work. checkLocalDrift is the expensive one: it reads and hashes
+// the whole destination, so anything ordered after it inherits that read as its own race window,
+// which is exactly what left a manifest replaced mid read able to authorize this write. It
+// therefore goes first. manifestDrifted's network round trip follows. Last, with nothing but the
+// commit behind it, confirmLocalUnchanged re-checks the destination against the index alone, so
+// the local guarantee spans the manifest HEAD as well rather than ending before it. Every check is
+// a check-then-act, and the residue of each is now a single index lookup rather than a whole file
+// read or a network call.
+//
+// mode carries the rest of the local guarantee for a write onto a path that is supposed to be
+// empty: the commit itself refuses an occupied destination (see WriteMode), which is as close to
+// the rename as a check can be placed.
+async function commitPulledContent(
+  path: string,
+  body: Uint8Array,
+  mode: WriteMode,
+  expected: FileState | undefined,
+  reader: Reader,
+  localWriter: LocalWriter,
+  storage: StorageClient,
+  manifestEtag: string | null,
+): Promise<SyncFailure | null> {
+  const staged = await stageForWrite(localWriter, path, body, mode);
+  if (!staged.ok) {
+    return staged.failure;
+  }
+  const checked = await checkLocalDrift(reader, path, expected);
+  if (!checked.ok) {
+    await discardStaged(staged.write);
+    return checked.failure;
+  }
+  if (await manifestDrifted(storage, manifestEtag)) {
+    await discardStaged(staged.write);
+    return { path, message: MANIFEST_DRIFT_MESSAGE };
+  }
+  const moved = await confirmLocalUnchanged(reader, path, checked.seen);
+  if (moved !== null) {
+    await discardStaged(staged.write);
+    return moved;
+  }
+  const failure = await applyLocalWrite(path, () => staged.write.commit());
+  if (failure !== null) {
+    await discardStaged(staged.write);
+    return failure;
+  }
+
+  return null;
+}
+
+// confirmLocalUnchanged is the last look at a path before it is written over or deleted, run after
+// the manifest check so nothing but the mutation itself follows it. It compares the path's stat
+// against the one checkLocalDrift recorded when it verified the content, and never rereads: the
+// hash has already proved those bytes were the snapshot's, and the whole point of this one is to
+// be cheap enough to sit last, so the manifest check is not left standing behind a whole file read.
+//
+// Size alone would not do. A typo fixed in place rewrites a note without changing its length, so
+// an mtime comparison is what actually makes this a guard rather than a formality; size is kept
+// beside it because a rewrite inside the same clock tick moves one when it cannot move the other.
+// This is the same stat pair takeSnapshot gates its rehash on, used here in the conservative
+// direction: it can only ever refuse a write, so an mtime that moved without the content moving
+// costs one replanned pass, never a wrong answer.
+async function confirmLocalUnchanged(
+  reader: Reader,
+  path: string,
+  seen: FileStat,
+): Promise<SyncFailure | null> {
+  const current = await reader.stat(path);
+  if (
+    current.present !== seen.present ||
+    current.size !== seen.size ||
+    current.mtime !== seen.mtime
+  ) {
     return { path, message: DRIFT_MESSAGE };
   }
 
   return null;
 }
 
-// executeAction carries out a single action and reports its failures and whether remote
-// concurrency invalidated the plan. An action can report more than one failure: a conflict whose
-// copy push fails still pulls the remote version, so the diverged local edit lands on disk even
-// when the bucket refuses the copy.
+// discardStaged throws away content staged for a write the checks went on to refuse. A discard
+// that itself fails is swallowed rather than reported: the caller is already returning the reason
+// the write was refused, which is the failure worth surfacing, and a staging path is deterministic,
+// so a leftover is reclaimed by the next write to the same path rather than accumulating (see
+// hiddenSiblingPath in vault/obsidian.ts).
+async function discardStaged(staged: StagedWrite): Promise<void> {
+  try {
+    await staged.discard();
+  } catch {
+    // Deliberately ignored, see above.
+  }
+}
+
+// ensureBlobStored makes sure a blob holding bytes exists in the bucket at hash's key, uploading
+// only when it doesn't. The key is derived from the content itself, so an object already there is
+// guaranteed byte identical to what the caller would otherwise upload: a rename or a duplicate
+// attachment costs one HEAD and nothing more, never a re-upload. A losing ifAbsent PUT still means
+// another device wrote this exact content concurrently, so it counts as success rather than the
+// concurrency failure an ordinary conditional write would report; the key can only ever hold the
+// bytes its own hash names.
+async function ensureBlobStored(
+  storage: StorageClient,
+  hash: string,
+  bytes: Uint8Array,
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  const key = blobKeyFor(hash);
+  const head = await storage.headObject(key);
+  if (head.ok) {
+    return { ok: true };
+  }
+  if (head.status !== "not_found") {
+    return { ok: false, message: head.message };
+  }
+  const put = await storage.putObject(key, bytes, { kind: "ifAbsent" });
+  if (put.ok || put.status === "conflict") {
+    return { ok: true };
+  }
+
+  return { ok: false, message: put.message };
+}
+
+// executeAction carries out a single action and reports its failures. An action can report more
+// than one failure: once a conflict has moved the local edit aside, its restore and its copy push
+// succeed or fail independently, and both outcomes belong to the same action.
 async function executeAction(
   action: SyncAction,
   localByPath: Map<string, FileState>,
@@ -169,96 +346,87 @@ async function executeAction(
   localWriter: LocalWriter,
   storage: StorageClient,
   now: number,
+  manifestEtag: string | null,
 ): Promise<ActionResult> {
   if (action.kind === "push") {
     let bytes: Uint8Array;
     try {
       bytes = await reader.readFile(action.path);
     } catch (err) {
-      return failedAction(action.path, localFailureMessage(err), false);
+      return failedAction(action.path, localFailureMessage(err));
     }
-    const checked = await putCondition(action.path, bytes, remoteByPath.get(action.path), storage);
-    if (!checked.ok) {
-      return { concurrent: checked.concurrent, failures: [checked.failure], pushed: [] };
-    }
+    // Hashed fresh from the bytes just read, not reused from a pre-push snapshot, so a file edited
+    // in the window between the snapshot and this read is never recorded in the manifest as
+    // content the bucket doesn't actually hold.
     const pushed = await pushedFile(action.path, bytes, now);
-    if (checked.kind === "done") {
-      return successfulAction([pushed]);
-    }
-    const result = await storage.putObject(action.path, bytes, checked.condition);
-    if (!result.ok) {
-      if (result.status !== "conflict") {
-        return failedAction(action.path, result.message, false);
-      }
-      const matches = await remoteMatches(action.path, bytes, storage);
-      if (matches) {
-        return successfulAction([pushed]);
-      }
-      return failedAction(action.path, result.message, true);
+    const stored = await ensureBlobStored(storage, pushed.hash, bytes);
+    if (!stored.ok) {
+      return failedAction(action.path, stored.message);
     }
 
     return successfulAction([pushed]);
   }
 
   if (action.kind === "pushDelete") {
-    // Confirm the remote object still holds the bytes this pass planned to delete before touching
-    // it. A drifted or already absent object is handled without destroying newer content (#133).
-    const drift = await checkRemoteDrift(action.path, remoteByPath.get(action.path), storage);
-    if (drift !== null) {
-      return drift;
-    }
-    // Park the object under the reserved trash prefix before removing it from its live key, so a
-    // mistaken delete stays recoverable (#53). A copy that 404s means the object is already gone
-    // remotely (another device deleted it), which is the end state a pushDelete wants: nothing to
-    // trash, nothing to delete. Any other copy failure aborts before the delete, so the live
-    // object is never destroyed without a backup sitting beside it.
-    const copied = await storage.copyObject(action.path, trashKeyFor(action.path, now));
-    if (!copied.ok) {
-      if (copied.status === "not_found") {
-        return successfulAction();
-      }
-      return failedAction(action.path, copied.message, false);
-    }
-    const result = await storage.deleteObject(action.path);
-    if (!result.ok) {
-      return failedAction(action.path, result.message, false);
-    }
-
+    // A deletion is purely a manifest change: the path is dropped from what manifestAfterSync
+    // builds (see plan.ts), and the blob it pointed at is left exactly where it is, never
+    // destroyed, so it stays reachable for as long as any retained manifest still names its hash.
+    // Nothing here touches the bucket, so nothing here can fail, and the drift another device
+    // might race in underneath (#133) is no longer a hazard: there is no live object at a shared
+    // key for that race to clobber. What used to be a trash copy for a recovery window (#53) is
+    // now the default: deletion was never destructive to begin with.
     return successfulAction();
   }
 
   if (action.kind === "pull") {
-    const drift = await checkLocalDrift(reader, action.path, localByPath.get(action.path));
-    if (drift !== null) {
-      return { concurrent: false, failures: [drift], pushed: [] };
+    const fetched = await pullBlob(storage, action.path, remoteByPath.get(action.path));
+    if (!fetched.ok) {
+      return { failures: [fetched.failure], pushed: [] };
     }
-    const result = await storage.getObject(action.path, remoteByPath.get(action.path)?.size);
-    if (!result.ok || result.body === null) {
-      return failedAction(action.path, result.message, false);
-    }
-    const body = result.body;
-    const integrity = await verifyFetch(action.path, body, remoteByPath.get(action.path));
-    if (integrity !== null) {
-      return { concurrent: false, failures: [integrity], pushed: [] };
-    }
-    const failure = await applyLocalWrite(action.path, () =>
-      localWriter.writeFile(action.path, body),
+    const failure = await commitPulledContent(
+      action.path,
+      fetched.body,
+      "replace",
+      localByPath.get(action.path),
+      reader,
+      localWriter,
+      storage,
+      manifestEtag,
     );
     if (failure !== null) {
-      return { concurrent: false, failures: [failure], pushed: [] };
+      return { failures: [failure], pushed: [] };
     }
 
     return successfulAction();
   }
 
   if (action.kind === "pullDelete") {
-    const drift = await checkLocalDrift(reader, action.path, localByPath.get(action.path));
-    if (drift !== null) {
-      return { concurrent: false, failures: [drift], pushed: [] };
+    // A deletion is only safe once the manifest is confirmed still current: unlike pull's fetch,
+    // which reads a specific blob and so cannot itself observe staleness, a delete has nothing of
+    // its own to check against and would otherwise remove a path a newer manifest has since
+    // repopulated, based purely on the stale plan. Acting on a manifest that moved on is worse
+    // here than for a write, too: the local file goes to trash, this pass's own manifest upload
+    // then loses its conditional PUT, and the next pass reads the deletion as the user's own and
+    // pushes it, dropping from every device a path another device had just repopulated.
+    //
+    // The checks are therefore ordered exactly as commitPulledContent orders them, and for the
+    // same reason: the expensive content hash first, the manifest HEAD next, and an index-only
+    // confirmation last so neither guarantee ends a whole file read or a network round trip
+    // before the delete it is guarding.
+    const checked = await checkLocalDrift(reader, action.path, localByPath.get(action.path));
+    if (!checked.ok) {
+      return { failures: [checked.failure], pushed: [] };
+    }
+    if (await manifestDrifted(storage, manifestEtag)) {
+      return { failures: [{ path: action.path, message: MANIFEST_DRIFT_MESSAGE }], pushed: [] };
+    }
+    const moved = await confirmLocalUnchanged(reader, action.path, checked.seen);
+    if (moved !== null) {
+      return { failures: [moved], pushed: [] };
     }
     const failure = await applyLocalWrite(action.path, () => localWriter.deleteFile(action.path));
     if (failure !== null) {
-      return { concurrent: false, failures: [failure], pushed: [] };
+      return { failures: [failure], pushed: [] };
     }
 
     return successfulAction();
@@ -266,26 +434,26 @@ async function executeAction(
 
   // conflict, deletedSide "local": the user deleted their copy, so there is no local edit to
   // preserve; the remote edit simply wins and is restored onto the local path. The snapshot has
-  // no entry here, so any file found now was recreated after it and must not be overwritten.
+  // no entry here, so any file found now was recreated after it and must not be overwritten: the
+  // drift check catches one the snapshot's Reader can see, and the "create" commit catches one
+  // created too recently for that Reader to have indexed yet.
   if (action.deletedSide === "local") {
-    const drift = await checkLocalDrift(reader, action.path, localByPath.get(action.path));
-    if (drift !== null) {
-      return { concurrent: false, failures: [drift], pushed: [] };
+    const fetched = await pullBlob(storage, action.path, remoteByPath.get(action.path));
+    if (!fetched.ok) {
+      return { failures: [fetched.failure], pushed: [] };
     }
-    const result = await storage.getObject(action.path, remoteByPath.get(action.path)?.size);
-    if (!result.ok || result.body === null) {
-      return failedAction(action.path, result.message, false);
-    }
-    const body = result.body;
-    const integrity = await verifyFetch(action.path, body, remoteByPath.get(action.path));
-    if (integrity !== null) {
-      return { concurrent: false, failures: [integrity], pushed: [] };
-    }
-    const failure = await applyLocalWrite(action.path, () =>
-      localWriter.writeFile(action.path, body),
+    const failure = await commitPulledContent(
+      action.path,
+      fetched.body,
+      "create",
+      localByPath.get(action.path),
+      reader,
+      localWriter,
+      storage,
+      manifestEtag,
     );
     if (failure !== null) {
-      return { concurrent: false, failures: [failure], pushed: [] };
+      return { failures: [failure], pushed: [] };
     }
 
     return successfulAction();
@@ -300,179 +468,80 @@ async function executeAction(
   try {
     localBytes = await reader.readFile(action.path);
   } catch (err) {
-    return failedAction(action.path, localFailureMessage(err), false);
+    return failedAction(action.path, localFailureMessage(err));
   }
-  // A failed rename means the local edit is still sitting at action.path untouched. Bail before
-  // the pull below would overwrite it, so a diverged edit is never silently discarded by an I/O
-  // error the way it would be if we pushed on to restore the remote version.
+
+  // deletedSide "remote": there is nothing at this path remotely to restore, so the rename is the
+  // whole local change and the path being left empty afterwards is the correct final state, not a
+  // failure to report. A failed rename means the local edit is still sitting at action.path
+  // untouched, so there is nothing to preserve a copy of and nothing to push.
+  if (action.deletedSide === "remote") {
+    const renameFailure = await applyLocalWrite(action.path, () =>
+      localWriter.renameFile(action.path, copyPath),
+    );
+    if (renameFailure !== null) {
+      return { failures: [renameFailure], pushed: [] };
+    }
+
+    return pushConflictCopy(storage, copyPath, localBytes, now, []);
+  }
+
+  // deletedSide "none": both sides changed, so the local edit moves aside and the remote version
+  // takes the path. Everything slow and fallible happens before that path is vacated: the remote
+  // version is fetched, verified and staged, and the manifest is confirmed current, all while the
+  // local edit still sits untouched under its own name. Only then do the two renames run back to
+  // back, which is what makes the "create" commit's guarantee worth having: the window in which
+  // the path stands empty, and a note the user or another plugin creates there could be replaced
+  // by the restore, is two adjacent local operations rather than a download, a staged write and a
+  // network round trip.
+  //
+  // Failing before the rename also leaves the vault exactly as it was, so an unreachable blob or a
+  // manifest that moved on replans the whole conflict next pass rather than leaving it half
+  // applied: a copy on disk and an empty path where the user's note used to be, reported as a
+  // failure but never recovered from until some later pass happens to pull the path again.
+  const fetched = await pullBlob(storage, action.path, remoteByPath.get(action.path));
+  if (!fetched.ok) {
+    return { failures: [fetched.failure], pushed: [] };
+  }
+  const staged = await stageForWrite(localWriter, action.path, fetched.body, "create");
+  if (!staged.ok) {
+    return { failures: [staged.failure], pushed: [] };
+  }
+  if (await manifestDrifted(storage, manifestEtag)) {
+    await discardStaged(staged.write);
+    return { failures: [{ path: action.path, message: MANIFEST_DRIFT_MESSAGE }], pushed: [] };
+  }
   const renameFailure = await applyLocalWrite(action.path, () =>
     localWriter.renameFile(action.path, copyPath),
   );
   if (renameFailure !== null) {
-    return { concurrent: false, failures: [renameFailure], pushed: [] };
+    await discardStaged(staged.write);
+    return { failures: [renameFailure], pushed: [] };
   }
+  // Past the rename the local edit is safely under copyPath, so its blob is pushed whatever the
+  // restore then does: a commit refused by a note created in the gap must not also cost the user
+  // the edit this conflict set out to preserve.
   const failures: SyncFailure[] = [];
-  const pushedFiles: FileState[] = [];
-  let concurrent = false;
-  const copyResult = await storage.putObject(copyPath, localBytes, { kind: "ifAbsent" });
-  if (!copyResult.ok) {
-    failures.push({ path: copyPath, message: copyResult.message });
-    concurrent = copyResult.status === "conflict";
-  } else {
-    pushedFiles.push(await pushedFile(copyPath, localBytes, now));
+  const commitFailure = await applyLocalWrite(action.path, () => staged.write.commit());
+  if (commitFailure !== null) {
+    await discardStaged(staged.write);
+    failures.push(commitFailure);
   }
 
-  // deletedSide "remote": there is nothing at this path remotely to pull, the rename above
-  // already vacated it locally, and that is the correct final state, not a failure to report.
-  if (action.deletedSide === "remote") {
-    return { concurrent, failures, pushed: pushedFiles };
-  }
-
-  const result = await storage.getObject(action.path, remoteByPath.get(action.path)?.size);
-  if (!result.ok || result.body === null) {
-    failures.push({ path: action.path, message: result.message });
-    return { concurrent, failures, pushed: pushedFiles };
-  }
-  const body = result.body;
-  const integrity = await verifyFetch(action.path, body, remoteByPath.get(action.path));
-  if (integrity !== null) {
-    failures.push(integrity);
-    return { concurrent, failures, pushed: pushedFiles };
-  }
-  const writeFailure = await applyLocalWrite(action.path, () =>
-    localWriter.writeFile(action.path, body),
-  );
-  if (writeFailure !== null) {
-    failures.push(writeFailure);
-  }
-
-  return { concurrent, failures, pushed: pushedFiles };
+  return pushConflictCopy(storage, copyPath, localBytes, now, failures);
 }
 
-// failedAction returns one failed action result with its concurrency classification.
-function failedAction(path: string, message: string, concurrent: boolean): ActionResult {
-  return { concurrent, failures: [{ path, message }], pushed: [] };
-}
-
-// pushedFile returns the FileState for bytes just written to path in the bucket, hashed fresh
-// from those exact bytes rather than reused from a pre-push snapshot, so a file edited in the
-// window between the snapshot and this read is never recorded in the manifest as content the
-// bucket doesn't actually hold.
-async function pushedFile(path: string, bytes: Uint8Array, mtime: number): Promise<FileState> {
-  return { path, size: bytes.length, mtime, hash: await hashBytes(bytes) };
-}
-
-// putCondition returns the precondition that keeps a file PUT tied to the remote snapshot this
-// pass planned from. Existing objects are also hashed before their ETag is trusted, because an
-// ETag fetched after another pass's PUT describes that newer object rather than the snapshot.
-async function putCondition(
-  path: string,
-  bytes: Uint8Array,
-  expected: FileState | undefined,
-  storage: StorageClient,
-): Promise<PutConditionResult> {
-  if (expected === undefined) {
-    return { ok: true, kind: "put", condition: { kind: "ifAbsent" } };
-  }
-  const fetched = await storage.getObject(path, expected.size);
-  if (!fetched.ok || fetched.body === null) {
-    if (fetched.status === "not_found") {
-      return { ok: true, kind: "put", condition: { kind: "ifAbsent" } };
-    }
-    return {
-      ok: false,
-      concurrent: false,
-      failure: { path, message: fetched.message },
-    };
-  }
-  const remoteHash = await hashBytes(fetched.body);
-  if (remoteHash !== expected.hash) {
-    if (remoteHash === (await hashBytes(bytes))) {
-      return { ok: true, kind: "done" };
-    }
-    return {
-      ok: false,
-      concurrent: true,
-      failure: { path, message: REMOTE_DRIFT_MESSAGE },
-    };
-  }
-  if (fetched.etag === null) {
-    return {
-      ok: false,
-      concurrent: false,
-      failure: { path, message: REMOTE_ETAG_MESSAGE },
-    };
-  }
-
-  return { ok: true, kind: "put", condition: { kind: "ifMatch", etag: fetched.etag } };
-}
-
-// checkRemoteDrift confirms the object a pushDelete is about to destroy still holds the bytes the
-// plan snapshotted. It returns the result to hand straight back when the delete must not proceed,
-// or null when it is safe. Another device can push new content to this path in the window between
-// the manifest being read and the delete running (#133); an unconditional delete would discard
-// those bytes, and because the manifest CAS then loses without the winner re-uploading, they would
-// not reappear until that file was next edited locally. A remote hash that no longer matches the
-// snapshot is exactly that race, failed as concurrent so the pass abandons its stale manifest and
-// the next sync replans; an object already gone is the end state the delete wants, so it succeeds.
-// Verifying right before the delete shrinks the residual window to the gap between this read and
-// the delete itself, the same shape checkLocalDrift uses for local writes; closing it entirely
-// needs a conditional delete, which awaits provider probing (#108). expected is undefined only for
-// a caller that supplied no remote view (the empty default), which cannot happen through syncOnce
-// where a pushDelete always carries a manifest entry; such a caller keeps the prior unconditional
-// behaviour, its delete still recoverable from the trash copy (#53).
-async function checkRemoteDrift(
-  path: string,
-  expected: FileState | undefined,
-  storage: StorageClient,
-): Promise<ActionResult | null> {
-  if (expected === undefined) {
-    return null;
-  }
-  const fetched = await storage.getObject(path, expected.size);
-  if (!fetched.ok || fetched.body === null) {
-    if (fetched.status === "not_found") {
-      return successfulAction();
-    }
-    return failedAction(path, fetched.message, false);
-  }
-  if ((await hashBytes(fetched.body)) !== expected.hash) {
-    return failedAction(path, REMOTE_DRIFT_MESSAGE, true);
-  }
-
-  return null;
-}
-
-// remoteMatches reports whether path already holds bytes, making a failed create idempotent. A
-// previous pass can leave an unmanifested object after losing the manifest CAS; accepting those
-// same bytes lets the retry fold it into the manifest without an unsafe overwrite.
-async function remoteMatches(
-  path: string,
-  bytes: Uint8Array,
-  storage: StorageClient,
-): Promise<boolean> {
-  // The local bytes are the best estimate of the remote object's size for the deadline: a match
-  // means they are identical, and a mismatch still budgets close enough to bound the download.
-  const fetched = await storage.getObject(path, bytes.byteLength);
-  if (!fetched.ok || fetched.body === null) {
-    return false;
-  }
-
-  return (await hashBytes(fetched.body)) === (await hashBytes(bytes));
-}
-
-// successfulAction returns the zero failure result for a completed action, pushed carrying the
-// FileState of any bytes it wrote to the bucket, empty for an action that pushed nothing.
-function successfulAction(pushed: FileState[] = []): ActionResult {
-  return { concurrent: false, failures: [], pushed };
+// failedAction returns one failed action result carrying a single failure.
+function failedAction(path: string, message: string): ActionResult {
+  return { failures: [{ path, message }], pushed: [] };
 }
 
 // localFailureMessage turns whatever a local vault operation threw into a SyncFailure message.
 // readFile throws when a file vanishes between the snapshot and now (a user deleting it mid sync),
-// and writeFile/deleteFile/renameFile can throw on a disk full or permission error; routing all of
-// them through failures keeps executeSyncPlan's "errors are values" contract, so one bad local
-// operation is a per file failure like any storage error, not an exception that abandons the rest
-// of the pass.
+// and staging, committing, deleting or renaming can throw on a disk full or permission error;
+// routing all of them through failures keeps executeSyncPlan's "errors are values" contract, so one
+// bad local operation is a per file failure like any storage error, not an exception that abandons
+// the rest of the pass.
 function localFailureMessage(err: unknown): string {
   if (err instanceof Error) {
     return err.message;
@@ -480,21 +549,112 @@ function localFailureMessage(err: unknown): string {
   return "local file operation failed";
 }
 
-// verifyFetch hashes fetched bytes and compares against the expected hash from the remote
-// snapshot. A mismatch means the storage response was truncated, corrupted, or tampered with;
-// writing it to disk would silently propagate damage to every other device on the next sync. A
-// missing expected hash is a programming error — the manifest should always carry an entry for a
-// path the plan decided to pull — surfaced rather than silently bypassed.
+// manifestDrifted reports whether the remote manifest has changed since the pass began, checked
+// immediately before a pull family write commits fetched content to disk. A blob fetched by its
+// own hash always reads back exactly that content, so unlike a plaintext path keyed read this can
+// never itself notice a newer manifest having since pointed the path at a different hash; the
+// manifest's own etag is the only signal left that the plan's remote view is stale. A HEAD, not a
+// full re-fetch, keeps this cheap enough to run before every such write, the same "check right
+// before the destructive write" shape checkLocalDrift already uses for the local side. A caller
+// with no manifest read to compare against (etag null) skips the check rather than treating a
+// missing baseline as drift.
+async function manifestDrifted(storage: StorageClient, etag: string | null): Promise<boolean> {
+  if (etag === null) {
+    return false;
+  }
+  const head = await storage.headObject(MANIFEST_KEY);
+
+  return !head.ok || head.etag !== etag;
+}
+
+// pullBlob reads the blob a path's expected FileState names and verifies it against that expected
+// hash before handing it back, so a caller's local write never receives storage's response
+// unchecked. expected comes from the remote manifest the plan was made from; missing it means the
+// plan itself is inconsistent (every pull carries a manifest entry through syncOnce) and there is
+// no key to even attempt a read against.
+async function pullBlob(
+  storage: StorageClient,
+  path: string,
+  expected: FileState | undefined,
+): Promise<{ ok: true; body: Uint8Array } | { ok: false; failure: SyncFailure }> {
+  if (expected === undefined) {
+    return { ok: false, failure: { path, message: MANIFEST_MISSING_HASH_MESSAGE } };
+  }
+  const fetched = await storage.getObject(blobKeyFor(expected.hash), expected.size);
+  if (!fetched.ok || fetched.body === null) {
+    return { ok: false, failure: { path, message: fetched.message } };
+  }
+  const integrity = await verifyFetch(path, fetched.body, expected);
+  if (integrity !== null) {
+    return { ok: false, failure: integrity };
+  }
+
+  return { ok: true, body: fetched.body };
+}
+
+// pushConflictCopy stores the bytes a conflict moved aside and reports the FileState the manifest
+// needs to name that copy, appended to whatever failures the caller already collected: a conflict
+// can fail its restore and its copy push independently, and both belong in the same result. A
+// refused push is reported against the copy's own path, since that is the object the bucket
+// refused, and no FileState is returned for it, so the manifest never claims a copy the bucket
+// does not hold.
+async function pushConflictCopy(
+  storage: StorageClient,
+  copyPath: string,
+  bytes: Uint8Array,
+  now: number,
+  failures: SyncFailure[],
+): Promise<ActionResult> {
+  const copyFile = await pushedFile(copyPath, bytes, now);
+  const stored = await ensureBlobStored(storage, copyFile.hash, bytes);
+  if (!stored.ok) {
+    return { failures: [...failures, { path: copyPath, message: stored.message }], pushed: [] };
+  }
+
+  return { failures, pushed: [copyFile] };
+}
+
+// pushedFile returns the FileState for bytes just written to a blob in the bucket, hashed fresh
+// from those exact bytes.
+async function pushedFile(path: string, bytes: Uint8Array, mtime: number): Promise<FileState> {
+  return { path, size: bytes.length, mtime, hash: await hashBytes(bytes) };
+}
+
+// stageForWrite writes fetched bytes to their staging file, converting a thrown I/O error into the
+// same SyncFailure shape every other local operation reports. A failure here has touched nothing at
+// the destination, so there is no staged write to hand back and nothing to unwind.
+async function stageForWrite(
+  localWriter: LocalWriter,
+  path: string,
+  body: Uint8Array,
+  mode: WriteMode,
+): Promise<{ ok: true; write: StagedWrite } | { ok: false; failure: SyncFailure }> {
+  try {
+    return { ok: true, write: await localWriter.stageFile(path, body, mode) };
+  } catch (err) {
+    return { ok: false, failure: { path, message: localFailureMessage(err) } };
+  }
+}
+
+// successfulAction returns the zero failure result for a completed action, pushed carrying the
+// FileState of any bytes it wrote to the bucket, empty for an action that pushed nothing.
+function successfulAction(pushed: FileState[] = []): ActionResult {
+  return { failures: [], pushed };
+}
+
+// verifyFetch hashes fetched bytes and compares against the expected hash, closing the gap
+// between "storage answered ok" and "storage answered with the right bytes". A mismatch means the
+// response was truncated, corrupted, or (with a hash derived key) essentially impossible short of
+// storage corruption; writing it to disk would silently propagate damage to every other device on
+// the next sync.
 async function verifyFetch(
   path: string,
   body: Uint8Array,
-  expected: FileState | undefined,
+  expected: FileState,
 ): Promise<SyncFailure | null> {
-  if (expected === undefined) {
-    return { path, message: MANIFEST_MISSING_HASH_MESSAGE };
-  }
   if ((await hashBytes(body)) === expected.hash) {
     return null;
   }
+
   return { path, message: HASH_MISMATCH_MESSAGE };
 }

@@ -3,8 +3,14 @@ import { endpointFor, type GeodeSettings, regionFor } from "../settings/settings
 // SNAPSHOT_VERSION is the format version stamped into every serialized snapshot, remote manifest
 // and local state.json alike, so a future format change (encryption, chunked upload) has
 // something to branch on when it meets an existing bucket (#91). A serialized snapshot with no
-// version field predates the marker and is this same format, version 1.
-export const SNAPSHOT_VERSION = 1;
+// version field predates the marker and is version 1, plaintext path keyed storage. Version 2
+// moved file content off the vault path and onto a content addressed key under the manifest's own
+// bucket (`.geode/blobs/<hash>`, see sync/plan.ts); a version 1 manifest is refused rather than
+// read, since its paths point at objects this build never looks for again, and reading it as
+// version 2 would plan every push and pull against keys that were never written. There is no
+// migration path at this version: a bucket written before this change needs a fresh bucket, not an
+// upgrade.
+export const SNAPSHOT_VERSION = 2;
 
 // SNAPSHOT_BYTE_BUDGET caps how many bytes takeSnapshot buffers across its concurrent reads, low
 // enough that a vault of large attachments cannot pile eight full files into memory at once and
@@ -32,6 +38,16 @@ export type FileInfo = {
   mtime: number;
 };
 
+// FileStat is everything the vault index knows about one path without reading it: whether anything
+// is there at all, and the size and mtime it carries if so. An absent path is present false with
+// zero values rather than a null to unpack, so callers compare fields instead of branching on
+// absence first.
+export type FileStat = {
+  present: boolean;
+  size: number;
+  mtime: number;
+};
+
 // FileState is what geode remembers about one vault file as of the last snapshot.
 export type FileState = {
   path: string;
@@ -40,17 +56,19 @@ export type FileState = {
   hash: string;
 };
 
-// Reader lists files present in the vault right now, reads their bytes, answers whether a path
-// currently exists (so a failed read on a present file is never mistaken for absence), and reports
-// a single path's current size on demand — fresher than the listing, so a snapshot can reserve
-// memory against what it is about to read rather than a size that may have grown since. A vanished
-// path reports size 0, letting the read that follows raise the real disappearance error. The real
+// Reader lists files present in the vault right now, reads their bytes, and reports what the index
+// already knows about a single path without touching its content. stat answers all three of the
+// questions sync asks between reads: whether the path is there at all (so a failed read on a
+// present file is never mistaken for absence), how big it is right now (fresher than the listing,
+// so a snapshot reserves memory against what it is about to read rather than a size that may have
+// grown since), and when it last changed (so a pull can confirm nothing moved underneath it
+// without rereading the file, see confirmLocalUnchanged in sync/execute.ts). A vanished path
+// reports a zero stat, letting the read that follows raise the real disappearance error. The real
 // implementation wraps Obsidian's Vault API (see obsidian.ts); tests use an in-memory fake.
 export type Reader = {
-  fileExists: (path: string) => Promise<boolean>;
   listFiles: () => Promise<FileInfo[]>;
   readFile: (path: string) => Promise<Uint8Array>;
-  size: (path: string) => Promise<number>;
+  stat: (path: string) => Promise<FileStat>;
 };
 
 // Snapshot is every file geode saw the last time it took a snapshot.
@@ -85,11 +103,13 @@ export function byPath(files: FileState[]): Map<string, FileState> {
 }
 
 // decodeSnapshot parses a serialized snapshot (a remote manifest, a local state.json) and checks
-// its format version. A missing version is accepted as version 1, the format every build before
-// the marker existed wrote; any other unknown version is refused rather than guessed at, so this
-// build never misreads a bucket written in a newer format as garbage or, worse, as valid. The
-// version check runs before the shape check on purpose: a future format is free to change the
-// shape itself, and its snapshots must still read as "needs a newer build", never as corrupt.
+// its format version. An explicit version other than SNAPSHOT_VERSION is refused before the shape
+// is even looked at: a future format is free to change the shape itself (files as an encrypted
+// blob, say), and its snapshots must still read as "needs a different build", never as corrupt.
+// A missing version field means version 1, the format every build before the marker existed
+// wrote, and shares version 2's JSON shape exactly (`{files: [...]}`), so the two can only be
+// told apart by the marker itself; that check runs after the shape check, so a merely malformed
+// payload with no version field still reads as corrupt rather than as a well formed old manifest.
 // The returned snapshot carries only the in-memory shape; the version is a wire concern that
 // encodeSnapshot stamps back on at the next write.
 export function decodeSnapshot(raw: string): DecodedSnapshot {
@@ -108,6 +128,9 @@ export function decodeSnapshot(raw: string): DecodedSnapshot {
   }
   if (!isSnapshot(parsed)) {
     return { ok: false, reason: "corrupt" };
+  }
+  if (version === undefined) {
+    return { ok: false, reason: "unsupportedVersion" };
   }
   const settingsFingerprint = (parsed as { settingsFingerprint?: unknown }).settingsFingerprint;
   const fingerprintStr = typeof settingsFingerprint === "string" ? settingsFingerprint : undefined;
@@ -226,9 +249,10 @@ export async function takeSnapshot(
 
     // Reserve against the size read now, not the one listed at the start of the pass, so a file
     // that has since grown cannot slip past the budget on a stale, smaller number; resize then
-    // corrects for any change in the narrow window between this probe and the read itself.
-    const reserved = await reader.size(file.path);
-    const hold = await budget.acquire(reserved);
+    // corrects for any change in the narrow window between this probe and the read itself. A path
+    // that has vanished reserves nothing and lets the read raise the real error.
+    const live = await reader.stat(file.path);
+    const hold = await budget.acquire(live.size);
     try {
       const bytes = await reader.readFile(file.path);
       hold.resize(bytes.length);

@@ -1,6 +1,6 @@
 import type { DataAdapter, Vault, Workspace } from "obsidian";
 import type { GeodeSettings } from "../settings/settings.ts";
-import type { LocalWriter } from "../sync/execute.ts";
+import { DRIFT_MESSAGE, type LocalWriter, type WriteMode } from "../sync/execute.ts";
 import {
   decodeSnapshot,
   encodeSnapshot,
@@ -17,12 +17,30 @@ import {
 // staged to a hidden temp file and renamed into place, never written directly to its destination,
 // so an interrupted pull cannot leave torn bytes for the next snapshot to read as a local edit
 // and push to the bucket (#88).
+//
+// Staging and installing are separate calls rather than one writeFile, so the caller can run its
+// drift checks in between: the payload is already on disk by then, leaving only commit's rename
+// between the last check and the destination changing (see commitPulledContent in sync/execute.ts).
 export function createObsidianLocalWriter(adapter: DataAdapter): LocalWriter {
   return {
-    writeFile: async (path, data) => {
+    stageFile: async (path, data, mode) => {
       await ensureParentDir(adapter, path);
       const buffer = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
-      await writeThroughTemp(adapter, path, buffer as ArrayBuffer);
+      const tempPath = hiddenSiblingPath(path, ".geode-tmp");
+      await adapter.writeBinary(tempPath, buffer as ArrayBuffer);
+
+      return {
+        commit: async () => {
+          await installStaged(adapter, tempPath, path, mode);
+        },
+        discard: async () => {
+          const exists = await adapter.exists(tempPath);
+          if (!exists) {
+            return;
+          }
+          await adapter.remove(tempPath);
+        },
+      };
     },
     deleteFile: async (path) => {
       const exists = await adapter.exists(path);
@@ -52,9 +70,6 @@ export function createObsidianLocalWriter(adapter: DataAdapter): LocalWriter {
 // lives inside .obsidian/plugins/geode/) never shows up as a vault file to snapshot.
 export function createObsidianReader(vault: Vault): Reader {
   return {
-    fileExists: async (path) => {
-      return vault.getFileByPath(path) !== null;
-    },
     listFiles: async () => {
       const files: FileInfo[] = [];
       for (const file of vault.getFiles()) {
@@ -70,12 +85,15 @@ export function createObsidianReader(vault: Vault): Reader {
       const buffer = await vault.readBinary(file);
       return new Uint8Array(buffer);
     },
-    size: async (path) => {
+    // Both fields come from the TFile the vault already holds in memory, so this is an index
+    // lookup rather than a filesystem call: cheap enough to run immediately before a destructive
+    // write, which is the whole reason a pull can confirm a path is untouched without rereading it.
+    stat: async (path) => {
       const file = vault.getFileByPath(path);
       if (file === null) {
-        return 0;
+        return { present: false, size: 0, mtime: 0 };
       }
-      return file.stat.size;
+      return { present: true, size: file.stat.size, mtime: file.stat.mtime };
     },
   };
 }
@@ -204,19 +222,36 @@ async function replaceViaAside(
   await adapter.remove(asidePath);
 }
 
-// writeThroughTemp stages data at a hidden temp path beside its destination, then renames it into
-// place, so a crash mid write leaves the destination either untouched or fully written, never
-// holding torn bytes (#88). Desktop's adapter rename replaces an existing destination atomically;
-// a rename that fails while the destination exists is retried through replaceViaAside, shrinking
-// the exposure from the whole download and write to the instant between the two renames, where a
-// crash leaves the path absent and the next sync replans the pull instead of pushing corruption.
-async function writeThroughTemp(
+// installStaged renames an already staged file onto its destination, the step that actually changes
+// what the vault holds, so a crash mid write leaves the destination either untouched or fully
+// written, never holding torn bytes (#88). Desktop's adapter rename replaces an existing
+// destination atomically; a rename that fails while the destination exists is retried through
+// replaceViaAside, shrinking the exposure from the whole download and write to the instant between
+// the two renames, where a crash leaves the path absent and the next sync replans the pull instead
+// of pushing corruption.
+//
+// A "create" write refuses that replacement entirely: its caller staged these bytes for a path it
+// had reason to believe was empty, so a file being there means one appeared since, and installing
+// over it would destroy content nothing else holds. The existence check is the adapter's own stat,
+// the only view that sees a file the moment it lands rather than when Obsidian's index catches up,
+// and it sits one call before the rename, which is as tight as an adapter with no create-exclusive
+// rename allows. Throwing is how every failure leaves this layer; executeSyncPlan turns it back
+// into an ordinary per file failure the moment it crosses the boundary.
+async function installStaged(
   adapter: DataAdapter,
+  tempPath: string,
   path: string,
-  data: ArrayBuffer,
+  mode: WriteMode,
 ): Promise<void> {
-  const tempPath = hiddenSiblingPath(path, ".geode-tmp");
-  await adapter.writeBinary(tempPath, data);
+  if (mode === "create") {
+    const occupied = await adapter.exists(path);
+    if (occupied) {
+      throw new Error(DRIFT_MESSAGE);
+    }
+    await adapter.rename(tempPath, path);
+
+    return;
+  }
   try {
     await adapter.rename(tempPath, path);
   } catch (err) {
