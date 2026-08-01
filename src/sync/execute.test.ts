@@ -744,9 +744,9 @@ test("executeSyncPlan: a pull whose local write throws is reported and doesn't s
 });
 
 test("executeSyncPlan: a conflict whose rename throws is reported and the local edit is never overwritten", async () => {
-  // If the rename that vacates the local path throws, the local edit is still sitting there. We
-  // must report the failure and skip the pull, otherwise the remote version would clobber a
-  // diverged edit we failed to preserve.
+  // If the rename that vacates the local path throws, the local edit is still sitting there. The
+  // failure must be reported and the staged remote version thrown away rather than committed,
+  // otherwise the remote version would clobber a diverged edit we failed to preserve.
   const reader = fakeReader({ "a.md": "local edit" });
   const { writer, files } = fakeLocalWriter();
   files.set("a.md", "local edit");
@@ -755,6 +755,7 @@ test("executeSyncPlan: a conflict whose rename throws is reported and the local 
   };
   const hash = await hashOf("remote edit");
   const { storage, objects } = fakeStorage({ [blobKeyFor(hash)]: "remote edit" });
+  const remote = snapshot(file("a.md", hash));
   const now = Date.parse("2026-07-14T10:00:00.000Z");
 
   const { failures } = await executeSyncPlan(
@@ -764,6 +765,7 @@ test("executeSyncPlan: a conflict whose rename throws is reported and the local 
     writer,
     storage,
     now,
+    remote,
   );
 
   const copyHash = await hashOf("local edit");
@@ -949,19 +951,25 @@ test("executeSyncPlan: a pull whose local file is edited while its payload stage
   assert.equal(discarded, 1);
 });
 
-test("executeSyncPlan: a pull stages its payload before both drift checks and commits only after them", async () => {
+test("executeSyncPlan: a pull stages its payload, then checks cheapest-last, and commits only after every check", async () => {
   // The ordering the whole fix turns on, asserted directly because every other test here can only
   // observe its consequences. Staging last would put the payload write between the final check and
-  // the destination changing; running the manifest HEAD last would put the local read, the slow
-  // check, in front of it instead. Only this order leaves each check with nothing but the commit's
-  // rename ahead of it, and puts the unrecoverable check (local) closest to that rename.
+  // the destination changing. Running the manifest HEAD first, as this used to, put the local read
+  // and hash behind it, so a manifest replaced during that read still authorized the write. Running
+  // it last instead would leave the local guarantee ending a network round trip before the commit.
+  // Only cheapest-last leaves every check with nothing ahead of it but an index lookup and the
+  // commit's rename.
   const ops: string[] = [];
-  const baseReader = fakeReader({});
+  const baseReader = fakeReader({ "a.md": "as snapshotted" });
   const reader: Reader = {
     ...baseReader,
-    fileExists: async (path) => {
+    readFile: async (path) => {
       ops.push("checkLocal");
-      return baseReader.fileExists(path);
+      return baseReader.readFile(path);
+    },
+    size: async (path) => {
+      ops.push("confirmLocal");
+      return baseReader.size(path);
     },
   };
   const { writer, files } = fakeLocalWriter();
@@ -990,10 +998,16 @@ test("executeSyncPlan: a pull stages its payload before both drift checks and co
   const manifestHead = await storage.headObject(MANIFEST_KEY);
   ops.length = 0;
   const remote = snapshot(file("a.md", hash));
+  const local = snapshot({
+    path: "a.md",
+    size: "as snapshotted".length,
+    mtime: 1,
+    hash: await hashOf("as snapshotted"),
+  });
 
   const { failures } = await executeSyncPlan(
     [{ kind: "pull", path: "a.md" }],
-    empty,
+    local,
     reader,
     writer,
     storage,
@@ -1003,8 +1017,166 @@ test("executeSyncPlan: a pull stages its payload before both drift checks and co
   );
 
   assert.deepEqual(failures, []);
-  assert.deepEqual(ops, ["stage", "checkManifest", "checkLocal", "commit"]);
+  assert.deepEqual(ops, ["stage", "checkLocal", "checkManifest", "confirmLocal", "commit"]);
   assert.equal(files.get("a.md"), "hello");
+});
+
+test("executeSyncPlan: a pull whose local file is edited while the manifest check is in flight is refused", async () => {
+  // The half of the local guarantee the content hash cannot cover on its own. The hash proves what
+  // the file held when it ran, but a manifest HEAD follows it, and an edit landing during that
+  // round trip would otherwise be committed over: the action reports success, the path advances in
+  // state.json at the pulled hash, and nothing afterwards can tell the edit existed. The
+  // index-only confirmation after the HEAD is what catches it.
+  const readerFiles: Record<string, string> = { "a.md": "as snapshotted" };
+  const reader = fakeReader(readerFiles);
+  const local = snapshot({
+    path: "a.md",
+    size: "as snapshotted".length,
+    mtime: 1,
+    hash: await hashOf("as snapshotted"),
+  });
+  const { writer, files } = fakeLocalWriter();
+  files.set("a.md", "as snapshotted");
+  const hash = await hashOf("remote a");
+  const { storage } = fakeStorage({ [blobKeyFor(hash)]: "remote a", [MANIFEST_KEY]: "current" });
+  const head = await storage.headObject(MANIFEST_KEY);
+  const innerHead = storage.headObject;
+  storage.headObject = async (key) => {
+    if (key === MANIFEST_KEY) {
+      readerFiles["a.md"] = "edited during the manifest check";
+    }
+    return innerHead(key);
+  };
+  const remote = snapshot(file("a.md", hash));
+
+  const { failures, completed } = await executeSyncPlan(
+    [{ kind: "pull", path: "a.md" }],
+    local,
+    reader,
+    writer,
+    storage,
+    1,
+    remote,
+    head.etag,
+  );
+
+  assert.deepEqual(failures, [
+    { path: "a.md", message: "changed locally mid sync; sync again to reconcile" },
+  ]);
+  assert.deepEqual(completed, []);
+  assert.equal(files.get("a.md"), "as snapshotted");
+  assert.equal(readerFiles["a.md"], "edited during the manifest check");
+});
+
+test("executeSyncPlan: a pullDelete whose local file is edited while the manifest check is in flight is refused", async () => {
+  // The same window guarding a deletion rather than a write, where losing it costs the user the
+  // file itself rather than one edit.
+  const readerFiles: Record<string, string> = { "a.md": "as snapshotted" };
+  const reader = fakeReader(readerFiles);
+  const local = snapshot({
+    path: "a.md",
+    size: "as snapshotted".length,
+    mtime: 1,
+    hash: await hashOf("as snapshotted"),
+  });
+  const { writer, files } = fakeLocalWriter();
+  files.set("a.md", "as snapshotted");
+  const { storage } = fakeStorage({ [MANIFEST_KEY]: "current" });
+  const head = await storage.headObject(MANIFEST_KEY);
+  const innerHead = storage.headObject;
+  storage.headObject = async (key) => {
+    if (key === MANIFEST_KEY) {
+      readerFiles["a.md"] = "edited during the manifest check";
+    }
+    return innerHead(key);
+  };
+
+  const { failures } = await executeSyncPlan(
+    [{ kind: "pullDelete", path: "a.md" }],
+    local,
+    reader,
+    writer,
+    storage,
+    1,
+    empty,
+    head.etag,
+  );
+
+  assert.deepEqual(failures, [
+    { path: "a.md", message: "changed locally mid sync; sync again to reconcile" },
+  ]);
+  assert.equal(files.get("a.md"), "as snapshotted");
+});
+
+test("executeSyncPlan: a conflict fetches, stages and checks the manifest before it vacates the path", async () => {
+  // The ordering that makes the restore's guarantee worth having, asserted directly. Every slow
+  // and fallible step runs while the local edit is still sitting at its own path, so the interval
+  // in which that path stands empty, and a note created there could be replaced by the restore, is
+  // the rename and the commit back to back. Vacating first, as this used to, spanned a download, a
+  // staged write and a network round trip.
+  const ops: string[] = [];
+  const reader = fakeReader({ "a.md": "local edit" });
+  const { writer, files } = fakeLocalWriter();
+  files.set("a.md", "local edit");
+  const innerStage = writer.stageFile;
+  writer.stageFile = async (path, data, mode) => {
+    ops.push("stage");
+    const staged = await innerStage(path, data, mode);
+
+    return {
+      commit: async () => {
+        ops.push("commit");
+        await staged.commit();
+      },
+      discard: staged.discard,
+    };
+  };
+  const innerRename = writer.renameFile;
+  writer.renameFile = async (path, newPath) => {
+    ops.push("rename");
+    await innerRename(path, newPath);
+  };
+  const remoteHash = await hashOf("remote edit");
+  const { storage } = fakeStorage({
+    [blobKeyFor(remoteHash)]: "remote edit",
+    [MANIFEST_KEY]: "current",
+  });
+  const head = await storage.headObject(MANIFEST_KEY);
+  const innerGet = storage.getObject;
+  storage.getObject = async (key, size) => {
+    ops.push("fetch");
+    return innerGet(key, size);
+  };
+  const innerHead = storage.headObject;
+  storage.headObject = async (key) => {
+    if (key === MANIFEST_KEY) {
+      ops.push("checkManifest");
+    }
+    return innerHead(key);
+  };
+  const innerPut = storage.putObject;
+  storage.putObject = async (key, body, condition) => {
+    ops.push("pushCopy");
+    return innerPut(key, body, condition);
+  };
+  const remote = snapshot(file("a.md", remoteHash));
+  const now = Date.parse("2026-07-14T10:00:00.000Z");
+
+  const { failures } = await executeSyncPlan(
+    [{ kind: "conflict", path: "a.md", deletedSide: "none" }],
+    empty,
+    reader,
+    writer,
+    storage,
+    now,
+    remote,
+    head.etag,
+  );
+
+  assert.deepEqual(failures, []);
+  assert.deepEqual(ops, ["fetch", "stage", "checkManifest", "rename", "commit", "pushCopy"]);
+  assert.equal(files.get("a.md"), "remote edit");
+  assert.equal(files.get(conflictCopyPath("a.md", now)), "local edit");
 });
 
 test("executeSyncPlan: a pull refused by manifest drift discards its staged payload", async () => {
@@ -1086,7 +1258,11 @@ test("executeSyncPlan: a discard that itself fails never masks the failure that 
   assert.equal(files.has("a.md"), false);
 });
 
-test("executeSyncPlan: a conflict restore refuses when the manifest has moved on, and the local edit survives as a copy", async () => {
+test("executeSyncPlan: a conflict restore refuses when the manifest has moved on, leaving the vault exactly as it was", async () => {
+  // The manifest is confirmed before the local edit is moved aside, so a stale plan costs nothing
+  // locally: the note is still at its own path, under its own name, and the whole conflict is
+  // replanned against the newer manifest next pass. Checking after the rename, as this used to,
+  // left the split half applied instead: a copy on disk and an empty path where the note was.
   const reader = fakeReader({ "a.md": "local edit" });
   const { writer, files } = fakeLocalWriter();
   files.set("a.md", "local edit");
@@ -1098,7 +1274,7 @@ test("executeSyncPlan: a conflict restore refuses when the manifest has moved on
   const remote = snapshot(file("a.md", hash));
   const now = Date.parse("2026-07-14T10:00:00.000Z");
 
-  const { failures } = await executeSyncPlan(
+  const { failures, pushedFiles } = await executeSyncPlan(
     [{ kind: "conflict", path: "a.md", deletedSide: "none" }],
     empty,
     reader,
@@ -1112,11 +1288,10 @@ test("executeSyncPlan: a conflict restore refuses when the manifest has moved on
   assert.deepEqual(failures, [
     { path: "a.md", message: "changed remotely mid sync; sync again to reconcile" },
   ]);
-  // The local edit was already renamed and pushed as a copy before the drift was caught, so it is
-  // never lost; only the stale remote restore is refused.
-  assert.equal(files.get("a.md"), undefined);
-  assert.equal(files.get(conflictCopyPath("a.md", now)), "local edit");
-  assert.equal(objects.get(blobKeyFor(await hashOf("local edit"))), "local edit");
+  assert.equal(files.get("a.md"), "local edit");
+  assert.equal(files.has(conflictCopyPath("a.md", now)), false);
+  assert.equal(objects.has(blobKeyFor(await hashOf("local edit"))), false);
+  assert.deepEqual(pushedFiles, []);
 });
 
 test("executeSyncPlan: conflict restore with hash mismatch is refused and nothing is written", async () => {
@@ -1146,7 +1321,11 @@ test("executeSyncPlan: conflict restore with hash mismatch is refused and nothin
   assert.equal(files.has("a.md"), false);
 });
 
-test("executeSyncPlan: conflict with hash mismatch on remote restore is reported and local edit survives", async () => {
+test("executeSyncPlan: conflict with hash mismatch on remote restore leaves the local edit where the user left it", async () => {
+  // Corrupt or truncated remote bytes are caught while the local edit is still untouched at its
+  // own path, because the fetch and its integrity check now run before anything local moves. The
+  // conflict is simply replanned next pass. Splitting first, as this used to, meant a blob that
+  // never verifies left the note renamed away and its path empty on every single pass.
   const reader = fakeReader({ "a.md": "local edit" });
   const { writer, files } = fakeLocalWriter();
   files.set("a.md", "local edit");
@@ -1165,26 +1344,15 @@ test("executeSyncPlan: conflict with hash mismatch on remote restore is reported
     remote,
   );
 
-  const copyHash = await hashOf("local edit");
   assert.deepEqual(failures, [
     {
       path: "a.md",
       message: "fetched bytes do not match manifest hash; sync again to reconcile",
     },
   ]);
-  // The local edit was renamed to the conflict copy before the pull was attempted.
-  assert.equal(files.get("a.md"), undefined);
-  assert.equal(files.get(conflictCopyPath("a.md", now)), "local edit");
-  assert.equal(objects.get(blobKeyFor(copyHash)), "local edit");
-  // The action is reported failed, never completed, but the copy really did land in the bucket:
-  // pushedFiles must still carry it, or the manifest built from it would never know it's there.
+  assert.equal(files.get("a.md"), "local edit");
+  assert.equal(files.has(conflictCopyPath("a.md", now)), false);
+  assert.equal(objects.has(blobKeyFor(await hashOf("local edit"))), false);
   assert.deepEqual(completed, []);
-  assert.deepEqual(pushedFiles, [
-    {
-      path: conflictCopyPath("a.md", now),
-      size: "local edit".length,
-      mtime: now,
-      hash: copyHash,
-    },
-  ]);
+  assert.deepEqual(pushedFiles, []);
 });

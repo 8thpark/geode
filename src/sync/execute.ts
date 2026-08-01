@@ -25,9 +25,9 @@ const MANIFEST_MISSING_HASH_MESSAGE = "manifest missing expected hash for this p
 // specific blob by the hash the plan already decided on, which by construction always "succeeds"
 // with exactly that content, and pullDelete has no bucket object of its own to check at all, so
 // neither can notice on its own that a newer manifest has since pointed the path elsewhere or
-// repopulated it; that is what manifestDrifted checks for, immediately before each such local
-// delete and, for a write, immediately before the staged commit that actually changes the path
-// (see commitPulledContent). The one CAS the plan ultimately depends on either way is the
+// repopulated it; that is what manifestDrifted checks for, with nothing left between it and the
+// local change but an index lookup (see commitPulledContent for the ordering and why every check
+// is arranged cheapest-last). The one CAS the plan ultimately depends on either way is the
 // manifest's own conditional PUT (sync.ts), the backstop that still catches anything a mid pass
 // check's own race window lets through.
 export type ExecuteResult = {
@@ -85,6 +85,18 @@ export type WriteMode = "replace" | "create";
 type ActionResult = {
   failures: SyncFailure[];
   pushed: FileState[];
+};
+
+// LocalCheck is the outcome of checkLocalDrift: the failure to report, or what the path was
+// holding at the moment its content was verified, for confirmLocalUnchanged to compare against
+// once the remaining checks have run.
+type LocalCheck = { ok: true; seen: LocalStat } | { ok: false; failure: SyncFailure };
+
+// LocalStat is what the vault index says about a path: whether anything is there, and how many
+// bytes it holds. An absent path is present false at size zero, never a null to unpack.
+type LocalStat = {
+  present: boolean;
+  size: number;
 };
 
 // executeSyncPlan carries out every action against reader/localWriter (the local vault) and
@@ -164,56 +176,62 @@ async function applyLocalWrite(path: string, op: () => Promise<void>): Promise<S
 // conflict, which is where the conflict copy machinery lives. Only a confirmed absent path, or
 // content that still hashes to the snapshot's entry, is safe to write over: a file that exists
 // but cannot be read is refused with the read's own error, never treated as absent, since
-// deleting content that was never verified is the exact hole this check closes. Checking right
-// before the destructive write shrinks the unguardable race to the moment between this check and
-// the write itself, rather than the whole plan execution.
+// deleting content that was never verified is the exact hole this check closes.
+//
+// A passing check hands back what it saw rather than a bare null, because reading and hashing a
+// whole file is far too slow to be the last thing before the write; confirmLocalUnchanged compares
+// against this observation once the cheaper checks have run, so the content guarantee reaches all
+// the way to the mutation instead of ending wherever this check happened to sit.
 async function checkLocalDrift(
   reader: Reader,
   path: string,
   expected: FileState | undefined,
-): Promise<SyncFailure | null> {
+): Promise<LocalCheck> {
   const exists = await reader.fileExists(path);
   if (!exists) {
-    return null;
+    return { ok: true, seen: { present: false, size: 0 } };
   }
   let bytes: Uint8Array;
   try {
     bytes = await reader.readFile(path);
   } catch (err) {
-    return { path, message: localFailureMessage(err) };
+    return { ok: false, failure: { path, message: localFailureMessage(err) } };
   }
   if (expected === undefined) {
-    return { path, message: DRIFT_MESSAGE };
+    return { ok: false, failure: { path, message: DRIFT_MESSAGE } };
   }
   if ((await hashBytes(bytes)) !== expected.hash) {
-    return { path, message: DRIFT_MESSAGE };
+    return { ok: false, failure: { path, message: DRIFT_MESSAGE } };
   }
 
-  return null;
+  return { ok: true, seen: { present: true, size: bytes.length } };
 }
 
 // commitPulledContent lands fetched remote bytes on a local path, in the only order that leaves
-// both drift checks meaningful. The payload is staged first, so by the time either check runs the
+// every check meaningful. The payload is staged first, so by the time any check runs the
 // destination is still untouched and all that remains is commit's rename; staging afterwards, as
 // this used to, meant the whole payload write sat between the last check and the path changing,
-// which on a large attachment is ample room for the edit the check exists to protect.
+// which on a large attachment is ample room for the edit the checks exist to protect.
 //
-// The two checks are then ordered by what losing each race costs. A manifest that moved on is
-// caught again regardless by syncOnce's conditional manifest PUT, so slipping past this check
-// costs a spurious conflict copy on the next pass and nothing else. A local edit landing after
-// checkLocalDrift has no such backstop: the action reports success, its path advances in
-// state.json at the pulled hash, and nothing afterwards can tell the edit ever existed. The
-// unrecoverable one therefore goes last, closest to the commit.
+// The three checks then run cheapest-last, which is the only arrangement that leaves none of them
+// standing behind another's slow work. checkLocalDrift is the expensive one: it reads and hashes
+// the whole destination, so anything ordered after it inherits that read as its own race window,
+// which is exactly what left a manifest replaced mid read able to authorize this write. It
+// therefore goes first. manifestDrifted's network round trip follows. Last, with nothing but the
+// commit behind it, confirmLocalUnchanged re-checks the destination against the index alone, so
+// the local guarantee spans the manifest HEAD as well rather than ending before it. Every check is
+// a check-then-act, and the residue of each is now a single index lookup rather than a whole file
+// read or a network call.
 //
-// checkLocal is injected rather than derived here because a conflict's restore lands on a path its
-// own rename just vacated and so has no snapshot content to verify against (see vacatedByRename);
-// mode is what guards that path instead, refusing the commit outright if the destination turns out
-// not to be empty after all.
+// mode carries the rest of the local guarantee for a write onto a path that is supposed to be
+// empty: the commit itself refuses an occupied destination (see WriteMode), which is as close to
+// the rename as a check can be placed.
 async function commitPulledContent(
   path: string,
   body: Uint8Array,
   mode: WriteMode,
-  checkLocal: () => Promise<SyncFailure | null>,
+  expected: FileState | undefined,
+  reader: Reader,
   localWriter: LocalWriter,
   storage: StorageClient,
   manifestEtag: string | null,
@@ -222,19 +240,54 @@ async function commitPulledContent(
   if (!staged.ok) {
     return staged.failure;
   }
+  const checked = await checkLocalDrift(reader, path, expected);
+  if (!checked.ok) {
+    await discardStaged(staged.write);
+    return checked.failure;
+  }
   if (await manifestDrifted(storage, manifestEtag)) {
     await discardStaged(staged.write);
     return { path, message: MANIFEST_DRIFT_MESSAGE };
   }
-  const drift = await checkLocal();
-  if (drift !== null) {
+  const moved = await confirmLocalUnchanged(reader, path, checked.seen);
+  if (moved !== null) {
     await discardStaged(staged.write);
-    return drift;
+    return moved;
   }
   const failure = await applyLocalWrite(path, () => staged.write.commit());
   if (failure !== null) {
     await discardStaged(staged.write);
     return failure;
+  }
+
+  return null;
+}
+
+// confirmLocalUnchanged is the last look at a path before it is written over or deleted, run after
+// the manifest check so nothing but the mutation itself follows it. It compares the path against
+// what checkLocalDrift saw moments earlier, using only what the vault index already holds
+// (existence and size) and never rereading content: the hash has already proved those bytes were
+// the snapshot's, and the whole point of this one is to be cheap enough to sit last, so the
+// manifest check is not left standing behind a whole file read. A path confirmed absent must still
+// be absent; one confirmed to hold the snapshot's content must still hold exactly that many bytes.
+//
+// What it cannot see is a rewrite landing in this window that keeps the byte length exactly, which
+// is why it is a second line behind the hash rather than a replacement for it. That residue spans
+// one network round trip, and the create commit closes the appearing-file half of it entirely.
+async function confirmLocalUnchanged(
+  reader: Reader,
+  path: string,
+  seen: LocalStat,
+): Promise<SyncFailure | null> {
+  const present = await reader.fileExists(path);
+  if (present !== seen.present) {
+    return { path, message: DRIFT_MESSAGE };
+  }
+  if (!present) {
+    return null;
+  }
+  if ((await reader.size(path)) !== seen.size) {
+    return { path, message: DRIFT_MESSAGE };
   }
 
   return null;
@@ -282,8 +335,8 @@ async function ensureBlobStored(
 }
 
 // executeAction carries out a single action and reports its failures. An action can report more
-// than one failure: a conflict whose copy push fails still pulls the remote version, so the
-// diverged local edit lands on disk even when the bucket refuses the copy.
+// than one failure: once a conflict has moved the local edit aside, its restore and its copy push
+// succeed or fail independently, and both outcomes belong to the same action.
 async function executeAction(
   action: SyncAction,
   localByPath: Map<string, FileState>,
@@ -333,7 +386,8 @@ async function executeAction(
       action.path,
       fetched.body,
       "replace",
-      () => checkLocalDrift(reader, action.path, localByPath.get(action.path)),
+      localByPath.get(action.path),
+      reader,
       localWriter,
       storage,
       manifestEtag,
@@ -349,13 +403,25 @@ async function executeAction(
     // A deletion is only safe once the manifest is confirmed still current: unlike pull's fetch,
     // which reads a specific blob and so cannot itself observe staleness, a delete has nothing of
     // its own to check against and would otherwise remove a path a newer manifest has since
-    // repopulated, based purely on the stale plan.
+    // repopulated, based purely on the stale plan. Acting on a manifest that moved on is worse
+    // here than for a write, too: the local file goes to trash, this pass's own manifest upload
+    // then loses its conditional PUT, and the next pass reads the deletion as the user's own and
+    // pushes it, dropping from every device a path another device had just repopulated.
+    //
+    // The checks are therefore ordered exactly as commitPulledContent orders them, and for the
+    // same reason: the expensive content hash first, the manifest HEAD next, and an index-only
+    // confirmation last so neither guarantee ends a whole file read or a network round trip
+    // before the delete it is guarding.
+    const checked = await checkLocalDrift(reader, action.path, localByPath.get(action.path));
+    if (!checked.ok) {
+      return { failures: [checked.failure], pushed: [] };
+    }
     if (await manifestDrifted(storage, manifestEtag)) {
       return { failures: [{ path: action.path, message: MANIFEST_DRIFT_MESSAGE }], pushed: [] };
     }
-    const drift = await checkLocalDrift(reader, action.path, localByPath.get(action.path));
-    if (drift !== null) {
-      return { failures: [drift], pushed: [] };
+    const moved = await confirmLocalUnchanged(reader, action.path, checked.seen);
+    if (moved !== null) {
+      return { failures: [moved], pushed: [] };
     }
     const failure = await applyLocalWrite(action.path, () => localWriter.deleteFile(action.path));
     if (failure !== null) {
@@ -379,7 +445,8 @@ async function executeAction(
       action.path,
       fetched.body,
       "create",
-      () => checkLocalDrift(reader, action.path, localByPath.get(action.path)),
+      localByPath.get(action.path),
+      reader,
       localWriter,
       storage,
       manifestEtag,
@@ -402,50 +469,65 @@ async function executeAction(
   } catch (err) {
     return failedAction(action.path, localFailureMessage(err));
   }
-  // A failed rename means the local edit is still sitting at action.path untouched. Bail before
-  // the pull below would overwrite it, so a diverged edit is never silently discarded by an I/O
-  // error the way it would be if we pushed on to restore the remote version.
+
+  // deletedSide "remote": there is nothing at this path remotely to restore, so the rename is the
+  // whole local change and the path being left empty afterwards is the correct final state, not a
+  // failure to report. A failed rename means the local edit is still sitting at action.path
+  // untouched, so there is nothing to preserve a copy of and nothing to push.
+  if (action.deletedSide === "remote") {
+    const renameFailure = await applyLocalWrite(action.path, () =>
+      localWriter.renameFile(action.path, copyPath),
+    );
+    if (renameFailure !== null) {
+      return { failures: [renameFailure], pushed: [] };
+    }
+
+    return pushConflictCopy(storage, copyPath, localBytes, now, []);
+  }
+
+  // deletedSide "none": both sides changed, so the local edit moves aside and the remote version
+  // takes the path. Everything slow and fallible happens before that path is vacated: the remote
+  // version is fetched, verified and staged, and the manifest is confirmed current, all while the
+  // local edit still sits untouched under its own name. Only then do the two renames run back to
+  // back, which is what makes the "create" commit's guarantee worth having: the window in which
+  // the path stands empty, and a note the user or another plugin creates there could be replaced
+  // by the restore, is two adjacent local operations rather than a download, a staged write and a
+  // network round trip.
+  //
+  // Failing before the rename also leaves the vault exactly as it was, so an unreachable blob or a
+  // manifest that moved on replans the whole conflict next pass rather than leaving it half
+  // applied: a copy on disk and an empty path where the user's note used to be, reported as a
+  // failure but never recovered from until some later pass happens to pull the path again.
+  const fetched = await pullBlob(storage, action.path, remoteByPath.get(action.path));
+  if (!fetched.ok) {
+    return { failures: [fetched.failure], pushed: [] };
+  }
+  const staged = await stageForWrite(localWriter, action.path, fetched.body, "create");
+  if (!staged.ok) {
+    return { failures: [staged.failure], pushed: [] };
+  }
+  if (await manifestDrifted(storage, manifestEtag)) {
+    await discardStaged(staged.write);
+    return { failures: [{ path: action.path, message: MANIFEST_DRIFT_MESSAGE }], pushed: [] };
+  }
   const renameFailure = await applyLocalWrite(action.path, () =>
     localWriter.renameFile(action.path, copyPath),
   );
   if (renameFailure !== null) {
+    await discardStaged(staged.write);
     return { failures: [renameFailure], pushed: [] };
   }
+  // Past the rename the local edit is safely under copyPath, so its blob is pushed whatever the
+  // restore then does: a commit refused by a note created in the gap must not also cost the user
+  // the edit this conflict set out to preserve.
   const failures: SyncFailure[] = [];
-  const pushedFiles: FileState[] = [];
-  const copyFile = await pushedFile(copyPath, localBytes, now);
-  const stored = await ensureBlobStored(storage, copyFile.hash, localBytes);
-  if (!stored.ok) {
-    failures.push({ path: copyPath, message: stored.message });
-  } else {
-    pushedFiles.push(copyFile);
+  const commitFailure = await applyLocalWrite(action.path, () => staged.write.commit());
+  if (commitFailure !== null) {
+    await discardStaged(staged.write);
+    failures.push(commitFailure);
   }
 
-  // deletedSide "remote": there is nothing at this path remotely to pull, the rename above
-  // already vacated it locally, and that is the correct final state, not a failure to report.
-  if (action.deletedSide === "remote") {
-    return { failures, pushed: pushedFiles };
-  }
-
-  const fetched = await pullBlob(storage, action.path, remoteByPath.get(action.path));
-  if (!fetched.ok) {
-    failures.push(fetched.failure);
-    return { failures, pushed: pushedFiles };
-  }
-  const writeFailure = await commitPulledContent(
-    action.path,
-    fetched.body,
-    "create",
-    vacatedByRename,
-    localWriter,
-    storage,
-    manifestEtag,
-  );
-  if (writeFailure !== null) {
-    failures.push(writeFailure);
-  }
-
-  return { failures, pushed: pushedFiles };
+  return pushConflictCopy(storage, copyPath, localBytes, now, failures);
 }
 
 // failedAction returns one failed action result carrying a single failure.
@@ -509,6 +591,28 @@ async function pullBlob(
   return { ok: true, body: fetched.body };
 }
 
+// pushConflictCopy stores the bytes a conflict moved aside and reports the FileState the manifest
+// needs to name that copy, appended to whatever failures the caller already collected: a conflict
+// can fail its restore and its copy push independently, and both belong in the same result. A
+// refused push is reported against the copy's own path, since that is the object the bucket
+// refused, and no FileState is returned for it, so the manifest never claims a copy the bucket
+// does not hold.
+async function pushConflictCopy(
+  storage: StorageClient,
+  copyPath: string,
+  bytes: Uint8Array,
+  now: number,
+  failures: SyncFailure[],
+): Promise<ActionResult> {
+  const copyFile = await pushedFile(copyPath, bytes, now);
+  const stored = await ensureBlobStored(storage, copyFile.hash, bytes);
+  if (!stored.ok) {
+    return { failures: [...failures, { path: copyPath, message: stored.message }], pushed: [] };
+  }
+
+  return { failures, pushed: [copyFile] };
+}
+
 // pushedFile returns the FileState for bytes just written to a blob in the bucket, hashed fresh
 // from those exact bytes.
 async function pushedFile(path: string, bytes: Uint8Array, mtime: number): Promise<FileState> {
@@ -535,18 +639,6 @@ async function stageForWrite(
 // FileState of any bytes it wrote to the bucket, empty for an action that pushed nothing.
 function successfulAction(pushed: FileState[] = []): ActionResult {
   return { failures: [], pushed };
-}
-
-// vacatedByRename is the content check for a conflict's restore, which lands on a path the same
-// action renamed away moments earlier. There is no snapshot entry left to compare bytes against,
-// so this one has nothing to check and says so. What it must not do is conclude that the path is
-// therefore still empty: the rename is followed by a blob push, a fetch and a staged write, and
-// anything the user or another plugin creates at that path in the meantime holds content no
-// conflict copy preserved. That is the "create" commit's job, immediately before the rename that
-// would otherwise replace it. Named rather than inlined as a null so the absence of a content
-// check on this one path reads as a decision rather than an oversight.
-async function vacatedByRename(): Promise<SyncFailure | null> {
-  return null;
 }
 
 // verifyFetch hashes fetched bytes and compares against the expected hash, closing the gap

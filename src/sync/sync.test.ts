@@ -649,26 +649,37 @@ test("syncOnce: a failed push doesn't discard the progress of the rest of the pa
 });
 
 test("syncOnce: a conflict's copy push survives into the uploaded manifest even when the restore fails", async () => {
-  // Reproduces #177: the copy push succeeds, but the manifest claims a remote version that isn't
-  // actually there, so the restore's GET 404s and the conflict is reported failed overall. The
-  // copy still landed in the bucket; if the manifest this pass uploads doesn't name it, the object
-  // sits there forever, invisible to every other device, until this same one syncs again.
+  // Reproduces #177: the local edit is moved aside and its copy pushed, but installing the remote
+  // version over the vacated path fails (a locked destination here, a note recreated in the gap in
+  // production). The copy still landed in the bucket; if the manifest this pass uploads doesn't
+  // name it, the object sits there forever, invisible to every other device, until this same one
+  // syncs again.
+  const aV2Hash = await hashOf("a v2");
   const ancestor = snapshot({ path: "a.md", size: 4, mtime: 1, hash: await hashOf("a v1") });
   const remoteManifest = encodeSnapshot(
-    snapshot({ path: "a.md", size: 4, mtime: 1, hash: await hashOf("a v2") }),
+    snapshot({ path: "a.md", size: 4, mtime: 1, hash: aV2Hash }),
   );
-  const { storage, objects } = fakeStorage({ [MANIFEST_KEY]: remoteManifest });
+  const { storage, objects } = fakeStorage({
+    [MANIFEST_KEY]: remoteManifest,
+    [blobKeyFor(aV2Hash)]: "a v2",
+  });
   const reader = fakeReader({ "a.md": "a local" });
   const { writer } = fakeLocalWriter();
+  writer.stageFile = async () => {
+    return {
+      commit: async () => {
+        throw new Error("EACCES: permission denied");
+      },
+      discard: async () => {},
+    };
+  };
   const now = 1;
   const copyPath = conflictCopyPath("a.md", now);
 
   const outcome = await syncOnce(ancestor, reader, writer, storage, now);
 
   assert.ok(!outcome.ok);
-  assert.deepEqual(outcome.failures, [
-    { path: "a.md", message: "Storage rejected the read (404)" },
-  ]);
+  assert.deepEqual(outcome.failures, [{ path: "a.md", message: "EACCES: permission denied" }]);
   // The copy really did reach the bucket.
   assert.equal(objects.get(blobKeyFor(await hashOf("a local"))), "a local");
   // The uploaded manifest names it, even though the conflict as a whole is reported failed.
@@ -680,16 +691,20 @@ test("syncOnce: a conflict's copy push survives into the uploaded manifest even 
 });
 
 test("syncOnce: the failure message counts files, not operation failures", async () => {
-  // A conflict whose copy push and pull both fail reports two operation failures for one vault
+  // A conflict whose restore and copy push both fail reports two operation failures for one vault
   // path. The user facing message must count the one file, not the two operations.
+  const aV2Hash = await hashOf("a v2");
   const ancestor = snapshot({ path: "a.md", size: 4, mtime: 1, hash: await hashOf("a v1") });
   const remoteManifest = encodeSnapshot(
-    snapshot({ path: "a.md", size: 4, mtime: 1, hash: await hashOf("a v2") }),
+    snapshot({ path: "a.md", size: 4, mtime: 1, hash: aV2Hash }),
   );
-  // The manifest claims a.md but the object is absent, so the conflict's pull 404s; the copy push
-  // is rejected by the override below. Both sides changed relative to the ancestor, so the plan is
-  // a single conflict (deletedSide "none") for a.md.
-  const { storage } = fakeStorage({ [MANIFEST_KEY]: remoteManifest });
+  // Both sides changed relative to the ancestor, so the plan is a single conflict (deletedSide
+  // "none") for a.md. Its restore fails on the commit and its copy push is rejected by the
+  // override below.
+  const { storage } = fakeStorage({
+    [MANIFEST_KEY]: remoteManifest,
+    [blobKeyFor(aV2Hash)]: "a v2",
+  });
   const copyBlobKey = blobKeyFor(await hashOf("a local"));
   const inner = storage.putObject;
   storage.putObject = async (key, body, condition) => {
@@ -700,13 +715,21 @@ test("syncOnce: the failure message counts files, not operation failures", async
   };
   const reader = fakeReader({ "a.md": "a local" });
   const { writer } = fakeLocalWriter();
+  writer.stageFile = async () => {
+    return {
+      commit: async () => {
+        throw new Error("EACCES: permission denied");
+      },
+      discard: async () => {},
+    };
+  };
 
   const outcome = await syncOnce(ancestor, reader, writer, storage, 1);
 
   assert.ok(!outcome.ok);
   assert.deepEqual(outcome.failures, [
+    { path: "a.md", message: "EACCES: permission denied" },
     { path: conflictCopyPath("a.md", 1), message: "Storage rejected the write (500)" },
-    { path: "a.md", message: "Storage rejected the read (404)" },
   ]);
   assert.equal(outcome.message, "1 file(s) failed to sync");
 });
