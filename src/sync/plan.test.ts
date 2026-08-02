@@ -108,10 +108,11 @@ test("blobKeyFor: keys content under the reserved blob prefix by its own hash", 
   assert.equal(blobKeyFor("deadbeef"), ".geode/blobs/deadbeef");
 });
 
-test("planSync: any key under the reserved prefix is excluded, not just the manifest and blobs it knows about today (#101)", () => {
-  // isReservedPath matches on the whole prefix, so a bookkeeping object this build has never heard
-  // of (a future lock file, say) is excluded the same way the manifest and blob keys are, rather
-  // than needing its own carve out the day it's introduced.
+test("planSync: any key under the reserved prefix is excluded (#101)", () => {
+  // isReservedPath matches on the whole prefix, not just the manifest and blob keys this build
+  // happens to know about today, so a bookkeeping object it has never heard of (a future lock
+  // file, say) is excluded the same way, rather than needing its own carve out the day it's
+  // introduced.
   const previous = empty;
   const local = snapshot(file(`${RESERVED_PREFIX}locks/device-1`, "h1"));
   const remote = snapshot(file(`${RESERVED_PREFIX}locks/device-1`, "h2"));
