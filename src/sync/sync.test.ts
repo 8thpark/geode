@@ -692,6 +692,41 @@ test("syncOnce: a file edited mid sync is never overwritten by a pull, and the r
   assert.equal(files.get("b.md"), "b v2");
 });
 
+test("syncOnce: a conflict copy carries the device that made the edit (#103)", async () => {
+  // Both sides changed relative to the ancestor, so the local edit is preserved under a conflict
+  // copy. On a three device vault a timestamp alone leaves whose edit it holds to be guessed, so
+  // the device this pass ran on has to be in the name, on disk and in the uploaded manifest.
+  const remoteHash = await hashOf("from another device");
+  const ancestor = snapshot({ path: "a.md", size: 4, mtime: 1, hash: await hashOf("shared base") });
+  const remoteManifest = encodeSnapshot(
+    snapshot({ path: "a.md", size: 19, mtime: 1, hash: remoteHash }),
+  );
+  const { storage, objects } = fakeStorage({
+    [MANIFEST_KEY]: remoteManifest,
+    [blobKeyFor(remoteHash)]: "from another device",
+  });
+  const reader = fakeReader({ "a.md": "my own edit" });
+  const { writer, files } = fakeLocalWriter();
+  files.set("a.md", "my own edit");
+  const now = Date.parse("2026-07-14T14:37:22.123Z");
+
+  const outcome = await syncOnce(ancestor, reader, writer, storage, now, undefined, "mac-k3pl7qna");
+
+  assert.equal(outcome.ok, true);
+  const copyPath = conflictCopyPath("a.md", now, "mac-k3pl7qna");
+  assert.equal(copyPath, "a_conflict_mac-k3pl7qna_20260714-143722-123.md");
+  // The preserved edit sits under the device named copy, and the remote version claimed the path.
+  assert.equal(files.get(copyPath), "my own edit");
+  assert.equal(files.get("a.md"), "from another device");
+  // Other devices see it too: the copy reached the bucket and the manifest names it.
+  assert.equal(objects.get(blobKeyFor(await hashOf("my own edit"))), "my own edit");
+  const manifestBody = objects.get(MANIFEST_KEY);
+  assert.ok(manifestBody !== undefined);
+  const manifest = JSON.parse(manifestBody) as Snapshot;
+  const paths = manifest.files.map((f) => f.path);
+  assert.ok(paths.includes(copyPath), paths.join(", "));
+});
+
 test("syncOnce: a manifest that moves on mid pull is caught before stale content lands on disk", async () => {
   // A blob fetched by its own hash always reads back exactly that content, so unlike the plaintext
   // path keyed layout this replaced, a pull can never notice on its own that a newer manifest has

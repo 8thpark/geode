@@ -1,5 +1,6 @@
 import type { App } from "obsidian";
-import { Plugin, setIcon, setTooltip } from "obsidian";
+import { Platform, Plugin, setIcon, setTooltip } from "obsidian";
+import { DEVICE_ID_KEY, deviceIdFrom, deviceSuffixFrom } from "./device/device";
 import { createLogSink } from "./log/adapter";
 import { createLogBus, createLogger, type LogBus, type Logger, type LogSink } from "./log/log";
 import { GeodeLogView, LOG_VIEW_TYPE } from "./log/view";
@@ -33,6 +34,10 @@ const MAX_LOG_LINES = 500;
 // edits (autosave, bulk rename, etc.) collapses into one snapshot instead of one per file.
 const VAULT_STATE_DEBOUNCE_MS = 2000;
 
+// DEVICE_SUFFIX_BYTES is how much randomness separates two devices carrying the same platform
+// label. Five bytes encode to exactly eight base32 characters with nothing left over.
+const DEVICE_SUFFIX_BYTES = 5;
+
 // AppWithSetting adds Obsidian's internal, undocumented settings-window API (there is no public
 // equivalent) so the Settings command can jump straight to Geode's tab, and opening the log view
 // can close the settings modal out from under itself.
@@ -46,6 +51,30 @@ type AppWithSetting = App & {
 
 // SyncStatus is the state the status bar item reflects.
 type SyncStatus = "idle" | "syncing" | "error";
+
+// deviceLabel returns the human recognisable half of this device's ID, lowercase to match the rest
+// of the suffix a conflict copy carries. The mobile checks come first: an iPad reports itself as
+// macOS on some builds, so asking "is this a phone or tablet" before "which desktop OS" is what
+// keeps an iPad from being labelled mac.
+function deviceLabel(): string {
+  if (Platform.isIosApp) {
+    return "ios";
+  }
+  if (Platform.isAndroidApp) {
+    return "android";
+  }
+  if (Platform.isMacOS) {
+    return "mac";
+  }
+  if (Platform.isWin) {
+    return "windows";
+  }
+  if (Platform.isLinux) {
+    return "linux";
+  }
+
+  return "device";
+}
 
 // iconFor returns the status bar icon for status.
 function iconFor(status: SyncStatus): string {
@@ -72,6 +101,10 @@ function tooltipFor(status: SyncStatus, detail: string): string {
 // GeodePlugin is the Obsidian plugin entry point that owns settings load and save.
 export default class GeodePlugin extends Plugin {
   settings: GeodeSettings = DEFAULT_SETTINGS;
+  // deviceId names this machine in conflict copies and logs (#103). Read from, and when absent
+  // minted into, vault scoped localStorage rather than settings: see DEVICE_ID_KEY for why it must
+  // never be able to travel to another device.
+  deviceId = "";
   // Assigned in onload, which Obsidian always runs before any other plugin method.
   logger!: Logger;
   private logBus!: LogBus;
@@ -90,6 +123,7 @@ export default class GeodePlugin extends Plugin {
 
   async onload() {
     await this.loadSettings();
+    this.deviceId = this.loadDeviceId();
 
     this.logSink = createLogSink(this.app.vault.adapter, this.manifest.dir, MAX_LOG_LINES);
     this.logBus = createLogBus();
@@ -119,7 +153,7 @@ export default class GeodePlugin extends Plugin {
     this.setSyncStatus("idle", "");
 
     this.addSettingTab(new GeodeSettingTab(this.app, this));
-    this.logger.info(`loaded (provider=${this.settings.provider})`);
+    this.logger.info(`loaded (provider=${this.settings.provider}, device=${this.deviceId})`);
 
     // onLayoutReady, not onload directly: the vault isn't guaranteed fully indexed yet at
     // onload time, and a snapshot taken too early would see an incomplete file list.
@@ -246,7 +280,15 @@ export default class GeodePlugin extends Plugin {
     await flushOpenEditors(this.app.workspace);
 
     const previous = await stateStore.read();
-    const outcome = await syncOnce(previous, reader, localWriter, storage, Date.now());
+    const outcome = await syncOnce(
+      previous,
+      reader,
+      localWriter,
+      storage,
+      Date.now(),
+      () => crypto.randomUUID(),
+      this.deviceId,
+    );
     if (!outcome.ok) {
       // A failed pass can still have made progress worth keeping (#87): the snapshot records what
       // completed so it is never re-planned, while each failed file stays pending for next pass.
@@ -264,6 +306,22 @@ export default class GeodePlugin extends Plugin {
     await stateStore.write(outcome.snapshot);
     this.logger.info(`sync: complete (${outcome.changeCount} change(s) applied)`);
     this.setSyncStatus("idle", "");
+  }
+
+  // loadDeviceId returns this device's identity, minting and storing one the first time it runs on
+  // a given device. Vault scoped localStorage, never data.json or state.json, so a synced
+  // .obsidian/ folder can't hand this identity to another machine (see DEVICE_ID_KEY). A stored
+  // value that isn't a usable string is treated as absent and replaced rather than trusted.
+  loadDeviceId(): string {
+    const stored: unknown = this.app.loadLocalStorage(DEVICE_ID_KEY);
+    if (typeof stored === "string" && stored !== "") {
+      return stored;
+    }
+    const suffix = deviceSuffixFrom(crypto.getRandomValues(new Uint8Array(DEVICE_SUFFIX_BYTES)));
+    const minted = deviceIdFrom(deviceLabel(), suffix);
+    this.app.saveLocalStorage(DEVICE_ID_KEY, minted);
+
+    return minted;
   }
 
   async loadSettings() {

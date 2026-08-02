@@ -23,7 +23,7 @@ export type GeodeSettings = {
   bucket: string;
   accessKeyId: string;
   // secretId is a SecretStorage reference name, not the secret value itself. Obsidian's
-  // SecretComponent picker lets a user pick or create a secret under any name of their choosing;
+  // SecretComponent picker lets a user pick or create a secret name of their choosing;
   // it does not support forcing new entries onto a fixed ID, so we have to remember whichever
   // one they picked.
   secretId: string;

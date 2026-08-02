@@ -184,7 +184,8 @@ export function revertFailedPaths(
 // plugin through state.json, tests through their own store) and this stays pure over its inputs.
 // now is injected so a conflict copy's name is deterministic under test. newVaultId mints the
 // identifier resolveVaultIdentity attaches to a bucket the first time this pass sees it, injected
-// for the same reason: real syncs use crypto.randomUUID(), tests want a fixed value.
+// for the same reason: real syncs use crypto.randomUUID(), tests want a fixed value. deviceId names
+// this machine in any conflict copy the pass writes (#103).
 export async function syncOnce(
   previous: Snapshot,
   reader: Reader,
@@ -192,6 +193,7 @@ export async function syncOnce(
   storage: StorageClient,
   now: number,
   newVaultId: () => string = () => crypto.randomUUID(),
+  deviceId = "",
 ): Promise<SyncOutcome> {
   const [remote, sentinelResult] = await Promise.all([
     readRemoteManifest(storage),
@@ -275,6 +277,7 @@ export async function syncOnce(
     now,
     remoteView,
     manifestEtag,
+    deviceId,
   );
 
   // The manifest is derived from what the plan just did to the bucket, never from a fresh disk
