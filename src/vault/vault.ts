@@ -260,21 +260,19 @@ export async function hashBytes(data: Uint8Array): Promise<string> {
 // manifest, a local state.json): no traversal or empty segment, no absolute path, no backslash,
 // nothing at or under the reserved .geode root (mirrors RESERVED_PREFIX in sync/plan.ts by value;
 // vault.ts cannot import it without a layering cycle) or at or under .obsidian (a file written
-// there is loadable plugin code) — the exact root is checked separately from its prefix, since a
-// path equal to ".geode" starts with neither ".geode/" nor ".obsidian/" and would otherwise pass
-// through to a local write planned as ordinary vault content — and no segment a filesystem geode
-// runs on could resolve to something other than a plain file: a Windows reserved device name, or a
-// segment ending in a dot or space, which Windows silently strips on write.
+// there is loadable plugin code), and no segment a filesystem geode runs on could resolve to
+// something other than a plain file: a Windows reserved device name, or a segment ending in a dot
+// or space, which Windows silently strips on write. The reserved root is matched on its first path
+// segment alone, lowercased, rather than the whole path: both macOS (APFS) and Windows (NTFS)
+// default to case insensitive filesystems, so ".OBSIDIAN" and ".obsidian" are the same directory on
+// disk even though they compare unequal as strings, and a case sensitive check would let a
+// differently cased manifest entry plan straight into either reserved root.
 export function isSafePath(path: string): boolean {
   if (path === "" || path.startsWith("/") || path.includes("\\")) {
     return false;
   }
-  if (
-    path === ".obsidian" ||
-    path.startsWith(".obsidian/") ||
-    path === ".geode" ||
-    path.startsWith(".geode/")
-  ) {
+  const root = path.split("/", 1)[0].toLowerCase();
+  if (root === ".obsidian" || root === ".geode") {
     return false;
   }
   for (const segment of path.split("/")) {

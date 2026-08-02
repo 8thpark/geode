@@ -134,6 +134,19 @@ test("isSafePath: traversal, absolute paths, reserved prefixes, and unsafe segme
     { name: "the exact reserved .geode root, no trailing slash", path: ".geode", want: false },
     { name: "the .obsidian folder itself", path: ".obsidian", want: false },
     { name: "a file under .obsidian", path: ".obsidian/plugins/evil/main.js", want: false },
+    {
+      // macOS (APFS) and Windows (NTFS) both default to case insensitive filesystems, so a
+      // differently cased root lands on the same directory on disk as the lowercase one.
+      name: "a differently cased .geode root",
+      path: ".GEODE/blobs/abc",
+      want: false,
+    },
+    {
+      name: "a differently cased .obsidian root",
+      path: ".OBSIDIAN/plugins/evil/main.js",
+      want: false,
+    },
+    { name: "a mixed case .obsidian root with no trailing slash", path: ".Obsidian", want: false },
     { name: "a Windows reserved device name", path: "notes/CON.md", want: false },
     { name: "a Windows reserved device name, lowercase", path: "con", want: false },
     { name: "a Windows reserved device name in a middle segment", path: "com1/a.md", want: false },
