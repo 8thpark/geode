@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { empty, file, snapshot } from "./fake.ts";
-import { blobKeyFor, conflictCopyPath, MANIFEST_KEY, manifestAfterSync, planSync } from "./plan.ts";
+import {
+  blobKeyFor,
+  conflictCopyPath,
+  MANIFEST_KEY,
+  manifestAfterSync,
+  planSync,
+  RESERVED_PREFIX,
+} from "./plan.ts";
 
 test("planSync: a path only changed locally is pushed", () => {
   const previous = empty;
@@ -99,6 +106,17 @@ test("planSync: a blob key under the reserved prefix is never turned into an act
 
 test("blobKeyFor: keys content under the reserved blob prefix by its own hash", () => {
   assert.equal(blobKeyFor("deadbeef"), ".geode/blobs/deadbeef");
+});
+
+test("planSync: any key under the reserved prefix is excluded, not just the manifest and blobs it knows about today (#101)", () => {
+  // isReservedPath matches on the whole prefix, so a bookkeeping object this build has never heard
+  // of (a future lock file, say) is excluded the same way the manifest and blob keys are, rather
+  // than needing its own carve out the day it's introduced.
+  const previous = empty;
+  const local = snapshot(file(`${RESERVED_PREFIX}locks/device-1`, "h1"));
+  const remote = snapshot(file(`${RESERVED_PREFIX}locks/device-1`, "h2"));
+
+  assert.deepEqual(planSync(previous, local, remote), []);
 });
 
 test("manifestAfterSync: a push records the pushed file's entry", () => {
