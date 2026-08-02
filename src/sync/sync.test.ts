@@ -714,7 +714,7 @@ test("syncOnce: a conflict copy carries the device that made the edit (#103)", a
 
   assert.equal(outcome.ok, true);
   const copyPath = conflictCopyPath("a.md", now, "mac-k3pl7qna");
-  assert.equal(copyPath, "a_conflict_mac-k3pl7qna_20260714-143722.md");
+  assert.equal(copyPath, "a_conflict_mac-k3pl7qna_20260714-143722-123.md");
   // The preserved edit sits under the device named copy, and the remote version claimed the path.
   assert.equal(files.get(copyPath), "my own edit");
   assert.equal(files.get("a.md"), "from another device");

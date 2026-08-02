@@ -1,12 +1,11 @@
 import type { App } from "obsidian";
 import { Platform, Plugin, setIcon, setTooltip } from "obsidian";
+import { DEVICE_ID_KEY, deviceIdFrom, deviceSuffixFrom } from "./device/device";
 import { createLogSink } from "./log/adapter";
 import { createLogBus, createLogger, type LogBus, type Logger, type LogSink } from "./log/log";
 import { GeodeLogView, LOG_VIEW_TYPE } from "./log/view";
 import {
   DEFAULT_SETTINGS,
-  deviceIdFrom,
-  deviceSuffixFrom,
   type GeodeSettings,
   hasConnectionConfig,
   normalizeSettings,
@@ -102,6 +101,10 @@ function tooltipFor(status: SyncStatus, detail: string): string {
 // GeodePlugin is the Obsidian plugin entry point that owns settings load and save.
 export default class GeodePlugin extends Plugin {
   settings: GeodeSettings = DEFAULT_SETTINGS;
+  // deviceId names this machine in conflict copies and logs (#103). Read from, and when absent
+  // minted into, vault scoped localStorage rather than settings: see DEVICE_ID_KEY for why it must
+  // never be able to travel to another device.
+  deviceId = "";
   // Assigned in onload, which Obsidian always runs before any other plugin method.
   logger!: Logger;
   private logBus!: LogBus;
@@ -120,6 +123,7 @@ export default class GeodePlugin extends Plugin {
 
   async onload() {
     await this.loadSettings();
+    this.deviceId = this.loadDeviceId();
 
     this.logSink = createLogSink(this.app.vault.adapter, this.manifest.dir, MAX_LOG_LINES);
     this.logBus = createLogBus();
@@ -149,9 +153,7 @@ export default class GeodePlugin extends Plugin {
     this.setSyncStatus("idle", "");
 
     this.addSettingTab(new GeodeSettingTab(this.app, this));
-    this.logger.info(
-      `loaded (provider=${this.settings.provider}, device=${this.settings.deviceId})`,
-    );
+    this.logger.info(`loaded (provider=${this.settings.provider}, device=${this.deviceId})`);
 
     // onLayoutReady, not onload directly: the vault isn't guaranteed fully indexed yet at
     // onload time, and a snapshot taken too early would see an incomplete file list.
@@ -285,7 +287,7 @@ export default class GeodePlugin extends Plugin {
       storage,
       Date.now(),
       () => crypto.randomUUID(),
-      this.settings.deviceId,
+      this.deviceId,
     );
     if (!outcome.ok) {
       // A failed pass can still have made progress worth keeping (#87): the snapshot records what
@@ -306,17 +308,24 @@ export default class GeodePlugin extends Plugin {
     this.setSyncStatus("idle", "");
   }
 
-  // loadSettings mints this device's ID on the first load that finds none, which covers both a
-  // fresh install and an upgrade from a build that predates #103. It persists through saveData
-  // rather than saveSettings: this runs before the logger exists, and saveSettings logs.
-  async loadSettings() {
-    this.settings = normalizeSettings(await this.loadData());
-    if (this.settings.deviceId !== "") {
-      return;
+  // loadDeviceId returns this device's identity, minting and storing one the first time it runs on
+  // a given device. Vault scoped localStorage, never data.json or state.json, so a synced
+  // .obsidian/ folder can't hand this identity to another machine (see DEVICE_ID_KEY). A stored
+  // value that isn't a usable string is treated as absent and replaced rather than trusted.
+  loadDeviceId(): string {
+    const stored: unknown = this.app.loadLocalStorage(DEVICE_ID_KEY);
+    if (typeof stored === "string" && stored !== "") {
+      return stored;
     }
     const suffix = deviceSuffixFrom(crypto.getRandomValues(new Uint8Array(DEVICE_SUFFIX_BYTES)));
-    this.settings.deviceId = deviceIdFrom(deviceLabel(), suffix);
-    await this.saveData(this.settings);
+    const minted = deviceIdFrom(deviceLabel(), suffix);
+    this.app.saveLocalStorage(DEVICE_ID_KEY, minted);
+
+    return minted;
+  }
+
+  async loadSettings() {
+    this.settings = normalizeSettings(await this.loadData());
   }
 
   async saveSettings() {

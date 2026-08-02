@@ -240,49 +240,49 @@ test("manifestAfterSync: a local deletion conflict pushes nothing, the remote en
 test("conflictCopyPath: keeps the extension", () => {
   assert.equal(
     conflictCopyPath("notes/todo.md", Date.parse("2026-07-14T14:37:22.123Z")),
-    "notes/todo_conflict_20260714-143722.md",
+    "notes/todo_conflict_20260714-143722-123.md",
   );
 });
 
 test("conflictCopyPath: a file with no extension", () => {
   assert.equal(
     conflictCopyPath("notes/todo", Date.parse("2026-07-14T14:37:22.123Z")),
-    "notes/todo_conflict_20260714-143722",
+    "notes/todo_conflict_20260714-143722-123",
   );
 });
 
 test("conflictCopyPath: a dot in a folder name isn't mistaken for an extension", () => {
   assert.equal(
     conflictCopyPath("my.notes/todo", Date.parse("2026-07-14T14:37:22.123Z")),
-    "my.notes/todo_conflict_20260714-143722",
+    "my.notes/todo_conflict_20260714-143722-123",
   );
 });
 
 test("conflictCopyPath: a leading dot in the filename isn't mistaken for an extension", () => {
   assert.equal(
     conflictCopyPath("notes/.gitignore", Date.parse("2026-07-14T14:37:22.123Z")),
-    "notes/.gitignore_conflict_20260714-143722",
+    "notes/.gitignore_conflict_20260714-143722-123",
   );
 });
 
 test("conflictCopyPath: a dotfile at the vault root isn't mistaken for an extension", () => {
   assert.equal(
     conflictCopyPath(".editorconfig", Date.parse("2026-07-14T14:37:22.123Z")),
-    ".editorconfig_conflict_20260714-143722",
+    ".editorconfig_conflict_20260714-143722-123",
   );
 });
 
 test("conflictCopyPath: the device sits before the timestamp, extension kept (#103)", () => {
   assert.equal(
     conflictCopyPath("notes/todo.md", Date.parse("2026-07-14T14:37:22.123Z"), "mac-k3pl7qna"),
-    "notes/todo_conflict_mac-k3pl7qna_20260714-143722.md",
+    "notes/todo_conflict_mac-k3pl7qna_20260714-143722-123.md",
   );
 });
 
 test("conflictCopyPath: the device also lands on a name with no extension (#103)", () => {
   assert.equal(
     conflictCopyPath("notes/todo", Date.parse("2026-07-14T14:37:22.123Z"), "ios-bbbbbbbb"),
-    "notes/todo_conflict_ios-bbbbbbbb_20260714-143722",
+    "notes/todo_conflict_ios-bbbbbbbb_20260714-143722-123",
   );
 });
 
@@ -290,7 +290,7 @@ test("conflictCopyPath: an empty device is omitted, never left as a stray delimi
   // A pass can run before a device ID has been minted; the name it produces must still be clean.
   assert.equal(
     conflictCopyPath("notes/todo.md", Date.parse("2026-07-14T14:37:22.123Z"), ""),
-    "notes/todo_conflict_20260714-143722.md",
+    "notes/todo_conflict_20260714-143722-123.md",
   );
 });
 
@@ -300,9 +300,30 @@ test("conflictCopyPath: the name carries no spaces and no uppercase it added its
   // shell and clean in a URL. Only the note's own name may contribute uppercase.
   const copy = conflictCopyPath("notes/Todo.md", Date.parse("2026-07-14T14:37:22.123Z"), "mac-abc");
 
-  assert.equal(copy, "notes/Todo_conflict_mac-abc_20260714-143722.md");
+  assert.equal(copy, "notes/Todo_conflict_mac-abc_20260714-143722-123.md");
   assert.equal(copy.includes(" "), false);
-  assert.equal(copy.slice("notes/Todo".length), "_conflict_mac-abc_20260714-143722.md");
+  assert.equal(copy.slice("notes/Todo".length), "_conflict_mac-abc_20260714-143722-123.md");
+});
+
+test("conflictCopyPath: two passes in the same second get different copies (#103)", () => {
+  // A plan carries at most one action per path, so two conflicts for one path can only come from
+  // two passes; nothing stops a failed pass being retried immediately, and automatic sync makes
+  // back to back passes ordinary. At second precision both would name the same copy and the second
+  // rename would overwrite or strand the edit the first preserved. Milliseconds are what stop the
+  // one function whose job is preserving edits from silently destroying one.
+  const first = conflictCopyPath("a.md", Date.parse("2026-07-14T14:37:22.123Z"), "mac-abc");
+  const second = conflictCopyPath("a.md", Date.parse("2026-07-14T14:37:22.456Z"), "mac-abc");
+
+  assert.equal(first, "a_conflict_mac-abc_20260714-143722-123.md");
+  assert.equal(second, "a_conflict_mac-abc_20260714-143722-456.md");
+  assert.notEqual(first, second);
+});
+
+test("conflictCopyPath: two devices never name the same copy at the same instant (#103)", () => {
+  const mine = conflictCopyPath("a.md", Date.parse("2026-07-14T14:37:22.123Z"), "mac-abc");
+  const theirs = conflictCopyPath("a.md", Date.parse("2026-07-14T14:37:22.123Z"), "ios-xyz");
+
+  assert.notEqual(mine, theirs);
 });
 
 test("conflictCopyPath: the suffix parses back from the right (#103)", () => {
@@ -314,9 +335,9 @@ test("conflictCopyPath: the suffix parses back from the right (#103)", () => {
     "mac-abc",
   );
 
-  assert.equal(copy, "my_notes/my_todo_conflict_mac-abc_20260714-143722.md");
+  assert.equal(copy, "my_notes/my_todo_conflict_mac-abc_20260714-143722-123.md");
   const fields = copy.slice(0, copy.lastIndexOf(".")).split("_");
-  assert.deepEqual(fields.slice(-3), ["conflict", "mac-abc", "20260714-143722"]);
+  assert.deepEqual(fields.slice(-3), ["conflict", "mac-abc", "20260714-143722-123"]);
 });
 
 test("conflictCopyPath: a generated device ID survives the path safety rules (#103)", () => {

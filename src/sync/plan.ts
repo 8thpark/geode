@@ -86,17 +86,21 @@ export function blobKeyFor(hash: string): string {
 // (#94), and the absence of spaces keeps the name quotable in a shell and clean in a URL, which the
 // CLI and API on the roadmap both eventually want.
 //
-// Second precision, rather than the milliseconds an ISO string carries: two conflicts on one file,
-// from one device, inside the same second needs two passes in that second where the first left the
-// path still conflicting. The cross device version of that collision is gone entirely now the
-// device is in the name.
+// The timestamp keeps milliseconds. Two conflicts for one path can only come from two separate
+// passes, since a plan carries at most one action per path, but nothing stops a failed pass being
+// retried immediately, and automatic sync (#93) makes back to back passes ordinary rather than
+// exceptional. At second precision those two would name the same copy, and the second rename would
+// overwrite or strand the edit the first one preserved: silent loss, in the one function whose
+// entire job is that no edit is ever silently discarded. Milliseconds put a bound on that which no
+// realistic pair of network bound passes can cross.
 export function conflictCopyPath(path: string, now: number, deviceId = ""): string {
   const iso = new Date(now).toISOString();
   const date = `${iso.slice(0, 4)}${iso.slice(5, 7)}${iso.slice(8, 10)}`;
   const time = `${iso.slice(11, 13)}${iso.slice(14, 16)}${iso.slice(17, 19)}`;
-  let marker = `conflict_${date}-${time}`;
+  const millis = iso.slice(20, 23);
+  let marker = `conflict_${date}-${time}-${millis}`;
   if (deviceId !== "") {
-    marker = `conflict_${deviceId}_${date}-${time}`;
+    marker = `conflict_${deviceId}_${date}-${time}-${millis}`;
   }
   const lastSlash = path.lastIndexOf("/");
   const lastDot = path.lastIndexOf(".");
