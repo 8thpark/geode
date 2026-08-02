@@ -23,6 +23,14 @@ function fakeAdapter(seed: Record<string, string> = {}): DataAdapter {
     write: async (path: string, data: string) => {
       files.set(path, data);
     },
+    rename: async (path: string, newPath: string) => {
+      const data = files.get(path);
+      if (data === undefined) {
+        throw new Error(`no such file: ${path}`);
+      }
+      files.delete(path);
+      files.set(newPath, data);
+    },
   };
   return adapter as unknown as DataAdapter;
 }
@@ -388,6 +396,25 @@ test("createObsidianStore: a well shaped snapshot round-trips through write and 
     settingsFingerprint: fingerprintSettings(DEFAULT_SETTINGS),
   };
   assert.deepEqual(await store.read(), want);
+});
+
+test("createObsidianStore: an interrupted write leaves the previous state.json untouched, never torn (#136)", async () => {
+  // The write must be staged and installed via rename, the same atomic pattern pulled vault
+  // content already uses, so a failure between the two steps never leaves a half written file for
+  // the next sync to misread as a corrupt or empty ancestor.
+  const previous = JSON.stringify({
+    version: 2,
+    files: [{ path: "a.md", size: 1, mtime: 2, hash: "h" }],
+  });
+  const adapter = fakeAdapter({ [STATE_PATH]: previous });
+  adapter.rename = async () => {
+    throw new Error("disk full");
+  };
+  const store = createObsidianStore(adapter, STATE_PATH, DEFAULT_SETTINGS);
+
+  await assert.rejects(() => store.write({ files: [] }));
+
+  assert.equal(await adapter.read(STATE_PATH), previous);
 });
 
 test("createObsidianStore: a fingerprint mismatch reads back as empty", async () => {
