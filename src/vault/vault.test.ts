@@ -259,6 +259,30 @@ test("decodeSnapshot: only the current version is accepted; version 1, missing, 
       raw: JSON.stringify({ version: 2, files: ["not-an-object"] }),
       want: { ok: false, reason: "corrupt" },
     },
+    {
+      // Bucket keys are case sensitive but macOS, Windows, and Android default to case
+      // insensitive filesystems, so pulling both would silently let one overwrite the other (#94).
+      name: "two paths differing only by case",
+      raw: JSON.stringify({
+        version: 2,
+        files: [
+          { path: "notes/Todo.md", size: 1, mtime: 2, hash: "h1" },
+          { path: "notes/todo.md", size: 1, mtime: 2, hash: "h2" },
+        ],
+      }),
+      want: { ok: false, reason: "caseCollision" },
+    },
+    {
+      name: "paths that share a case fold but are otherwise identical are still a collision",
+      raw: JSON.stringify({
+        version: 2,
+        files: [
+          { path: "A.md", size: 1, mtime: 2, hash: "h1" },
+          { path: "a.md", size: 1, mtime: 2, hash: "h2" },
+        ],
+      }),
+      want: { ok: false, reason: "caseCollision" },
+    },
   ];
 
   for (const { name, raw, want } of cases) {

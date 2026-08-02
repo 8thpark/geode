@@ -86,6 +86,12 @@ export async function readRemoteManifest(
       if (decoded.reason === "unsafePath") {
         return { ok: false, message: "remote manifest contains a path unsafe to write" };
       }
+      if (decoded.reason === "caseCollision") {
+        return {
+          ok: false,
+          message: "remote manifest contains two paths that differ only by case",
+        };
+      }
       return { ok: false, message: "remote manifest is corrupt" };
     }
     // Every S3 compatible server returns an ETag on a successful read; without one (a stripping
