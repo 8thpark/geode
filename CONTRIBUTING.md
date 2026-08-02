@@ -94,12 +94,16 @@ With `npm run dev` running:
 
    Object keys are content addressed (`.geode/blobs/<sha256>`), not vault paths, so this listing
    won't show your note names; `.geode/manifest.json` is what maps a path to the blob holding its
-   content.
+   content, and `.geode/sentinel.json` is a small marker written once on a bucket's first sync,
+   proving it has been synced before independent of whether the manifest itself currently exists
+   (see `resolveVaultIdentity` in `src/sync/plan.ts`).
 
 Obsidian's plugin data file (`data.json`), geode's own vault state file (`state.json`), and its
 log file (`geode.log`), all of which land at the repo root because the dev vault symlinks the
-whole repo in as the plugin folder, are gitignored and should never be committed. The MinIO
-container's data lives in a Docker volume, not a repo folder — `npm run dev:s3:reset` clears it.
+whole repo in as the plugin folder, are gitignored and should never be committed. `state.json`
+also carries a `vaultId`, the identity of the bucket this device last trusted, so it can tell a
+bucket it has genuinely never seen from one that now looks wrong. The MinIO container's data
+lives in a Docker volume, not a repo folder — `npm run dev:s3:reset` clears it.
 
 ## Windows
 
