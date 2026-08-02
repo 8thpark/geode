@@ -104,6 +104,13 @@ export function createObsidianReader(vault: Vault): Reader {
 // to crash sync: an empty ancestor can at worst produce conflict copies, never data loss, and a
 // state.json from a newer format only ever appears alongside a newer format manifest, which
 // readRemoteManifest refuses before the ancestor matters.
+//
+// write stages the new content to a hidden temp file and installs it the same way a pulled file
+// is installed (#136): statePath is the one file every sync's safety reasoning rests on as the
+// common ancestor, so a crash mid write must never leave it torn. A torn read used to fall back to
+// "no snapshot" above, which is safe on its own but still turns every remotely deleted file into a
+// resurrection and every divergence into a conflict copy; atomic writes mean that fallback is
+// never actually exercised by an interrupted write.
 export function createObsidianStore(
   adapter: DataAdapter,
   statePath: string,
@@ -138,7 +145,9 @@ export function createObsidianStore(
         ...snapshot,
         settingsFingerprint: fingerprintSettings(settings),
       };
-      await adapter.write(statePath, encodeSnapshot(withFingerprint));
+      const tempPath = hiddenSiblingPath(statePath, ".geode-tmp");
+      await adapter.write(tempPath, encodeSnapshot(withFingerprint));
+      await installStaged(adapter, tempPath, statePath, "replace");
     },
   };
 }
