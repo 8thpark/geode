@@ -100,10 +100,17 @@ export type Reader = {
   stat: (path: string) => Promise<FileStat>;
 };
 
-// Snapshot is every file geode saw the last time it took a snapshot.
+// Snapshot is every file geode saw the last time it took a snapshot. vaultId, when present, is the
+// identifier of the bucket this snapshot was last synced against (see resolveVaultIdentity in
+// sync/plan.ts, #183): carried on the local state.json copy so a device can tell "I have never
+// synced" from "I have synced, and this bucket now looks wrong" the next time a manifest and
+// sentinel are both missing. Never populated on the remote manifest itself; syncOnce only ever
+// attaches it to the snapshot it hands back to the caller for persistence, after the manifest body
+// has already been encoded.
 export type Snapshot = {
   files: FileState[];
   settingsFingerprint?: string;
+  vaultId?: string;
 };
 
 // Store reads and writes the persisted snapshot. The real implementation stores it inside
@@ -194,9 +201,14 @@ export function decodeSnapshot(raw: string): DecodedSnapshot {
   }
   const settingsFingerprint = (parsed as { settingsFingerprint?: unknown }).settingsFingerprint;
   const fingerprintStr = typeof settingsFingerprint === "string" ? settingsFingerprint : undefined;
+  const vaultId = (parsed as { vaultId?: unknown }).vaultId;
+  const vaultIdStr = typeof vaultId === "string" ? vaultId : undefined;
   const snapshot: Snapshot = { files: parsed.files };
   if (fingerprintStr !== undefined) {
     snapshot.settingsFingerprint = fingerprintStr;
+  }
+  if (vaultIdStr !== undefined) {
+    snapshot.vaultId = vaultIdStr;
   }
 
   return { ok: true, snapshot };
@@ -231,12 +243,20 @@ export function diffSnapshots(previous: Snapshot, current: Snapshot): Change[] {
 // encodeSnapshot serializes a snapshot for persistence, stamping the format version so every
 // manifest and state.json written from here on carries the marker decodeSnapshot branches on.
 export function encodeSnapshot(snapshot: Snapshot): string {
-  const result: { version: number; files: FileState[]; settingsFingerprint?: string } = {
+  const result: {
+    version: number;
+    files: FileState[];
+    settingsFingerprint?: string;
+    vaultId?: string;
+  } = {
     version: SNAPSHOT_VERSION,
     files: snapshot.files,
   };
   if (snapshot.settingsFingerprint !== undefined) {
     result.settingsFingerprint = snapshot.settingsFingerprint;
+  }
+  if (snapshot.vaultId !== undefined) {
+    result.vaultId = snapshot.vaultId;
   }
 
   return JSON.stringify(result);
