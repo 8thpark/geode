@@ -118,6 +118,7 @@ export async function executeSyncPlan(
   now: number,
   remote: Snapshot = { files: [] },
   manifestEtag: string | null = null,
+  deviceId = "",
 ): Promise<ExecuteResult> {
   const completed: SyncAction[] = [];
   const failed: SyncAction[] = [];
@@ -136,6 +137,7 @@ export async function executeSyncPlan(
       storage,
       now,
       manifestEtag,
+      deviceId,
     );
     // A conflict's copy push can succeed even when the rest of the action later fails (the pull,
     // its integrity check, or the local write), so pushed is gathered regardless of outcome: it
@@ -347,6 +349,7 @@ async function executeAction(
   storage: StorageClient,
   now: number,
   manifestEtag: string | null,
+  deviceId: string,
 ): Promise<ActionResult> {
   if (action.kind === "push") {
     let bytes: Uint8Array;
@@ -463,7 +466,7 @@ async function executeAction(
   // push that copy to storage too, so the diverged edit lands on every device and the manifest
   // we later upload isn't claiming a remote object that doesn't exist. Neither side's edit is
   // ever silently discarded.
-  const copyPath = conflictCopyPath(action.path, now);
+  const copyPath = conflictCopyPath(action.path, now, deviceId);
   let localBytes: Uint8Array;
   try {
     localBytes = await reader.readFile(action.path);

@@ -71,14 +71,39 @@ export function blobKeyFor(hash: string): string {
 // conflictCopyPath returns the name a locally diverged file is renamed to before the remote
 // version claims the original path, so neither edit is ever silently discarded. The extension,
 // if any, is preserved so the renamed copy still opens in whatever app handles that file type.
-export function conflictCopyPath(path: string, now: number): string {
-  const stamp = new Date(now).toISOString().replace(/[:.]/g, "-");
+//
+// deviceId names the machine the preserved edit came from (#103). A timestamp alone answers "when"
+// but not "whose", and on a three device vault "whose" is the question actually being asked. An
+// empty deviceId is omitted rather than left as a gap, so a pass running before one has been minted
+// still produces a clean name.
+//
+// The name carries no spaces, and every token it adds is lowercase. Underscore separates fields and
+// hyphen lives inside them, so `mac-k3pl7qna` and `20260714-143722` are each exactly one field and
+// the suffix stays unambiguous to parse from the right even when the note's own name contains
+// underscores. That is what lets a future "unresolved conflicts" view recover the device and the
+// time from a filename alone, with no index to keep in step. Lowercase throughout also means two
+// devices can never produce paths differing only by case, which decodeSnapshot refuses outright
+// (#94), and the absence of spaces keeps the name quotable in a shell and clean in a URL, which the
+// CLI and API on the roadmap both eventually want.
+//
+// Second precision, rather than the milliseconds an ISO string carries: two conflicts on one file,
+// from one device, inside the same second needs two passes in that second where the first left the
+// path still conflicting. The cross device version of that collision is gone entirely now the
+// device is in the name.
+export function conflictCopyPath(path: string, now: number, deviceId = ""): string {
+  const iso = new Date(now).toISOString();
+  const date = `${iso.slice(0, 4)}${iso.slice(5, 7)}${iso.slice(8, 10)}`;
+  const time = `${iso.slice(11, 13)}${iso.slice(14, 16)}${iso.slice(17, 19)}`;
+  let marker = `conflict_${date}-${time}`;
+  if (deviceId !== "") {
+    marker = `conflict_${deviceId}_${date}-${time}`;
+  }
   const lastSlash = path.lastIndexOf("/");
   const lastDot = path.lastIndexOf(".");
   if (lastDot === -1 || lastDot <= lastSlash + 1) {
-    return `${path} (conflicted copy ${stamp})`;
+    return `${path}_${marker}`;
   }
-  return `${path.slice(0, lastDot)} (conflicted copy ${stamp})${path.slice(lastDot)}`;
+  return `${path.slice(0, lastDot)}_${marker}${path.slice(lastDot)}`;
 }
 
 // decodeSentinel parses a serialized sentinel and checks its format version, the same posture

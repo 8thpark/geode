@@ -4,6 +4,8 @@ import {
   type ConnectionStatus,
   canSave,
   DEFAULT_SETTINGS,
+  deviceIdFrom,
+  deviceSuffixFrom,
   draftForDisplay,
   endpointFor,
   type GeodeSettings,
@@ -425,4 +427,60 @@ test("draftForDisplay: internal re-render returns the same draft reference", () 
   const draft = { ...DEFAULT_SETTINGS, bucket: "in-progress" };
   const got = draftForDisplay(false, draft, DEFAULT_SETTINGS);
   assert.strictEqual(got, draft);
+});
+
+test("deviceSuffixFrom: five bytes encode to eight base32 characters (#103)", () => {
+  // 40 bits split into eight 5-bit groups holding 0 through 7 in order, so the expected output
+  // reads straight off the front of the alphabet.
+  const suffix = deviceSuffixFrom(new Uint8Array([0x00, 0x44, 0x32, 0x14, 0xc7]));
+
+  assert.equal(suffix, "01234567");
+});
+
+test("deviceSuffixFrom: the alphabet is lowercase and skips the ambiguous letters (#103)", () => {
+  // One case throughout is what makes two device IDs unable to collide by case alone, which
+  // decodeSnapshot refuses outright (#94); lowercase specifically because the whole suffix a
+  // conflict copy carries is lowercase. i, l, o and u are absent so a suffix read off a filename
+  // can't be transcribed back wrong.
+  const every = deviceSuffixFrom(new Uint8Array([255, 255, 255, 255, 255]));
+
+  assert.equal(every, "zzzzzzzz");
+  for (const byte of [0, 64, 128, 192, 255]) {
+    const suffix = deviceSuffixFrom(new Uint8Array([byte, byte, byte, byte, byte]));
+
+    assert.match(suffix, /^[0-9a-hjkmnp-tv-z]{8}$/, `byte ${byte}`);
+    assert.equal(suffix, suffix.toLowerCase(), `byte ${byte}`);
+  }
+});
+
+test("deviceIdFrom: a label and suffix join with a hyphen", () => {
+  assert.equal(deviceIdFrom("mac", "k3pl7qna"), "mac-k3pl7qna");
+});
+
+test("deviceIdFrom: an empty half degrades to the other rather than leaving a stray hyphen", () => {
+  assert.equal(deviceIdFrom("", "k3pl7qna"), "k3pl7qna");
+  assert.equal(deviceIdFrom("mac", ""), "mac");
+});
+
+test("normalizeSettings: an upgrader with no deviceId reads back empty, ready to be minted", () => {
+  // Minting needs randomness, which normalizeSettings deliberately has none of; the plugin fills
+  // this in on load (#103). What matters here is that an absent field doesn't become undefined.
+  const settings = normalizeSettings({ bucket: "b" });
+
+  assert.equal(settings.deviceId, "");
+});
+
+test("normalizeSettings: an existing deviceId survives a reload untouched", () => {
+  const settings = normalizeSettings({ bucket: "b", deviceId: "mac-k3pl7qna" });
+
+  assert.equal(settings.deviceId, "mac-k3pl7qna");
+});
+
+test("settingsEqual: a differing deviceId is not an unsaved change (#103)", () => {
+  // deviceId is not user editable and a draft always carries the saved one forward, so counting it
+  // toward dirtiness could only ever produce a phantom "Unsaved changes".
+  const a: GeodeSettings = { ...DEFAULT_SETTINGS, deviceId: "mac-aaaaaaaa" };
+  const b: GeodeSettings = { ...DEFAULT_SETTINGS, deviceId: "ios-bbbbbbbb" };
+
+  assert.equal(settingsEqual(a, b), true);
 });

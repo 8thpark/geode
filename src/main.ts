@@ -1,10 +1,12 @@
 import type { App } from "obsidian";
-import { Plugin, setIcon, setTooltip } from "obsidian";
+import { Platform, Plugin, setIcon, setTooltip } from "obsidian";
 import { createLogSink } from "./log/adapter";
 import { createLogBus, createLogger, type LogBus, type Logger, type LogSink } from "./log/log";
 import { GeodeLogView, LOG_VIEW_TYPE } from "./log/view";
 import {
   DEFAULT_SETTINGS,
+  deviceIdFrom,
+  deviceSuffixFrom,
   type GeodeSettings,
   hasConnectionConfig,
   normalizeSettings,
@@ -33,6 +35,10 @@ const MAX_LOG_LINES = 500;
 // edits (autosave, bulk rename, etc.) collapses into one snapshot instead of one per file.
 const VAULT_STATE_DEBOUNCE_MS = 2000;
 
+// DEVICE_SUFFIX_BYTES is how much randomness separates two devices carrying the same platform
+// label. Five bytes encode to exactly eight base32 characters with nothing left over.
+const DEVICE_SUFFIX_BYTES = 5;
+
 // AppWithSetting adds Obsidian's internal, undocumented settings-window API (there is no public
 // equivalent) so the Settings command can jump straight to Geode's tab, and opening the log view
 // can close the settings modal out from under itself.
@@ -46,6 +52,30 @@ type AppWithSetting = App & {
 
 // SyncStatus is the state the status bar item reflects.
 type SyncStatus = "idle" | "syncing" | "error";
+
+// deviceLabel returns the human recognisable half of this device's ID, lowercase to match the rest
+// of the suffix a conflict copy carries. The mobile checks come first: an iPad reports itself as
+// macOS on some builds, so asking "is this a phone or tablet" before "which desktop OS" is what
+// keeps an iPad from being labelled mac.
+function deviceLabel(): string {
+  if (Platform.isIosApp) {
+    return "ios";
+  }
+  if (Platform.isAndroidApp) {
+    return "android";
+  }
+  if (Platform.isMacOS) {
+    return "mac";
+  }
+  if (Platform.isWin) {
+    return "windows";
+  }
+  if (Platform.isLinux) {
+    return "linux";
+  }
+
+  return "device";
+}
 
 // iconFor returns the status bar icon for status.
 function iconFor(status: SyncStatus): string {
@@ -119,7 +149,9 @@ export default class GeodePlugin extends Plugin {
     this.setSyncStatus("idle", "");
 
     this.addSettingTab(new GeodeSettingTab(this.app, this));
-    this.logger.info(`loaded (provider=${this.settings.provider})`);
+    this.logger.info(
+      `loaded (provider=${this.settings.provider}, device=${this.settings.deviceId})`,
+    );
 
     // onLayoutReady, not onload directly: the vault isn't guaranteed fully indexed yet at
     // onload time, and a snapshot taken too early would see an incomplete file list.
@@ -246,7 +278,15 @@ export default class GeodePlugin extends Plugin {
     await flushOpenEditors(this.app.workspace);
 
     const previous = await stateStore.read();
-    const outcome = await syncOnce(previous, reader, localWriter, storage, Date.now());
+    const outcome = await syncOnce(
+      previous,
+      reader,
+      localWriter,
+      storage,
+      Date.now(),
+      () => crypto.randomUUID(),
+      this.settings.deviceId,
+    );
     if (!outcome.ok) {
       // A failed pass can still have made progress worth keeping (#87): the snapshot records what
       // completed so it is never re-planned, while each failed file stays pending for next pass.
@@ -266,8 +306,17 @@ export default class GeodePlugin extends Plugin {
     this.setSyncStatus("idle", "");
   }
 
+  // loadSettings mints this device's ID on the first load that finds none, which covers both a
+  // fresh install and an upgrade from a build that predates #103. It persists through saveData
+  // rather than saveSettings: this runs before the logger exists, and saveSettings logs.
   async loadSettings() {
     this.settings = normalizeSettings(await this.loadData());
+    if (this.settings.deviceId !== "") {
+      return;
+    }
+    const suffix = deviceSuffixFrom(crypto.getRandomValues(new Uint8Array(DEVICE_SUFFIX_BYTES)));
+    this.settings.deviceId = deviceIdFrom(deviceLabel(), suffix);
+    await this.saveData(this.settings);
   }
 
   async saveSettings() {
