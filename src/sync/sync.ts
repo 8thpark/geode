@@ -83,6 +83,9 @@ export async function readRemoteManifest(
           message: "remote manifest is a format this version of geode can't read",
         };
       }
+      if (decoded.reason === "unsafePath") {
+        return { ok: false, message: "remote manifest contains a path unsafe to write" };
+      }
       return { ok: false, message: "remote manifest is corrupt" };
     }
     // Every S3 compatible server returns an ETag on a successful read; without one (a stripping
