@@ -53,11 +53,12 @@ export type Change = {
 };
 
 // DecodedSnapshot is the result of parsing a serialized snapshot: the snapshot itself, or why it
-// cannot be used — bytes that don't parse into the expected shape, an entry whose path is unsafe
-// to ever write to disk, or a format version this build does not know how to read.
+// cannot be used — bytes that don't parse into the expected shape, two entries whose paths differ
+// only by case, an entry whose path is unsafe to ever write to disk, or a format version this
+// build does not know how to read.
 export type DecodedSnapshot =
   | { ok: true; snapshot: Snapshot }
-  | { ok: false; reason: "corrupt" | "unsafePath" | "unsupportedVersion" };
+  | { ok: false; reason: "caseCollision" | "corrupt" | "unsafePath" | "unsupportedVersion" };
 
 // FileInfo is one file as seen live in the vault, before hashing.
 export type FileInfo = {
@@ -146,6 +147,13 @@ export function byPath(files: FileState[]): Map<string, FileState> {
 // state.json flows through this same decoder), and a single unsafe path fails the whole snapshot
 // rather than being silently dropped, so nothing downstream ever has to re-check what decode
 // already promised (#132).
+//
+// Two entries whose paths differ only by case are refused the same way (#94): bucket keys are
+// case sensitive, but macOS, Windows, and Android filesystems are case insensitive by default, so
+// pulling both onto a device with any of those would silently let the second write replace the
+// first with no conflict ever raised. This is checked for every snapshot regardless of which
+// filesystem decodes it, since a manifest a case sensitive device wrote is still headed for
+// whichever device syncs it next, and geode has no way to know in advance which that will be.
 export function decodeSnapshot(raw: string): DecodedSnapshot {
   let parsed: unknown;
   try {
@@ -166,6 +174,7 @@ export function decodeSnapshot(raw: string): DecodedSnapshot {
   if (version === undefined) {
     return { ok: false, reason: "unsupportedVersion" };
   }
+  const foldedPaths = new Set<string>();
   for (const file of parsed.files) {
     // isSnapshot only confirms files is an array, not that every entry is shaped like a
     // FileState, so an attacker-controlled manifest can still put a non-object entry (reading
@@ -177,6 +186,11 @@ export function decodeSnapshot(raw: string): DecodedSnapshot {
     if (!isSafePath(file.path)) {
       return { ok: false, reason: "unsafePath" };
     }
+    const folded = file.path.toLowerCase();
+    if (foldedPaths.has(folded)) {
+      return { ok: false, reason: "caseCollision" };
+    }
+    foldedPaths.add(folded);
   }
   const settingsFingerprint = (parsed as { settingsFingerprint?: unknown }).settingsFingerprint;
   const fingerprintStr = typeof settingsFingerprint === "string" ? settingsFingerprint : undefined;

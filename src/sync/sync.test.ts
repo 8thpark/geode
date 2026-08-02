@@ -116,6 +116,26 @@ test("readRemoteManifest: a manifest entry with a traversal path refuses the pas
   });
 });
 
+test("readRemoteManifest: two paths differing only by case refuse the pass (#94)", async () => {
+  // Bucket keys are case sensitive; macOS, Windows, and Android are not by default. Pulling both
+  // would silently let one overwrite the other with no conflict ever raised.
+  const raw = JSON.stringify({
+    version: 2,
+    files: [
+      { path: "notes/Todo.md", size: 1, mtime: 2, hash: "h1" },
+      { path: "notes/todo.md", size: 1, mtime: 2, hash: "h2" },
+    ],
+  });
+  const { storage } = fakeStorage({ [MANIFEST_KEY]: raw });
+
+  const result = await readRemoteManifest(storage);
+
+  assert.deepEqual(result, {
+    ok: false,
+    message: "remote manifest contains two paths that differ only by case",
+  });
+});
+
 test("readRemoteManifest: a non 404 failure is reported, never guessed at as empty", async () => {
   const { storage } = fakeStorage();
   storage.getObject = async () => ({
