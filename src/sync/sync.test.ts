@@ -99,6 +99,23 @@ test("readRemoteManifest: a manifest from a format version this build doesn't kn
   });
 });
 
+test("readRemoteManifest: a manifest entry with a traversal path refuses the pass (#132)", async () => {
+  // A remote manifest is untrusted input: anyone who can write to the bucket can shape it. A
+  // crafted path must never reach a local file operation.
+  const raw = JSON.stringify({
+    version: 2,
+    files: [{ path: "../../etc/passwd", size: 1, mtime: 2, hash: "h" }],
+  });
+  const { storage } = fakeStorage({ [MANIFEST_KEY]: raw });
+
+  const result = await readRemoteManifest(storage);
+
+  assert.deepEqual(result, {
+    ok: false,
+    message: "remote manifest contains a path unsafe to write",
+  });
+});
+
 test("readRemoteManifest: a non 404 failure is reported, never guessed at as empty", async () => {
   const { storage } = fakeStorage();
   storage.getObject = async () => ({

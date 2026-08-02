@@ -18,6 +18,34 @@ export const SNAPSHOT_VERSION = 2;
 // has to be, there is no streaming read on the platform), just never alongside another.
 const SNAPSHOT_BYTE_BUDGET = 64 * 1024 * 1024;
 
+// WINDOWS_RESERVED_NAMES are device names Windows reserves regardless of extension (`con.txt` is
+// still `con`), checked case-insensitively by isSafePath so a manifest entry can never collide
+// with one on a machine that syncs there.
+const WINDOWS_RESERVED_NAMES = new Set([
+  "aux",
+  "com1",
+  "com2",
+  "com3",
+  "com4",
+  "com5",
+  "com6",
+  "com7",
+  "com8",
+  "com9",
+  "con",
+  "lpt1",
+  "lpt2",
+  "lpt3",
+  "lpt4",
+  "lpt5",
+  "lpt6",
+  "lpt7",
+  "lpt8",
+  "lpt9",
+  "nul",
+  "prn",
+]);
+
 // Change describes one path whose state differs between two snapshots.
 export type Change = {
   path: string;
@@ -25,11 +53,11 @@ export type Change = {
 };
 
 // DecodedSnapshot is the result of parsing a serialized snapshot: the snapshot itself, or why it
-// cannot be used — bytes that don't parse into the expected shape, or a format version this
-// build does not know how to read.
+// cannot be used — bytes that don't parse into the expected shape, an entry whose path is unsafe
+// to ever write to disk, or a format version this build does not know how to read.
 export type DecodedSnapshot =
   | { ok: true; snapshot: Snapshot }
-  | { ok: false; reason: "corrupt" | "unsupportedVersion" };
+  | { ok: false; reason: "corrupt" | "unsafePath" | "unsupportedVersion" };
 
 // FileInfo is one file as seen live in the vault, before hashing.
 export type FileInfo = {
@@ -112,6 +140,12 @@ export function byPath(files: FileState[]): Map<string, FileState> {
 // payload with no version field still reads as corrupt rather than as a well formed old manifest.
 // The returned snapshot carries only the in-memory shape; the version is a wire concern that
 // encodeSnapshot stamps back on at the next write.
+//
+// Every entry's path is checked with isSafePath before the snapshot is handed back: both callers
+// are untrusted input (a remote manifest can be shaped by anyone who can write to the bucket, and
+// state.json flows through this same decoder), and a single unsafe path fails the whole snapshot
+// rather than being silently dropped, so nothing downstream ever has to re-check what decode
+// already promised (#132).
 export function decodeSnapshot(raw: string): DecodedSnapshot {
   let parsed: unknown;
   try {
@@ -131,6 +165,18 @@ export function decodeSnapshot(raw: string): DecodedSnapshot {
   }
   if (version === undefined) {
     return { ok: false, reason: "unsupportedVersion" };
+  }
+  for (const file of parsed.files) {
+    // isSnapshot only confirms files is an array, not that every entry is shaped like a
+    // FileState, so an attacker-controlled manifest can still put a non-object entry (reading
+    // .path off null or undefined throws) or a non-string path here despite what the narrowed
+    // type above claims.
+    if (typeof file !== "object" || file === null || typeof file.path !== "string") {
+      return { ok: false, reason: "corrupt" };
+    }
+    if (!isSafePath(file.path)) {
+      return { ok: false, reason: "unsafePath" };
+    }
   }
   const settingsFingerprint = (parsed as { settingsFingerprint?: unknown }).settingsFingerprint;
   const fingerprintStr = typeof settingsFingerprint === "string" ? settingsFingerprint : undefined;
@@ -208,6 +254,40 @@ export async function hashBytes(data: Uint8Array): Promise<string> {
     hex += byte.toString(16).padStart(2, "0");
   }
   return hex;
+}
+
+// isSafePath reports whether path is safe to write to disk from untrusted input (a remote
+// manifest, a local state.json): no traversal or empty segment, no absolute path, no backslash,
+// nothing at or under the reserved .geode root (mirrors RESERVED_PREFIX in sync/plan.ts by value;
+// vault.ts cannot import it without a layering cycle) or at or under .obsidian (a file written
+// there is loadable plugin code), and no segment a filesystem geode runs on could resolve to
+// something other than a plain file: a Windows reserved device name, or a segment ending in a dot
+// or space, which Windows silently strips on write. The reserved root is matched on its first path
+// segment alone, lowercased, rather than the whole path: both macOS (APFS) and Windows (NTFS)
+// default to case insensitive filesystems, so ".OBSIDIAN" and ".obsidian" are the same directory on
+// disk even though they compare unequal as strings, and a case sensitive check would let a
+// differently cased manifest entry plan straight into either reserved root.
+export function isSafePath(path: string): boolean {
+  if (path === "" || path.startsWith("/") || path.includes("\\")) {
+    return false;
+  }
+  const root = path.split("/", 1)[0].toLowerCase();
+  if (root === ".obsidian" || root === ".geode") {
+    return false;
+  }
+  for (const segment of path.split("/")) {
+    if (segment === "" || segment === "." || segment === "..") {
+      return false;
+    }
+    if (segment.endsWith(".") || segment.endsWith(" ")) {
+      return false;
+    }
+    if (isWindowsReservedName(segment)) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 // isSnapshot reports whether a value parsed from untrusted JSON (a remote manifest, a local
@@ -336,6 +416,15 @@ function byteSemaphore(budget: number): { acquire: (bytes: number) => Promise<Ho
       });
     },
   };
+}
+
+// isWindowsReservedName reports whether segment is a Windows reserved device name, matched
+// case-insensitively and ignoring any extension, since Windows treats "con.txt" the same as "con".
+function isWindowsReservedName(segment: string): boolean {
+  const dot = segment.indexOf(".");
+  const base = dot === -1 ? segment : segment.slice(0, dot);
+
+  return WINDOWS_RESERVED_NAMES.has(base.toLowerCase());
 }
 
 // mapWithConcurrency runs fn over each item with at most limit concurrent invocations, preserving

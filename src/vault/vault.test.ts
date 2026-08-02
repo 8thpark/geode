@@ -6,6 +6,7 @@ import {
   diffSnapshots,
   encodeSnapshot,
   type FileInfo,
+  isSafePath,
   isSnapshot,
   type Reader,
   SNAPSHOT_VERSION,
@@ -117,6 +118,47 @@ test("isSnapshot: only a non-null object with a files array is accepted", () => 
   }
 });
 
+test("isSafePath: traversal, absolute paths, reserved prefixes, and unsafe segments are all rejected", () => {
+  const cases: { name: string; path: string; want: boolean }[] = [
+    { name: "an ordinary nested path", path: "notes/a.md", want: true },
+    { name: "an ordinary top level path", path: "a.md", want: true },
+    { name: "an empty path", path: "", want: false },
+    { name: "an absolute path", path: "/etc/passwd", want: false },
+    { name: "a leading traversal segment", path: "../outside.md", want: false },
+    { name: "a mid path traversal segment", path: "notes/../../outside.md", want: false },
+    { name: "a bare current dir segment", path: "notes/./a.md", want: false },
+    { name: "a double slash producing an empty segment", path: "notes//a.md", want: false },
+    { name: "a trailing slash producing an empty segment", path: "notes/", want: false },
+    { name: "a backslash", path: "notes\\a.md", want: false },
+    { name: "the reserved .geode prefix", path: ".geode/blobs/abc", want: false },
+    { name: "the exact reserved .geode root, no trailing slash", path: ".geode", want: false },
+    { name: "the .obsidian folder itself", path: ".obsidian", want: false },
+    { name: "a file under .obsidian", path: ".obsidian/plugins/evil/main.js", want: false },
+    {
+      // macOS (APFS) and Windows (NTFS) both default to case insensitive filesystems, so a
+      // differently cased root lands on the same directory on disk as the lowercase one.
+      name: "a differently cased .geode root",
+      path: ".GEODE/blobs/abc",
+      want: false,
+    },
+    {
+      name: "a differently cased .obsidian root",
+      path: ".OBSIDIAN/plugins/evil/main.js",
+      want: false,
+    },
+    { name: "a mixed case .obsidian root with no trailing slash", path: ".Obsidian", want: false },
+    { name: "a Windows reserved device name", path: "notes/CON.md", want: false },
+    { name: "a Windows reserved device name, lowercase", path: "con", want: false },
+    { name: "a Windows reserved device name in a middle segment", path: "com1/a.md", want: false },
+    { name: "a segment ending in a dot", path: "notes/a.md.", want: false },
+    { name: "a segment ending in a space", path: "notes/a.md ", want: false },
+  ];
+
+  for (const { name, path, want } of cases) {
+    assert.equal(isSafePath(path), want, name);
+  }
+});
+
 test("encodeSnapshot: the wire format carries the version marker and round-trips", () => {
   const snapshot: Snapshot = { files: [{ path: "a.md", size: 1, mtime: 2, hash: "h" }] };
 
@@ -178,6 +220,43 @@ test("decodeSnapshot: only the current version is accepted; version 1, missing, 
       // resolved to unsupportedVersion.
       name: "JSON of the wrong shape with no version field",
       raw: JSON.stringify({}),
+      want: { ok: false, reason: "corrupt" },
+    },
+    {
+      // isSnapshot only confirms files is an array; a crafted manifest can still put a traversal
+      // segment in an otherwise well formed entry (#132).
+      name: "a traversal segment in an entry's path",
+      raw: JSON.stringify({
+        version: 2,
+        files: [{ path: "../../etc/passwd", size: 1, mtime: 2, hash: "h" }],
+      }),
+      want: { ok: false, reason: "unsafePath" },
+    },
+    {
+      name: "one unsafe entry fails the whole snapshot, not just that entry",
+      raw: JSON.stringify({
+        version: 2,
+        files: [...files, { path: "/etc/passwd", size: 1, mtime: 2, hash: "h" }],
+      }),
+      want: { ok: false, reason: "unsafePath" },
+    },
+    {
+      // isSnapshot doesn't validate each entry's shape, so a path that isn't even a string reaches
+      // decodeSnapshot's own loop and must read as corrupt rather than crash there.
+      name: "an entry whose path isn't a string",
+      raw: JSON.stringify({ version: 2, files: [{ path: 42, size: 1, mtime: 2, hash: "h" }] }),
+      want: { ok: false, reason: "corrupt" },
+    },
+    {
+      // A bare `null` array element reads .path on null, which throws rather than returning
+      // undefined; the entry shape check must catch this before that property read happens.
+      name: "a null entry",
+      raw: JSON.stringify({ version: 2, files: [null] }),
+      want: { ok: false, reason: "corrupt" },
+    },
+    {
+      name: "a non-object entry",
+      raw: JSON.stringify({ version: 2, files: ["not-an-object"] }),
       want: { ok: false, reason: "corrupt" },
     },
   ];
