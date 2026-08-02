@@ -131,6 +131,7 @@ test("isSafePath: traversal, absolute paths, reserved prefixes, and unsafe segme
     { name: "a trailing slash producing an empty segment", path: "notes/", want: false },
     { name: "a backslash", path: "notes\\a.md", want: false },
     { name: "the reserved .geode prefix", path: ".geode/blobs/abc", want: false },
+    { name: "the exact reserved .geode root, no trailing slash", path: ".geode", want: false },
     { name: "the .obsidian folder itself", path: ".obsidian", want: false },
     { name: "a file under .obsidian", path: ".obsidian/plugins/evil/main.js", want: false },
     { name: "a Windows reserved device name", path: "notes/CON.md", want: false },
@@ -231,6 +232,18 @@ test("decodeSnapshot: only the current version is accepted; version 1, missing, 
       // decodeSnapshot's own loop and must read as corrupt rather than crash there.
       name: "an entry whose path isn't a string",
       raw: JSON.stringify({ version: 2, files: [{ path: 42, size: 1, mtime: 2, hash: "h" }] }),
+      want: { ok: false, reason: "corrupt" },
+    },
+    {
+      // A bare `null` array element reads .path on null, which throws rather than returning
+      // undefined; the entry shape check must catch this before that property read happens.
+      name: "a null entry",
+      raw: JSON.stringify({ version: 2, files: [null] }),
+      want: { ok: false, reason: "corrupt" },
+    },
+    {
+      name: "a non-object entry",
+      raw: JSON.stringify({ version: 2, files: ["not-an-object"] }),
       want: { ok: false, reason: "corrupt" },
     },
   ];
