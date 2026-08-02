@@ -21,9 +21,6 @@ function fakeReader(files: Record<string, { content: string; mtime: number }>): 
 } {
   let reads = 0;
   const reader: Reader = {
-    fileExists: async (path) => {
-      return files[path] !== undefined;
-    },
     listFiles: async () => {
       const list: FileInfo[] = [];
       for (const [path, file] of Object.entries(files)) {
@@ -38,6 +35,13 @@ function fakeReader(files: Record<string, { content: string; mtime: number }>): 
         throw new Error(`no such file: ${path}`);
       }
       return new TextEncoder().encode(file.content);
+    },
+    stat: async (path) => {
+      const file = files[path];
+      if (file === undefined) {
+        return { present: false, size: 0, mtime: 0 };
+      }
+      return { present: true, size: file.content.length, mtime: file.mtime };
     },
   };
   return { reader, readCount: () => reads };
@@ -122,22 +126,31 @@ test("encodeSnapshot: the wire format carries the version marker and round-trips
   assert.deepEqual(decodeSnapshot(raw), { ok: true, snapshot });
 });
 
-test("decodeSnapshot: version handling accepts the marker, treats absence as version 1, and refuses the unknown", () => {
+test("decodeSnapshot: only the current version is accepted; version 1, missing, and newer are all refused", () => {
   const files = [{ path: "a.md", size: 1, mtime: 2, hash: "h" }];
   const cases: { name: string; raw: string; want: DecodedSnapshot }[] = [
     {
       name: "the current versioned format",
-      raw: JSON.stringify({ version: 1, files }),
+      raw: JSON.stringify({ version: 2, files }),
       want: { ok: true, snapshot: { files } },
     },
     {
-      name: "a pre-marker snapshot with no version field, version 1 by definition",
+      // Version 1, plaintext path keyed storage, predates the marker (#91) and is version 1 by
+      // definition. Its JSON shape is identical to version 2's (both are `{files: [...]}`), only
+      // the marker distinguishes them, so this build refuses it rather than misread its paths as
+      // content addressed keys.
+      name: "a pre-marker snapshot with no version field",
       raw: JSON.stringify({ files }),
-      want: { ok: true, snapshot: { files } },
+      want: { ok: false, reason: "unsupportedVersion" },
+    },
+    {
+      name: "an explicit version 1, plaintext path keyed storage",
+      raw: JSON.stringify({ version: 1, files }),
+      want: { ok: false, reason: "unsupportedVersion" },
     },
     {
       name: "a version from a newer build",
-      raw: JSON.stringify({ version: 2, files }),
+      raw: JSON.stringify({ version: 3, files }),
       want: { ok: false, reason: "unsupportedVersion" },
     },
     {
@@ -145,7 +158,7 @@ test("decodeSnapshot: version handling accepts the marker, treats absence as ver
       // itself (files as an encrypted blob, say), and it must read as "needs a newer build",
       // never as corrupt.
       name: "a newer version whose shape this build does not understand",
-      raw: JSON.stringify({ version: 2, files: "ciphertext" }),
+      raw: JSON.stringify({ version: 3, files: "ciphertext" }),
       want: { ok: false, reason: "unsupportedVersion" },
     },
     {
@@ -155,8 +168,16 @@ test("decodeSnapshot: version handling accepts the marker, treats absence as ver
     },
     { name: "bytes that aren't JSON", raw: "not json", want: { ok: false, reason: "corrupt" } },
     {
-      name: "JSON of the wrong shape",
-      raw: JSON.stringify({ version: 1 }),
+      name: "JSON of the wrong shape at the current version",
+      raw: JSON.stringify({ version: 2 }),
+      want: { ok: false, reason: "corrupt" },
+    },
+    {
+      // Genuinely malformed data with no version field must still read as corrupt, not as "an old
+      // but well formed version 1 manifest": shape is checked before the missing-version case is
+      // resolved to unsupportedVersion.
+      name: "JSON of the wrong shape with no version field",
+      raw: JSON.stringify({}),
       want: { ok: false, reason: "corrupt" },
     },
   ];
@@ -176,9 +197,6 @@ test("takeSnapshot: concurrency is bounded by the limit", async () => {
   let inflight = 0;
   let peakInflight = 0;
   const reader: Reader = {
-    fileExists: async (path) => {
-      return files[path] !== undefined;
-    },
     listFiles: async () => {
       const list: FileInfo[] = [];
       for (const [path, file] of Object.entries(files)) {
@@ -199,10 +217,166 @@ test("takeSnapshot: concurrency is bounded by the limit", async () => {
       }
       return new TextEncoder().encode(file.content);
     },
+    stat: async (path) => {
+      const file = files[path];
+      if (file === undefined) {
+        return { present: false, size: 0, mtime: 0 };
+      }
+      return { present: true, size: file.content.length, mtime: file.mtime };
+    },
   };
 
   const snapshot = await takeSnapshot(reader, empty, 2);
 
   assert.equal(snapshot.files.length, 10);
   assert.ok(peakInflight <= 2, `expected at most 2 concurrent reads, got ${peakInflight}`);
+});
+
+test("takeSnapshot: in-flight bytes are bounded by the byte budget", async () => {
+  const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+  const size = 100;
+  const files: Record<string, { content: string; mtime: number }> = {};
+  for (let i = 0; i < 10; i++) {
+    files[`${i}.md`] = { content: "x".repeat(size), mtime: 1 };
+  }
+
+  let inflightBytes = 0;
+  let peakBytes = 0;
+  const reader: Reader = {
+    listFiles: async () => {
+      const list: FileInfo[] = [];
+      for (const [path, file] of Object.entries(files)) {
+        list.push({ path, size: file.content.length, mtime: file.mtime });
+      }
+      return list;
+    },
+    readFile: async (path) => {
+      const file = files[path];
+      if (file === undefined) {
+        throw new Error(`no such file: ${path}`);
+      }
+      inflightBytes += file.content.length;
+      if (inflightBytes > peakBytes) {
+        peakBytes = inflightBytes;
+      }
+      await delay(10);
+      inflightBytes -= file.content.length;
+
+      return new TextEncoder().encode(file.content);
+    },
+    stat: async (path) => {
+      const file = files[path];
+      if (file === undefined) {
+        return { present: false, size: 0, mtime: 0 };
+      }
+      return { present: true, size: file.content.length, mtime: file.mtime };
+    },
+  };
+
+  // A high file-count cap so the byte budget, not the worker count, is what binds: a 250 byte
+  // budget admits two 100 byte reads at once and holds the rest until one releases.
+  const snapshot = await takeSnapshot(reader, empty, 10, 250);
+
+  assert.equal(snapshot.files.length, 10);
+  assert.ok(peakBytes <= 250, `expected at most 250 in-flight bytes, got ${peakBytes}`);
+});
+
+test("takeSnapshot: a file larger than the whole byte budget is still read", async () => {
+  const { reader } = fakeReader({ "big.bin": { content: "x".repeat(1000), mtime: 1 } });
+
+  const snapshot = await takeSnapshot(reader, empty, 8, 100);
+
+  assert.equal(snapshot.files.length, 1);
+  assert.equal(snapshot.files[0].path, "big.bin");
+});
+
+test("takeSnapshot: a small read does not jump a queued large read", async () => {
+  const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+  let releaseHog: () => void = () => {};
+  const hogGate = new Promise<void>((resolve) => {
+    releaseHog = resolve;
+  });
+  const sizes: Record<string, number> = { hog: 60, big: 60, small: 10 };
+  const started: string[] = [];
+  const reader: Reader = {
+    // hog fills most of the budget and is held open; big cannot fit and queues; small then arrives
+    // and, with fair admission, must wait behind big rather than slipping into the gap hog left.
+    listFiles: async () => [
+      { path: "hog", size: 60, mtime: 1 },
+      { path: "big", size: 60, mtime: 1 },
+      { path: "small", size: 10, mtime: 1 },
+    ],
+    readFile: async (path) => {
+      started.push(path);
+      if (path === "hog") {
+        await hogGate;
+      }
+
+      return new Uint8Array(sizes[path]);
+    },
+    stat: async (path) => {
+      return { present: true, size: sizes[path], mtime: 1 };
+    },
+  };
+
+  const snapshot = takeSnapshot(reader, empty, 3, 100);
+  await delay(20);
+  releaseHog();
+  const result = await snapshot;
+
+  assert.equal(result.files.length, 3);
+  assert.ok(
+    started.indexOf("big") < started.indexOf("small"),
+    `expected big to start before small, got ${started.join(",")}`,
+  );
+});
+
+test("takeSnapshot: growth since listing is bounded by the fresh size", async () => {
+  const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+  const files: Record<string, { listed: number; actual: number; mtime: number }> = {};
+  for (let i = 0; i < 6; i++) {
+    files[`${i}.bin`] = { listed: 10, actual: 400, mtime: 1 };
+  }
+
+  let inflightBytes = 0;
+  let peakBytes = 0;
+  const reader: Reader = {
+    // Every file lists as 10 bytes but has since grown to 400. Reserving on the listed 10 would let
+    // several read at once and blow past the budget; reserving on the fresh size read now must not.
+    listFiles: async () => {
+      const list: FileInfo[] = [];
+      for (const [path, file] of Object.entries(files)) {
+        list.push({ path, size: file.listed, mtime: file.mtime });
+      }
+      return list;
+    },
+    readFile: async (path) => {
+      const file = files[path];
+      if (file === undefined) {
+        throw new Error(`no such file: ${path}`);
+      }
+      inflightBytes += file.actual;
+      if (inflightBytes > peakBytes) {
+        peakBytes = inflightBytes;
+      }
+      await delay(10);
+      inflightBytes -= file.actual;
+
+      return new Uint8Array(file.actual);
+    },
+    stat: async (path) => {
+      const file = files[path];
+      if (file === undefined) {
+        return { present: false, size: 0, mtime: 0 };
+      }
+      return { present: true, size: file.actual, mtime: file.mtime };
+    },
+  };
+
+  // A 500 byte budget with a generous count cap: on the stale listed size of 10 all six would read
+  // at once (2400 bytes resident); on the fresh size of 400 only one fits at a time.
+  const snapshot = await takeSnapshot(reader, empty, 6, 500);
+
+  assert.equal(snapshot.files.length, 6);
+  assert.ok(peakBytes <= 500, `expected in-flight bytes within the 500 budget, got ${peakBytes}`);
 });

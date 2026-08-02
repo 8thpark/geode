@@ -31,6 +31,9 @@ function detailFor(err: unknown): string {
 
 // statusForHttp maps HTTP 400 to the non-retryable client status and preserves known domain
 // statuses; unrecognised codes, including 5xx and 429, fall through to retryable server status.
+// 409 joins 412 as "conflict": real Amazon S3 returns 409 (rather than 412) when a conditional
+// write loses a race against another in-flight write to the same key, so both codes mean the
+// same thing to a caller: another writer won, retry the compare-and-swap.
 export function statusForHttp(code: number): ResultStatus {
   if (code === 400) {
     return "client";
@@ -41,7 +44,7 @@ export function statusForHttp(code: number): ResultStatus {
   if (code === 403 || code === 401) {
     return "auth";
   }
-  if (code === 412) {
+  if (code === 412 || code === 409) {
     return "conflict";
   }
   return "server";

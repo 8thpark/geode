@@ -17,6 +17,7 @@ import {
   createObsidianLocalWriter,
   createObsidianReader,
   createObsidianStore,
+  flushOpenEditors,
 } from "./vault/obsidian";
 import { diffSnapshots, takeSnapshot } from "./vault/vault";
 
@@ -239,6 +240,10 @@ export default class GeodePlugin extends Plugin {
     );
     const reader = createObsidianReader(this.app.vault);
     const localWriter = createObsidianLocalWriter(this.app.vault.adapter);
+
+    // Flush every open editor to disk right before the snapshot below reads the vault, so a file
+    // mid edit is never invisible to this pass's drift checks (see flushOpenEditors).
+    await flushOpenEditors(this.app.workspace);
 
     const previous = await stateStore.read();
     const outcome = await syncOnce(previous, reader, localWriter, storage, Date.now());

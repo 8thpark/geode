@@ -3,8 +3,20 @@ import { endpointFor, type GeodeSettings, regionFor } from "../settings/settings
 // SNAPSHOT_VERSION is the format version stamped into every serialized snapshot, remote manifest
 // and local state.json alike, so a future format change (encryption, chunked upload) has
 // something to branch on when it meets an existing bucket (#91). A serialized snapshot with no
-// version field predates the marker and is this same format, version 1.
-export const SNAPSHOT_VERSION = 1;
+// version field predates the marker and is version 1, plaintext path keyed storage. Version 2
+// moved file content off the vault path and onto a content addressed key under the manifest's own
+// bucket (`.geode/blobs/<hash>`, see sync/plan.ts); a version 1 manifest is refused rather than
+// read, since its paths point at objects this build never looks for again, and reading it as
+// version 2 would plan every push and pull against keys that were never written. There is no
+// migration path at this version: a bucket written before this change needs a fresh bucket, not an
+// upgrade.
+export const SNAPSHOT_VERSION = 2;
+
+// SNAPSHOT_BYTE_BUDGET caps how many bytes takeSnapshot buffers across its concurrent reads, low
+// enough that a vault of large attachments cannot pile eight full files into memory at once and
+// breach a mobile memory ceiling mid snapshot. A single file larger than this is still read (it
+// has to be, there is no streaming read on the platform), just never alongside another.
+const SNAPSHOT_BYTE_BUDGET = 64 * 1024 * 1024;
 
 // Change describes one path whose state differs between two snapshots.
 export type Change = {
@@ -26,6 +38,16 @@ export type FileInfo = {
   mtime: number;
 };
 
+// FileStat is everything the vault index knows about one path without reading it: whether anything
+// is there at all, and the size and mtime it carries if so. An absent path is present false with
+// zero values rather than a null to unpack, so callers compare fields instead of branching on
+// absence first.
+export type FileStat = {
+  present: boolean;
+  size: number;
+  mtime: number;
+};
+
 // FileState is what geode remembers about one vault file as of the last snapshot.
 export type FileState = {
   path: string;
@@ -34,13 +56,19 @@ export type FileState = {
   hash: string;
 };
 
-// Reader lists files present in the vault right now, reads their bytes, and answers whether a
-// path currently exists, so a failed read on a present file is never mistaken for absence. The
-// real implementation wraps Obsidian's Vault API (see obsidian.ts); tests use an in-memory fake.
+// Reader lists files present in the vault right now, reads their bytes, and reports what the index
+// already knows about a single path without touching its content. stat answers all three of the
+// questions sync asks between reads: whether the path is there at all (so a failed read on a
+// present file is never mistaken for absence), how big it is right now (fresher than the listing,
+// so a snapshot reserves memory against what it is about to read rather than a size that may have
+// grown since), and when it last changed (so a pull can confirm nothing moved underneath it
+// without rereading the file, see confirmLocalUnchanged in sync/execute.ts). A vanished path
+// reports a zero stat, letting the read that follows raise the real disappearance error. The real
+// implementation wraps Obsidian's Vault API (see obsidian.ts); tests use an in-memory fake.
 export type Reader = {
-  fileExists: (path: string) => Promise<boolean>;
   listFiles: () => Promise<FileInfo[]>;
   readFile: (path: string) => Promise<Uint8Array>;
+  stat: (path: string) => Promise<FileStat>;
 };
 
 // Snapshot is every file geode saw the last time it took a snapshot.
@@ -56,6 +84,13 @@ export type Store = {
   write: (snapshot: Snapshot) => Promise<void>;
 };
 
+// Hold is a live byteSemaphore reservation: resize reconciles it to the bytes actually read, since
+// a file can grow between listing and read, and release returns them to the budget.
+type Hold = {
+  release: () => void;
+  resize: (bytes: number) => void;
+};
+
 // byPath builds a lookup from path to file state, for matching a live file against what the
 // previous snapshot last saw at that same path. Exported for sync.ts, which needs the same
 // lookup to compare a local snapshot against a remote one.
@@ -68,11 +103,13 @@ export function byPath(files: FileState[]): Map<string, FileState> {
 }
 
 // decodeSnapshot parses a serialized snapshot (a remote manifest, a local state.json) and checks
-// its format version. A missing version is accepted as version 1, the format every build before
-// the marker existed wrote; any other unknown version is refused rather than guessed at, so this
-// build never misreads a bucket written in a newer format as garbage or, worse, as valid. The
-// version check runs before the shape check on purpose: a future format is free to change the
-// shape itself, and its snapshots must still read as "needs a newer build", never as corrupt.
+// its format version. An explicit version other than SNAPSHOT_VERSION is refused before the shape
+// is even looked at: a future format is free to change the shape itself (files as an encrypted
+// blob, say), and its snapshots must still read as "needs a different build", never as corrupt.
+// A missing version field means version 1, the format every build before the marker existed
+// wrote, and shares version 2's JSON shape exactly (`{files: [...]}`), so the two can only be
+// told apart by the marker itself; that check runs after the shape check, so a merely malformed
+// payload with no version field still reads as corrupt rather than as a well formed old manifest.
 // The returned snapshot carries only the in-memory shape; the version is a wire concern that
 // encodeSnapshot stamps back on at the next write.
 export function decodeSnapshot(raw: string): DecodedSnapshot {
@@ -91,6 +128,9 @@ export function decodeSnapshot(raw: string): DecodedSnapshot {
   }
   if (!isSnapshot(parsed)) {
     return { ok: false, reason: "corrupt" };
+  }
+  if (version === undefined) {
+    return { ok: false, reason: "unsupportedVersion" };
   }
   const settingsFingerprint = (parsed as { settingsFingerprint?: unknown }).settingsFingerprint;
   const fingerprintStr = typeof settingsFingerprint === "string" ? settingsFingerprint : undefined;
@@ -183,31 +223,119 @@ export function isSnapshot(value: unknown): value is Snapshot {
 // file whose size and mtime both match the previous snapshot reuses that hash instead of
 // rereading content — the same stat gated hashing rsync, git, and Syncthing all use, since mtime
 // and size alone aren't reliable enough to trust as identity, but are cheap enough to skip a
-// rehash when neither has moved. Concurrency is bounded by limit to avoid unbounded memory
-// pressure on large vaults.
+// rehash when neither has moved. Reads run at most concurrency at a time and reserve against a
+// size read just before each read, so a vault of large attachments serialises rather than piling
+// full files into memory at once; a stat gated skip reads nothing and reserves nothing.
+//
+// The byte bound is not absolute. size and readFile are separate operations, so a file that grows
+// in the window between them still allocates its whole buffer past the reservation, and no whole
+// file reader can prevent that without a streaming read the mobile platform does not offer. The
+// concurrency cap is the hard backstop: at most that many buffers are ever resident at once.
 export async function takeSnapshot(
   reader: Reader,
   previous: Snapshot,
   concurrency = 8,
+  byteBudget = SNAPSHOT_BYTE_BUDGET,
 ): Promise<Snapshot> {
   const previousByPath = byPath(previous.files);
   const liveFiles = await reader.listFiles();
+  const budget = byteSemaphore(byteBudget);
 
   const files = await mapWithConcurrency(liveFiles, concurrency, async (file) => {
     const known = previousByPath.get(file.path);
     if (known !== undefined && known.size === file.size && known.mtime === file.mtime) {
       return known;
     }
-    const bytes = await reader.readFile(file.path);
-    return {
-      path: file.path,
-      size: file.size,
-      mtime: file.mtime,
-      hash: await hashBytes(bytes),
-    };
+
+    // Reserve against the size read now, not the one listed at the start of the pass, so a file
+    // that has since grown cannot slip past the budget on a stale, smaller number; resize then
+    // corrects for any change in the narrow window between this probe and the read itself. A path
+    // that has vanished reserves nothing and lets the read raise the real error.
+    const live = await reader.stat(file.path);
+    const hold = await budget.acquire(live.size);
+    try {
+      const bytes = await reader.readFile(file.path);
+      hold.resize(bytes.length);
+
+      return {
+        path: file.path,
+        size: file.size,
+        mtime: file.mtime,
+        hash: await hashBytes(bytes),
+      };
+    } finally {
+      hold.release();
+    }
   });
 
   return { files };
+}
+
+// byteSemaphore caps the bytes held by in-flight readers to budget. acquire reserves the caller's
+// size and resolves once it fits, returning a hold whose resize reconciles that reservation to the
+// bytes actually read and whose release hands the room back. Waiters are admitted strictly in
+// arrival order — a later small read never jumps a queued large one — and a file larger than the
+// whole budget is admitted only when nothing else is held, so it runs alone rather than blocking
+// forever. The bound holds only as far as the reserved size is honest, which is why takeSnapshot
+// reserves against a freshly read size rather than a stale listed one.
+function byteSemaphore(budget: number): { acquire: (bytes: number) => Promise<Hold> } {
+  let available = budget;
+  const waiters: Array<{ need: number; wake: () => void }> = [];
+
+  function admits(need: number): boolean {
+    if (need <= available) {
+      return true;
+    }
+
+    // Nothing else is resident, so an oversized read is let through alone rather than wedged.
+    return available === budget;
+  }
+
+  function drain(): void {
+    while (waiters.length > 0) {
+      const next = waiters[0];
+      if (!admits(next.need)) {
+        return;
+      }
+      waiters.shift();
+      available -= next.need;
+      next.wake();
+    }
+  }
+
+  function hold(reserved: number): Hold {
+    let held = reserved;
+
+    return {
+      release: (): void => {
+        available += held;
+        held = 0;
+        drain();
+      },
+      resize: (bytes: number): void => {
+        const freed = held - bytes;
+        available += freed;
+        held = bytes;
+        if (freed > 0) {
+          drain();
+        }
+      },
+    };
+  }
+
+  return {
+    acquire: (bytes: number): Promise<Hold> => {
+      if (waiters.length === 0 && admits(bytes)) {
+        available -= bytes;
+
+        return Promise.resolve(hold(bytes));
+      }
+
+      return new Promise<Hold>((resolve) => {
+        waiters.push({ need: bytes, wake: () => resolve(hold(bytes)) });
+      });
+    },
+  };
 }
 
 // mapWithConcurrency runs fn over each item with at most limit concurrent invocations, preserving

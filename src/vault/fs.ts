@@ -62,7 +62,8 @@ export function nodeVault(root: string): { vault: Vault; adapter: DataAdapter } 
       if (!existsSync(abs(root, path))) {
         return null;
       }
-      return { path } as unknown as TFile;
+      const s = statSync(abs(root, path));
+      return { path, stat: { size: s.size, mtime: s.mtimeMs } } as unknown as TFile;
     },
     readBinary: async (file: TFile): Promise<ArrayBuffer> => {
       const buf = await readFile(abs(root, file.path));

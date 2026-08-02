@@ -24,6 +24,7 @@ test("statusForHttp: classifies provider responses", () => {
     { code: 401, want: "auth" },
     { code: 403, want: "auth" },
     { code: 404, want: "not_found" },
+    { code: 409, want: "conflict" },
     { code: 412, want: "conflict" },
     { code: 429, want: "server" },
     { code: 500, want: "server" },
