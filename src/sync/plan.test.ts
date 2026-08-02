@@ -4,10 +4,15 @@ import { empty, file, snapshot } from "./fake.ts";
 import {
   blobKeyFor,
   conflictCopyPath,
+  type DecodedSentinel,
+  decodeSentinel,
+  encodeSentinel,
   MANIFEST_KEY,
   manifestAfterSync,
   planSync,
   RESERVED_PREFIX,
+  resolveVaultIdentity,
+  type Sentinel,
 } from "./plan.ts";
 
 test("planSync: a path only changed locally is pushed", () => {
@@ -264,4 +269,97 @@ test("conflictCopyPath: a dotfile at the vault root isn't mistaken for an extens
     conflictCopyPath(".editorconfig", Date.parse("2026-07-14T10:00:00.000Z")),
     ".editorconfig (conflicted copy 2026-07-14T10-00-00-000Z)",
   );
+});
+
+test("encodeSentinel: the wire format carries the version marker and round-trips", () => {
+  const sentinel: Sentinel = { vaultId: "abc-123", createdAt: 1000 };
+
+  const raw = encodeSentinel(sentinel);
+
+  assert.equal((JSON.parse(raw) as { version: number }).version, 2);
+  assert.deepEqual(decodeSentinel(raw), { ok: true, sentinel });
+});
+
+test("decodeSentinel: version, shape, and field type are all validated", () => {
+  const cases: { name: string; raw: string; want: DecodedSentinel }[] = [
+    {
+      name: "a well formed sentinel",
+      raw: JSON.stringify({ version: 2, vaultId: "abc-123", createdAt: 1000 }),
+      want: { ok: true, sentinel: { vaultId: "abc-123", createdAt: 1000 } },
+    },
+    { name: "bytes that aren't JSON", raw: "not json", want: { ok: false, reason: "corrupt" } },
+    {
+      name: "no version field",
+      raw: JSON.stringify({ vaultId: "abc-123", createdAt: 1000 }),
+      want: { ok: false, reason: "unsupportedVersion" },
+    },
+    {
+      name: "a version from a newer build",
+      raw: JSON.stringify({ version: 3, vaultId: "abc-123", createdAt: 1000 }),
+      want: { ok: false, reason: "unsupportedVersion" },
+    },
+    {
+      name: "an empty vaultId",
+      raw: JSON.stringify({ version: 2, vaultId: "", createdAt: 1000 }),
+      want: { ok: false, reason: "corrupt" },
+    },
+    {
+      name: "a vaultId that isn't a string",
+      raw: JSON.stringify({ version: 2, vaultId: 42, createdAt: 1000 }),
+      want: { ok: false, reason: "corrupt" },
+    },
+    {
+      name: "a createdAt that isn't a number",
+      raw: JSON.stringify({ version: 2, vaultId: "abc-123", createdAt: "yesterday" }),
+      want: { ok: false, reason: "corrupt" },
+    },
+  ];
+
+  for (const { name, raw, want } of cases) {
+    assert.deepEqual(decodeSentinel(raw), want, name);
+  }
+});
+
+test("resolveVaultIdentity: a genuinely new bucket mints a fresh vaultId", () => {
+  const result = resolveVaultIdentity(true, null, undefined, () => "minted-id");
+
+  assert.deepEqual(result, { ok: true, vaultId: "minted-id" });
+});
+
+test("resolveVaultIdentity: a wiped looking bucket refuses a device with history (#183)", () => {
+  const result = resolveVaultIdentity(true, null, "known-id", () => "minted-id");
+
+  assert.equal(result.ok, false);
+});
+
+test("resolveVaultIdentity: a manifest without a sentinel self heals (#183)", () => {
+  const mintedForAnUpgrader = resolveVaultIdentity(false, null, undefined, () => "minted-id");
+  const adoptedForARetry = resolveVaultIdentity(false, null, "known-id", () => "minted-id");
+
+  assert.deepEqual(mintedForAnUpgrader, { ok: true, vaultId: "minted-id" });
+  assert.deepEqual(adoptedForARetry, { ok: true, vaultId: "known-id" });
+});
+
+test("resolveVaultIdentity: once a sentinel exists, a vaultId mismatch refuses (#109)", () => {
+  // A sentinel without a manifest is the #109 scenario (its manifest deleted, blobs surviving), and
+  // refusing it whenever the manifest is briefly missing, even for a device with no history to
+  // protect or one whose history genuinely agrees, would silently reinstate the exact permanent
+  // deadlock #109 fixed. So whether firstSync is true or false must never change the answer here,
+  // only whether localVaultId, if this device has one, actually disagrees with the sentinel's.
+  const sentinel: Sentinel = { vaultId: "known-id", createdAt: 1000 };
+
+  for (const firstSync of [true, false]) {
+    const freshDevice = resolveVaultIdentity(firstSync, sentinel, undefined, () => "minted-id");
+    const agreeingHistory = resolveVaultIdentity(
+      firstSync,
+      sentinel,
+      "known-id",
+      () => "minted-id",
+    );
+    const disagreeingHistory = resolveVaultIdentity(firstSync, sentinel, "other-id", () => "id");
+
+    assert.deepEqual(freshDevice, { ok: true, vaultId: "known-id" }, `firstSync=${firstSync}`);
+    assert.deepEqual(agreeingHistory, { ok: true, vaultId: "known-id" }, `firstSync=${firstSync}`);
+    assert.equal(disagreeingHistory.ok, false, `firstSync=${firstSync}`);
+  }
 });
