@@ -272,7 +272,7 @@ export default class GeodePlugin extends Plugin {
       `${dir}/state.json`,
       this.settings,
     );
-    const reader = createObsidianReader(this.app.vault);
+    const reader = createObsidianReader(this.app.vault, this.settings.ignorePatterns);
     const localWriter = createObsidianLocalWriter(this.app.vault.adapter);
 
     // Flush every open editor to disk right before the snapshot below reads the vault, so a file
@@ -386,7 +386,7 @@ export default class GeodePlugin extends Plugin {
     }
 
     const store = createObsidianStore(this.app.vault.adapter, `${dir}/state.json`, this.settings);
-    const reader = createObsidianReader(this.app.vault);
+    const reader = createObsidianReader(this.app.vault, this.settings.ignorePatterns);
 
     // Both callers fire this and forget (void), so a rejection here would surface as an
     // unhandled promise rejection. takeSnapshot can throw when a file vanishes mid-snapshot
