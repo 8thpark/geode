@@ -430,6 +430,32 @@ test("createObsidianStore: a fingerprint mismatch reads back as empty", async ()
   assert.deepEqual(await store2.read(), { files: [] });
 });
 
+test("createObsidianStore: repointing at a bucket prefix reads back as empty (#154)", async () => {
+  // A prefix is where the vault lives, so moving it lands on a folder with its own manifest and its
+  // own sentinel. Carrying the old ancestor across would diff this vault against a stranger's.
+  const adapter = fakeAdapter();
+  const store1 = createObsidianStore(adapter, STATE_PATH, DEFAULT_SETTINGS);
+  const snapshot: Snapshot = { files: [{ path: "a.md", size: 1, mtime: 2, hash: "h" }] };
+
+  await store1.write(snapshot);
+
+  const prefixed = { ...DEFAULT_SETTINGS, prefix: "vaults/personal" };
+  const store2 = createObsidianStore(adapter, STATE_PATH, prefixed);
+
+  assert.deepEqual(await store2.read(), { files: [] });
+});
+
+test("fingerprintSettings: a prefix only written differently is the same target (#154)", () => {
+  // The prefix is stored exactly as typed, so the same folder can be spelled several ways. Treating
+  // those as different targets would throw away a good ancestor and force a full re-hash over a
+  // trailing slash.
+  const typed = { ...DEFAULT_SETTINGS, prefix: "/vaults//personal/" };
+  const tidy = { ...DEFAULT_SETTINGS, prefix: "vaults/personal" };
+
+  assert.equal(fingerprintSettings(typed), fingerprintSettings(tidy));
+  assert.notEqual(fingerprintSettings(tidy), fingerprintSettings(DEFAULT_SETTINGS));
+});
+
 test("createObsidianStore: rotating credentials keeps state, it does not change the target", async () => {
   const adapter = fakeAdapter();
   const store1 = createObsidianStore(adapter, STATE_PATH, DEFAULT_SETTINGS);

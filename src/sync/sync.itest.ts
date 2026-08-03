@@ -54,8 +54,10 @@ type Device = {
 };
 
 // newDevice creates a fresh temp vault with the plugin data folder pre-created (as Obsidian would
-// have), wired to the real vault/obsidian.ts code over a node:fs backed vault.
-function newDevice(): Device {
+// have), wired to the real vault/obsidian.ts code over a node:fs backed vault. settings only ever
+// differs for the prefix scenario, which needs a state store fingerprinted against the same target
+// its sync actually writes to.
+function newDevice(settings: GeodeSettings = liveSettings): Device {
   const root = mkdtempSync(join(tmpdir(), "geode-device-"));
   mkdirSync(join(root, ".obsidian", "plugins", "geode"), { recursive: true });
   const { vault, adapter } = nodeVault(root);
@@ -63,7 +65,7 @@ function newDevice(): Device {
     root,
     reader: createObsidianReader(vault),
     writer: createObsidianLocalWriter(adapter),
-    stateStore: createObsidianStore(adapter, STATE_PATH, liveSettings),
+    stateStore: createObsidianStore(adapter, STATE_PATH, settings),
   };
 }
 
@@ -99,10 +101,11 @@ async function deleteLocal(d: Device, path: string): Promise<void> {
 
 // sync runs one pass for a device, mirroring the plugin's runSync spine: read previous state, run
 // syncOnce, persist the new snapshot whenever one comes back (a full success, or a failed pass
-// that still made progress).
-async function sync(d: Device, now = Date.now()): Promise<SyncOutcome> {
+// that still made progress). client only ever differs for the prefix scenario, which drives the
+// same code against a client rooted inside the bucket rather than at it.
+async function sync(d: Device, now = Date.now(), client = storage): Promise<SyncOutcome> {
   const previous = await d.stateStore.read();
-  const outcome = await syncOnce(previous, d.reader, d.writer, storage, now);
+  const outcome = await syncOnce(previous, d.reader, d.writer, client, now);
   if (outcome.ok) {
     await d.stateStore.write(outcome.snapshot);
     return outcome;
@@ -491,6 +494,40 @@ test("sync: an edit on one device and a delete on another preserves the edit as 
 
     assert.equal((await sync(b)).ok, true);
     assert.equal(await readLocal(b, copyPath), "A kept editing");
+  } finally {
+    cleanup(a, b);
+  }
+});
+
+test("sync: two devices converge inside a bucket prefix (#154)", async () => {
+  // The whole spine driven against a client rooted inside the bucket: manifest, sentinel and blobs
+  // all land under the prefix, the bucket root stays empty, and the devices converge exactly as
+  // they do at the root. Nothing above the storage client knows the prefix exists, so this is what
+  // proves that indifference is real rather than merely intended.
+  await resetRemote();
+  const prefixed: GeodeSettings = { ...liveSettings, prefix: "vaults/personal" };
+  const prefixedStorage = createS3Client(prefixed, SECRET, fetchTransport);
+  const a = newDevice(prefixed);
+  const b = newDevice(prefixed);
+  const now = Date.now();
+
+  try {
+    await writeLocal(a, "prefixed/a.md", "from A");
+    assert.equal((await sync(a, now, prefixedStorage)).ok, true);
+
+    assert.equal((await sync(b, now, prefixedStorage)).ok, true);
+    assert.equal(await readLocal(b, "prefixed/a.md"), "from A");
+
+    await writeLocal(b, "prefixed/b.md", "from B side");
+    assert.equal((await sync(b, now, prefixedStorage)).ok, true);
+    assert.equal((await sync(a, now, prefixedStorage)).ok, true);
+    assert.equal(await readLocal(a, "prefixed/b.md"), "from B side");
+
+    // Read through the unprefixed client to see where the bytes really are.
+    assert.equal((await storage.getObject(`vaults/personal/${MANIFEST_KEY}`)).ok, true);
+    assert.equal((await storage.getObject(MANIFEST_KEY)).status, "not_found");
+    const hash = await hashOf("from A");
+    assert.equal((await storage.getObject(`vaults/personal/${blobKeyFor(hash)}`)).ok, true);
   } finally {
     cleanup(a, b);
   }

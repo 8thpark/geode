@@ -293,6 +293,125 @@ test("getObject: a read with no known size falls back to the base budget", async
   assert.match(result.message, /timed out/);
 });
 
+// rootedSettings point a client at a folder inside the bucket. The prefix is deliberately written
+// the sloppy way a user would type it, so these also prove the client canonicalizes at the point of
+// use rather than trusting what was stored.
+const rootedSettings: GeodeSettings = {
+  ...deadlineSettings,
+  prefix: "/vaults/personal/",
+};
+
+// recordingTransport captures the URL of every request dispatched through it and answers each with
+// body, so a test can assert on the key a client actually addressed without touching a network.
+function recordingTransport(body = ""): { transport: Transport; urls: string[] } {
+  const urls: string[] = [];
+  const transport: Transport = async (request) => {
+    urls.push(request.url);
+    return {
+      ok: true,
+      status: 200,
+      body: new TextEncoder().encode(body),
+      header: () => '"etag"',
+    };
+  };
+
+  return { transport, urls };
+}
+
+// listingXml renders a ListObjectsV2 response holding exactly keys, for the prefix stripping tests.
+function listingXml(keys: string[]): string {
+  let contents = "";
+  for (const key of keys) {
+    contents += `<Contents><Key>${key}</Key>`;
+    contents += "<LastModified>2026-07-13T00:00:00.000Z</LastModified><Size>3</Size></Contents>";
+  }
+
+  return `<?xml version="1.0" encoding="UTF-8"?><ListBucketResult>${contents}</ListBucketResult>`;
+}
+
+test("createS3Client: every key is addressed under the configured prefix (#154)", async () => {
+  const { transport, urls } = recordingTransport();
+  const client = createS3Client(rootedSettings, "shh", transport);
+
+  await client.putObject(".geode/manifest.json", new Uint8Array([1]));
+  await client.getObject(".geode/manifest.json");
+  await client.headObject(".geode/blobs/abc");
+  await client.deleteObject(".geode/blobs/abc");
+
+  assert.deepEqual(urls, [
+    "https://s3.example.com/vault/vaults/personal/.geode/manifest.json",
+    "https://s3.example.com/vault/vaults/personal/.geode/manifest.json",
+    "https://s3.example.com/vault/vaults/personal/.geode/blobs/abc",
+    "https://s3.example.com/vault/vaults/personal/.geode/blobs/abc",
+  ]);
+});
+
+test("createS3Client: no prefix leaves every key at the bucket root", async () => {
+  // The default, and what every bucket synced before #154 already holds, so this is the case that
+  // must not move: rooting a client at "" has to produce byte for byte the URL it always did.
+  const { transport, urls } = recordingTransport();
+  const client = createS3Client(deadlineSettings, "shh", transport);
+
+  await client.getObject(".geode/manifest.json");
+
+  assert.deepEqual(urls, ["https://s3.example.com/vault/.geode/manifest.json"]);
+});
+
+test("listObjects: lists under the prefix and hands keys back relative to it (#154)", async () => {
+  // The round trip that matters: sync reads a blob's hash by slicing BLOB_PREFIX off a listed key,
+  // so a key still carrying the bucket prefix would parse as a hash that matches nothing local and
+  // be reported as content the vault can't explain (#109).
+  const listed = listingXml(["vaults/personal/.geode/blobs/aaa"]);
+  const { transport, urls } = recordingTransport(listed);
+  const client = createS3Client(rootedSettings, "shh", transport);
+
+  const result = await client.listObjects(".geode/blobs/");
+
+  assert.ok(result.ok);
+  assert.deepEqual(
+    result.objects.map((object) => object.key),
+    [".geode/blobs/aaa"],
+  );
+  assert.match(urls[0], /prefix=vaults%2Fpersonal%2F\.geode%2Fblobs%2F/);
+});
+
+test("listObjects: no prefix argument still lists only under the client's root", async () => {
+  const { transport, urls } = recordingTransport(listingXml(["vaults/personal/note"]));
+  const client = createS3Client(rootedSettings, "shh", transport);
+
+  const result = await client.listObjects();
+
+  assert.ok(result.ok);
+  assert.deepEqual(
+    result.objects.map((object) => object.key),
+    ["note"],
+  );
+  assert.match(urls[0], /prefix=vaults%2Fpersonal%2F/);
+});
+
+test("listObjects: a key outside the prefix fails the listing, it is never mis-sliced", async () => {
+  // Every key was asked for under the prefix, so one that arrives outside it means the provider
+  // answered a different question. Slicing it anyway would invent a plausible looking key, and a
+  // listing that quietly disagrees with the bucket is what sync reads as remote deletions (#180).
+  const { transport } = recordingTransport(listingXml(["someone-elses/note"]));
+  const client = createS3Client(rootedSettings, "shh", transport);
+
+  const result = await client.listObjects();
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "server");
+  assert.match(result.message, /outside the configured prefix/);
+});
+
+test("testConnection: an unusable prefix is refused before any request is signed", async () => {
+  const settings: GeodeSettings = { ...rootedSettings, prefix: "vaults/../escape" };
+
+  const result = await testConnection(settings, "shh", stubTransport);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.message, "Prefix can't use . or .. as a folder");
+});
+
 test("parseListObjectsXml decodes XML entities in object keys", () => {
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <ListBucketResult>
