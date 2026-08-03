@@ -130,12 +130,26 @@ export type StorageClient = {
 export type Transport = (request: Request) => Promise<HttpResponse>;
 
 // createS3Client returns a StorageClient backed by the S3 compatible endpoint in settings, sending
-// every request through the given transport.
+// every request through the given transport. A prefix the client cannot address safely is refused
+// here rather than anywhere above, since this is the one place every request to a provider is built
+// and so the only guard no future caller (the CLI, the API, MCP) can be written without.
 export function createS3Client(
   settings: GeodeSettings,
   secretAccessKey: string,
   transport: Transport,
 ): StorageClient {
+  // Settings arrive here straight from data.json, which a hand edit, an older build, or a synced
+  // .obsidian/ folder can all put an unusable prefix into without the settings tab ever seeing it,
+  // so validating only where a user types is validating nothing. Dropping a bad prefix would sync
+  // the vault to the bucket root, and honouring one is worse still: the URL a request is signed
+  // against collapses relative segments itself, so a leading ".." leaves the bucket entirely and
+  // addresses a different one. Refusing every operation is the only outcome that cannot quietly
+  // read or write a vault somewhere it was never meant to go.
+  const badPrefix = prefixError(settings.prefix);
+  if (badPrefix !== "") {
+    return refusingClient(badPrefix);
+  }
+
   const client = new AwsClient({
     accessKeyId: settings.accessKeyId,
     secretAccessKey,
@@ -319,6 +333,20 @@ function missingFieldFor(settings: GeodeSettings, secretAccessKey: string): stri
   }
 
   return "";
+}
+
+// refusingClient returns a StorageClient that fails every operation with the same message, for a
+// configuration no request built from it could be trusted to address. The status is "client"
+// because nothing about the request was ever valid, so a retry cannot help and only correcting the
+// setting can; sync surfaces the message as-is, naming the setting at fault.
+function refusingClient(message: string): StorageClient {
+  return {
+    putObject: async () => ({ ok: false, status: "client", message }),
+    getObject: async () => ({ ok: false, status: "client", message, body: null, etag: null }),
+    headObject: async () => ({ ok: false, status: "client", message, etag: null }),
+    deleteObject: async () => ({ ok: false, status: "client", message }),
+    listObjects: async () => ({ ok: false, status: "client", message, objects: [] }),
+  };
 }
 
 // rootedKey returns the bucket key an object actually lives at for a client rooted at root. Doing

@@ -403,6 +403,62 @@ test("listObjects: a key outside the prefix fails the listing, it is never mis-s
   assert.match(result.message, /outside the configured prefix/);
 });
 
+test("createS3Client: an unusable prefix refuses every operation (#154)", async () => {
+  // Settings reach createS3Client straight from data.json, so the settings tab's own validation is
+  // not on this path at all: a hand edit, an older build, or a synced .obsidian/ folder can all
+  // deliver a prefix no user ever typed. stubTransport throws, so any operation that reached the
+  // network would fail this test rather than return a refusal.
+  const client = createS3Client(
+    { ...rootedSettings, prefix: "../elsewhere" },
+    "shh",
+    stubTransport,
+  );
+  const want = "Prefix can't use . or .. as a folder";
+
+  assert.deepEqual(await client.putObject("k", new Uint8Array([1])), {
+    ok: false,
+    status: "client",
+    message: want,
+  });
+  assert.deepEqual(await client.getObject("k"), {
+    ok: false,
+    status: "client",
+    message: want,
+    body: null,
+    etag: null,
+  });
+  assert.deepEqual(await client.headObject("k"), {
+    ok: false,
+    status: "client",
+    message: want,
+    etag: null,
+  });
+  assert.deepEqual(await client.deleteObject("k"), {
+    ok: false,
+    status: "client",
+    message: want,
+  });
+  assert.deepEqual(await client.listObjects(), {
+    ok: false,
+    status: "client",
+    message: want,
+    objects: [],
+  });
+});
+
+test("createS3Client: a leading .. can never address a different bucket (#154)", async () => {
+  // The concrete danger, and why an unusable prefix cannot simply be dropped: signing normalizes
+  // the URL, so "https://host/vault/../evil/x" resolves to bucket "evil". A client that built this
+  // request at all would read and write someone else's bucket while reporting success.
+  const { transport, urls } = recordingTransport();
+  const client = createS3Client({ ...rootedSettings, prefix: "../evil" }, "shh", transport);
+
+  const result = await client.putObject(".geode/manifest.json", new Uint8Array([1]));
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(urls, []);
+});
+
 test("testConnection: an unusable prefix is refused before any request is signed", async () => {
   const settings: GeodeSettings = { ...rootedSettings, prefix: "vaults/../escape" };
 

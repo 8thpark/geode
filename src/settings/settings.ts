@@ -25,6 +25,11 @@ export type GeodeSettings = {
   // prefix is the folder inside the bucket the vault lives under, empty for the bucket root
   // (#154). Stored exactly as typed and canonicalized at the point of use by normalizePrefix, the
   // same way endpoint and region are, so a trailing slash never reads back as an unsaved change.
+  //
+  // A value normalizeSettings loads is never checked against prefixError, and is deliberately kept
+  // even when unusable: blanking it would silently repoint a vault at the bucket root, and showing
+  // an empty field gives a user nothing to correct. createS3Client is what refuses to act on one,
+  // so an unusable prefix always fails loudly and always survives long enough to be fixed.
   prefix: string;
   accessKeyId: string;
   // secretId is a SecretStorage reference name, not the secret value itself. Obsidian's

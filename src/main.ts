@@ -9,6 +9,7 @@ import {
   type GeodeSettings,
   hasConnectionConfig,
   normalizeSettings,
+  prefixError,
 } from "./settings/settings";
 import { GeodeSettingTab } from "./settings/tab";
 import { obsidianTransport } from "./storage/obsidian";
@@ -219,6 +220,16 @@ export default class GeodePlugin extends Plugin {
     if (!hasConnectionConfig(this.settings)) {
       this.logger.warn("sync: storage isn't configured yet");
       this.setSyncStatus("error", "storage isn't configured yet");
+      return;
+    }
+    // createS3Client refuses an unusable prefix on its own, so this is not what makes sync safe
+    // (#154); it is what makes the refusal legible. Without it the first operation to run is the
+    // conditional write probe, and a user would be told their provider failed a write check when
+    // the real answer is one bad character in a setting they can fix.
+    const badPrefix = prefixError(this.settings.prefix);
+    if (badPrefix !== "") {
+      this.logger.warn(`sync: ${badPrefix}`);
+      this.setSyncStatus("error", badPrefix);
       return;
     }
     const dir = this.manifest.dir;
