@@ -1,6 +1,6 @@
 import { ItemView, type WorkspaceLeaf } from "obsidian";
 import type { LogBus, LogEntry, LogSink } from "./log.ts";
-import { selectionOverlaps } from "./selection.ts";
+import { nextRender, selectionOverlaps } from "./selection.ts";
 
 // LOG_VIEW_TYPE identifies geode's log pane to Obsidian's workspace leaf API.
 export const LOG_VIEW_TYPE = "geode-log-view";
@@ -71,10 +71,12 @@ export class GeodeLogView extends ItemView {
       if (!this.renderDeferred) {
         return;
       }
-      if (selectionOverlaps(this.contentEl, document.getSelection())) {
+      const selected = selectionOverlaps(this.contentEl, document.getSelection());
+      const decision = nextRender(this.renderDeferred, "selectionchange", selected);
+      this.renderDeferred = decision.deferred;
+      if (decision.action !== "refresh") {
         return;
       }
-      this.renderDeferred = false;
       void this.refresh();
     });
     await this.refresh();
@@ -120,11 +122,12 @@ export class GeodeLogView extends ItemView {
   // render does the actual read and draw, split out so runRefresh can own the coalescing loop.
   private async render(): Promise<void> {
     const entries = await this.sink.read();
-    if (selectionOverlaps(this.contentEl, document.getSelection())) {
-      this.renderDeferred = true;
+    const selected = selectionOverlaps(this.contentEl, document.getSelection());
+    const decision = nextRender(this.renderDeferred, "render", selected);
+    this.renderDeferred = decision.deferred;
+    if (decision.action !== "draw") {
       return;
     }
-    this.renderDeferred = false;
     renderLogView(this.contentEl, entries);
   }
 }
