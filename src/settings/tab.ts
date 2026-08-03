@@ -17,6 +17,7 @@ import {
   type GeodeSettings,
   hasConnectionConfig,
   isCurrentConnectionResult,
+  prefixError,
   providerOr,
   saveDraft,
   settingsEqual,
@@ -83,9 +84,21 @@ function flashButtonText(button: ButtonComponent, original: string, feedback: st
 // onFieldChanged clears any stale connection status and updates the actions row without
 // redrawing the whole tab, so text inputs never lose focus mid keystroke. Whether the draft
 // counts as dirty is derived by comparing it to saved settings, not tracked here.
+//
+// A value the storage layer would refuse outright (a malformed prefix) is reported as a connection
+// error rather than through a field of its own: that reuses the one status line and the Save
+// gating already keyed to it, so an unusable draft can't be saved and left to fail at sync time
+// instead, and no new UI has to exist to say so.
 function onFieldChanged(tab: GeodeSettingTab): void {
   tab.connectionStatus = "unknown";
   tab.connectionMessage = "";
+
+  const badPrefix = prefixError(tab.draft.prefix);
+  if (badPrefix !== "") {
+    tab.connectionStatus = "error";
+    tab.connectionMessage = badPrefix;
+  }
+
   tab.refreshActionsUI();
 }
 
@@ -282,6 +295,19 @@ function renderStorageSection(tab: GeodeSettingTab, containerEl: HTMLElement): v
         .setValue(tab.draft.bucket)
         .onChange((value) => {
           tab.draft.bucket = value;
+          onFieldChanged(tab);
+        }),
+    );
+
+  new Setting(card)
+    .setName("Prefix")
+    .setDesc("Optional folder inside the bucket to sync into. Empty syncs to the bucket root.")
+    .addText((text) =>
+      text
+        .setPlaceholder("vaults/personal")
+        .setValue(tab.draft.prefix)
+        .onChange((value) => {
+          tab.draft.prefix = value;
           onFieldChanged(tab);
         }),
     );

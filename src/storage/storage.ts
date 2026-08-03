@@ -1,5 +1,11 @@
 import { AwsClient } from "aws4fetch";
-import { endpointFor, type GeodeSettings, regionFor } from "../settings/settings.ts";
+import {
+  endpointFor,
+  type GeodeSettings,
+  normalizePrefix,
+  prefixError,
+  regionFor,
+} from "../settings/settings.ts";
 import { timeoutFor, withDeadline } from "./deadline.ts";
 import { encodeComponent, encodeKey } from "./encode.ts";
 import { messageFor, statusForHttp } from "./errors.ts";
@@ -102,6 +108,11 @@ export type ResultStatus =
 // StorageClient reads, writes, deletes, and lists objects in a bucket. Every method takes and
 // returns plain data, never provider credentials or settings, so a future WebDAV or Dropbox
 // client can satisfy this same shape without changing anything that depends on it.
+//
+// Every key is relative to the client's own root, the configured bucket prefix (#154), and every
+// listed key comes back relative to it too. So nothing above this type knows or cares whether the
+// vault sits at the bucket root or three folders down: sync's key constants stay fixed strings,
+// and a blob's hash reads off a listed key the same way either way.
 export type StorageClient = {
   putObject: (key: string, body: Uint8Array, condition?: PutCondition) => Promise<PutResult>;
   getObject: (key: string, expectedBytes?: number) => Promise<GetResult>;
@@ -119,12 +130,26 @@ export type StorageClient = {
 export type Transport = (request: Request) => Promise<HttpResponse>;
 
 // createS3Client returns a StorageClient backed by the S3 compatible endpoint in settings, sending
-// every request through the given transport.
+// every request through the given transport. A prefix the client cannot address safely is refused
+// here rather than anywhere above, since this is the one place every request to a provider is built
+// and so the only guard no future caller (the CLI, the API, MCP) can be written without.
 export function createS3Client(
   settings: GeodeSettings,
   secretAccessKey: string,
   transport: Transport,
 ): StorageClient {
+  // Settings arrive here straight from data.json, which a hand edit, an older build, or a synced
+  // .obsidian/ folder can all put an unusable prefix into without the settings tab ever seeing it,
+  // so validating only where a user types is validating nothing. Dropping a bad prefix would sync
+  // the vault to the bucket root, and honouring one is worse still: the URL a request is signed
+  // against collapses relative segments itself, so a leading ".." leaves the bucket entirely and
+  // addresses a different one. Refusing every operation is the only outcome that cannot quietly
+  // read or write a vault somewhere it was never meant to go.
+  const badPrefix = prefixError(settings.prefix);
+  if (badPrefix !== "") {
+    return refusingClient(badPrefix);
+  }
+
   const client = new AwsClient({
     accessKeyId: settings.accessKeyId,
     secretAccessKey,
@@ -132,14 +157,16 @@ export function createS3Client(
     service: "s3",
   });
   const baseUrl = `${endpointFor(settings)}/${settings.bucket}`;
+  const root = normalizePrefix(settings.prefix);
 
   return {
     putObject: (key, body, condition) =>
-      s3PutObject(client, transport, baseUrl, key, body, condition),
-    getObject: (key, expectedBytes) => s3GetObject(client, transport, baseUrl, key, expectedBytes),
-    headObject: (key) => s3HeadObject(client, transport, baseUrl, key),
-    deleteObject: (key) => s3DeleteObject(client, transport, baseUrl, key),
-    listObjects: (prefix) => s3ListObjects(client, transport, baseUrl, prefix),
+      s3PutObject(client, transport, baseUrl, rootedKey(root, key), body, condition),
+    getObject: (key, expectedBytes) =>
+      s3GetObject(client, transport, baseUrl, rootedKey(root, key), expectedBytes),
+    headObject: (key) => s3HeadObject(client, transport, baseUrl, rootedKey(root, key)),
+    deleteObject: (key) => s3DeleteObject(client, transport, baseUrl, rootedKey(root, key)),
+    listObjects: (prefix) => rootedList(client, transport, baseUrl, root, prefix),
   };
 }
 
@@ -223,6 +250,10 @@ export async function testConnection(
   if (missing !== "") {
     return { ok: false, status: "auth", message: `Fill in ${missing} first` };
   }
+  const badPrefix = prefixError(settings.prefix);
+  if (badPrefix !== "") {
+    return { ok: false, status: "client", message: badPrefix };
+  }
 
   const client = new AwsClient({
     accessKeyId: settings.accessKeyId,
@@ -302,6 +333,73 @@ function missingFieldFor(settings: GeodeSettings, secretAccessKey: string): stri
   }
 
   return "";
+}
+
+// refusingClient returns a StorageClient that fails every operation with the same message, for a
+// configuration no request built from it could be trusted to address. The status is "client"
+// because nothing about the request was ever valid, so a retry cannot help and only correcting the
+// setting can; sync surfaces the message as-is, naming the setting at fault.
+function refusingClient(message: string): StorageClient {
+  return {
+    putObject: async () => ({ ok: false, status: "client", message }),
+    getObject: async () => ({ ok: false, status: "client", message, body: null, etag: null }),
+    headObject: async () => ({ ok: false, status: "client", message, etag: null }),
+    deleteObject: async () => ({ ok: false, status: "client", message }),
+    listObjects: async () => ({ ok: false, status: "client", message, objects: [] }),
+  };
+}
+
+// rootedKey returns the bucket key an object actually lives at for a client rooted at root. Doing
+// this here, rather than threading a prefix through sync's key constants, is what keeps the whole
+// layer above unaware a prefix exists at all.
+function rootedKey(root: string, key: string): string {
+  if (root === "") {
+    return key;
+  }
+
+  return `${root}/${key}`;
+}
+
+// rootedList lists under the client's root and hands the keys back relative to it, the mirror of
+// rootedKey, so a caller reading a blob's hash off a listed key gets the same string whether or
+// not a prefix is configured. Every key is asked for under the root, so one that comes back
+// outside it is a provider answering a question it wasn't asked; that fails the listing rather
+// than being mis-sliced into a plausible looking key (#180), since a listing silently short of
+// the truth is what sync reads as remote deletions.
+async function rootedList(
+  client: AwsClient,
+  transport: Transport,
+  baseUrl: string,
+  root: string,
+  prefix: string | undefined,
+): Promise<ListResult> {
+  if (root === "") {
+    return s3ListObjects(client, transport, baseUrl, prefix);
+  }
+
+  let under = `${root}/`;
+  if (prefix !== undefined) {
+    under += prefix;
+  }
+  const listed = await s3ListObjects(client, transport, baseUrl, under);
+  if (!listed.ok) {
+    return listed;
+  }
+
+  const objects: ObjectMeta[] = [];
+  for (const object of listed.objects) {
+    if (!object.key.startsWith(`${root}/`)) {
+      return {
+        ok: false,
+        status: "server",
+        message: `Storage listed "${object.key}", which is outside the configured prefix`,
+        objects: [],
+      };
+    }
+    objects.push({ ...object, key: object.key.slice(root.length + 1) });
+  }
+
+  return { ok: true, status: "ok", message: "", objects };
 }
 
 // s3DeleteObject removes key from the bucket.

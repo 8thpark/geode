@@ -1,4 +1,9 @@
-import { endpointFor, type GeodeSettings, regionFor } from "../settings/settings.ts";
+import {
+  endpointFor,
+  type GeodeSettings,
+  normalizePrefix,
+  regionFor,
+} from "../settings/settings.ts";
 
 // SNAPSHOT_VERSION is the format version stamped into every serialized snapshot, remote manifest
 // and local state.json alike, so a future format change (encryption, chunked upload) has
@@ -264,10 +269,12 @@ export function encodeSnapshot(snapshot: Snapshot): string {
 
 // fingerprintSettings returns a stable string identifying the sync target, so we can detect when
 // that target changes and invalidate old state (#89). It covers only where the vault lives, the
-// fields normalized through endpointFor/regionFor to match what a connection actually uses.
-// Credentials (accessKeyId, secretId) are deliberately excluded: they authorize access to a
-// target, they do not identify one, so rotating a key must not invalidate state and force a full
-// re-hash. A genuine target change always moves one of the fields below.
+// fields normalized through endpointFor/regionFor/normalizePrefix to match what a connection
+// actually uses. Credentials (accessKeyId, secretId) are deliberately excluded: they authorize
+// access to a target, they do not identify one, so rotating a key must not invalidate state and
+// force a full re-hash. A genuine target change always moves one of the fields below, and a prefix
+// is one: repointing at another folder in the same bucket lands somewhere with its own manifest and
+// its own sentinel, so carrying the old state across would diff the vault against a stranger.
 export function fingerprintSettings(settings: GeodeSettings): string {
   return JSON.stringify({
     provider: settings.provider,
@@ -275,6 +282,7 @@ export function fingerprintSettings(settings: GeodeSettings): string {
     endpoint: endpointFor(settings),
     region: regionFor(settings),
     bucket: settings.bucket,
+    prefix: normalizePrefix(settings.prefix),
   });
 }
 

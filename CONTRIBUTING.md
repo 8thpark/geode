@@ -98,6 +98,14 @@ With `npm run dev` running:
    proving it has been synced before independent of whether the manifest itself currently exists
    (see `resolveVaultIdentity` in `src/sync/plan.ts`).
 
+   Setting the optional Prefix moves all three under that folder
+   (`vaults/personal/.geode/manifest.json`), so several vaults can share one bucket without seeing
+   each other. Only `createS3Client` knows about it: every key above this line is relative to the
+   configured prefix, and every listed key comes back relative to it too, so nothing in `src/sync`
+   ever has to ask where the vault sits. A prefix is part of what `fingerprintSettings` identifies,
+   so changing it invalidates `state.json` the same way changing the bucket does, and the next sync
+   starts clean against the new folder rather than diffing your vault against a stranger's.
+
 Obsidian's plugin data file (`data.json`), geode's own vault state file (`state.json`), and its
 log file (`geode.log`), all of which land at the repo root because the dev vault symlinks the
 whole repo in as the plugin folder, are gitignored and should never be committed. `state.json`
