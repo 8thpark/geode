@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isSafePath } from "../vault/vault.ts";
+import { isSafePath, SNAPSHOT_VERSION } from "../vault/vault.ts";
 import { empty, file, snapshot } from "./fake.ts";
 import {
   blobKeyFor,
@@ -361,7 +361,7 @@ test("encodeSentinel: the wire format carries the version marker and round-trips
 
   const raw = encodeSentinel(sentinel);
 
-  assert.equal((JSON.parse(raw) as { version: number }).version, 2);
+  assert.equal((JSON.parse(raw) as { version: number }).version, SNAPSHOT_VERSION);
   assert.deepEqual(decodeSentinel(raw), { ok: true, sentinel });
 });
 
@@ -369,7 +369,7 @@ test("decodeSentinel: version, shape, and field type are all validated", () => {
   const cases: { name: string; raw: string; want: DecodedSentinel }[] = [
     {
       name: "a well formed sentinel",
-      raw: JSON.stringify({ version: 2, vaultId: "abc-123", createdAt: 1000 }),
+      raw: JSON.stringify({ version: 3, vaultId: "abc-123", createdAt: 1000 }),
       want: { ok: true, sentinel: { vaultId: "abc-123", createdAt: 1000 } },
     },
     { name: "bytes that aren't JSON", raw: "not json", want: { ok: false, reason: "corrupt" } },
@@ -380,22 +380,22 @@ test("decodeSentinel: version, shape, and field type are all validated", () => {
     },
     {
       name: "a version from a newer build",
-      raw: JSON.stringify({ version: 3, vaultId: "abc-123", createdAt: 1000 }),
+      raw: JSON.stringify({ version: 4, vaultId: "abc-123", createdAt: 1000 }),
       want: { ok: false, reason: "unsupportedVersion" },
     },
     {
       name: "an empty vaultId",
-      raw: JSON.stringify({ version: 2, vaultId: "", createdAt: 1000 }),
+      raw: JSON.stringify({ version: 3, vaultId: "", createdAt: 1000 }),
       want: { ok: false, reason: "corrupt" },
     },
     {
       name: "a vaultId that isn't a string",
-      raw: JSON.stringify({ version: 2, vaultId: 42, createdAt: 1000 }),
+      raw: JSON.stringify({ version: 3, vaultId: 42, createdAt: 1000 }),
       want: { ok: false, reason: "corrupt" },
     },
     {
       name: "a createdAt that isn't a number",
-      raw: JSON.stringify({ version: 2, vaultId: "abc-123", createdAt: "yesterday" }),
+      raw: JSON.stringify({ version: 3, vaultId: "abc-123", createdAt: "yesterday" }),
       want: { ok: false, reason: "corrupt" },
     },
   ];

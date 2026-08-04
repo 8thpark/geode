@@ -1,3 +1,4 @@
+import { unwrapObject, wrapObject } from "../storage/envelope.ts";
 import type {
   DeleteResult,
   GetResult,
@@ -191,11 +192,33 @@ export function fakeStorage(objects: Record<string, string> = {}): {
 }
 
 // file builds a FileState for path with the given hash, using the hash length as a stand-in size.
+// The blob address matches the hash, as it does for every unencrypted vault.
 export function file(path: string, hash: string): FileState {
-  return { path, size: hash.length, mtime: 1, hash };
+  return { path, size: hash.length, mtime: 1, hash, blob: hash };
 }
 
 // snapshot builds a Snapshot from the given file states.
 export function snapshot(...files: FileState[]): Snapshot {
   return { files };
+}
+
+// unwrapped is the inverse of wrapped, for a test that wants to look inside an object a sync
+// wrote. A body that is not a geode object at all throws rather than returning a result to
+// inspect: the test asked for the payload of something it expected sync to have written, and
+// there is nothing sensible for it to assert on if that isn't what it got.
+export function unwrapped(body: string): string {
+  const opened = unwrapObject(new TextEncoder().encode(body));
+  if (!opened.ok) {
+    throw new Error(`not a geode object: ${opened.reason}`);
+  }
+
+  return new TextDecoder().decode(opened.payload);
+}
+
+// wrapped returns what the bucket actually holds for content: the payload inside its object
+// envelope (#184). Tests seed and assert through it so a fixture is the object a real bucket would
+// hold rather than a bare payload sync would refuse to read. The envelope header is ASCII safe, so
+// it survives fakeStorage keeping bodies as strings.
+export function wrapped(content: string): string {
+  return new TextDecoder().decode(wrapObject(new TextEncoder().encode(content)));
 }

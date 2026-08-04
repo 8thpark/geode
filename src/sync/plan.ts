@@ -7,17 +7,21 @@ import {
   type Snapshot,
 } from "../vault/vault.ts";
 
-// BLOB_PREFIX is where every file's content lives, keyed by its own SHA-256 hash rather than its
-// vault path: a rename touches no bytes (the manifest's path just points at the same key), a
-// duplicate attachment stores once (two paths, one key), and a delete never destroys bytes (the
-// manifest simply stops pointing at them; the blob is recoverable for as long as any retained
-// manifest, past or present, still names its hash). It sits under RESERVED_PREFIX, so blobs never
-// re-enter a sync as vault files.
+// BLOB_PREFIX is where every file's content lives, keyed by an address derived from the content
+// itself rather than by its vault path: a rename touches no bytes (the manifest's path just points
+// at the same key), a duplicate attachment stores once (two paths, one key), and a delete never
+// destroys bytes (the manifest simply stops pointing at them; the blob is recoverable for as long
+// as any retained manifest, past or present, still names its address). It sits under
+// RESERVED_PREFIX, so blobs never re-enter a sync as vault files.
+//
+// The address is the content's own SHA-256 while the vault is unencrypted, and a keyed hash of the
+// content once it isn't (#184), which is why the manifest records it per entry instead of every
+// reader deriving it (see FileState in vault/vault.ts).
 export const BLOB_PREFIX = ".geode/blobs/";
 
 // MANIFEST_KEY is the well known remote object holding the last synced snapshot, geode's source
 // of truth for both "what does the other side think exists" and, since a FileState already pairs
-// a path with its content hash, "which blob a path's content lives at". Reserved: never treated
+// a path with the address its content lives at, "which blob is which file". Reserved: never treated
 // as a real vault path, on either side, even if a vault happens to contain a file at this exact
 // path.
 export const MANIFEST_KEY = ".geode/manifest.json";
@@ -62,10 +66,10 @@ export type SyncAction =
 // newly minted or newly adopted, persist locally, or why the pass must refuse rather than guess.
 export type VaultIdentityCheck = { ok: true; vaultId: string } | { ok: false; message: string };
 
-// blobKeyFor returns the reserved key content with the given hash lives at, the same key
+// blobKeyFor returns the reserved key content with the given address lives at, the same key
 // regardless of which path, or how many paths, currently point at it.
-export function blobKeyFor(hash: string): string {
-  return `${BLOB_PREFIX}${hash}`;
+export function blobKeyFor(address: string): string {
+  return `${BLOB_PREFIX}${address}`;
 }
 
 // conflictCopyPath returns the name a locally diverged file is renamed to before the remote

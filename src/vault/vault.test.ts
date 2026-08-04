@@ -161,7 +161,7 @@ test("isSafePath: traversal, absolute paths, reserved prefixes, and unsafe segme
 });
 
 test("encodeSnapshot: the wire format carries the version marker and round-trips", () => {
-  const snapshot: Snapshot = { files: [{ path: "a.md", size: 1, mtime: 2, hash: "h" }] };
+  const snapshot: Snapshot = { files: [{ path: "a.md", size: 1, mtime: 2, hash: "h", blob: "h" }] };
 
   const raw = encodeSnapshot(snapshot);
 
@@ -170,16 +170,16 @@ test("encodeSnapshot: the wire format carries the version marker and round-trips
 });
 
 test("decodeSnapshot: only the current version is accepted; version 1, missing, and newer are all refused", () => {
-  const files = [{ path: "a.md", size: 1, mtime: 2, hash: "h" }];
+  const files = [{ path: "a.md", size: 1, mtime: 2, hash: "h", blob: "h" }];
   const cases: { name: string; raw: string; want: DecodedSnapshot }[] = [
     {
       name: "the current versioned format",
-      raw: JSON.stringify({ version: 2, files }),
+      raw: JSON.stringify({ version: 3, files }),
       want: { ok: true, snapshot: { files } },
     },
     {
       // Version 1, plaintext path keyed storage, predates the marker (#91) and is version 1 by
-      // definition. Its JSON shape is identical to version 2's (both are `{files: [...]}`), only
+      // definition. Its JSON shape is close enough to be mistaken for a current one, and only
       // the marker distinguishes them, so this build refuses it rather than misread its paths as
       // content addressed keys.
       name: "a pre-marker snapshot with no version field",
@@ -193,7 +193,7 @@ test("decodeSnapshot: only the current version is accepted; version 1, missing, 
     },
     {
       name: "a version from a newer build",
-      raw: JSON.stringify({ version: 3, files }),
+      raw: JSON.stringify({ version: 4, files }),
       want: { ok: false, reason: "unsupportedVersion" },
     },
     {
@@ -201,7 +201,7 @@ test("decodeSnapshot: only the current version is accepted; version 1, missing, 
       // itself (files as an encrypted blob, say), and it must read as "needs a newer build",
       // never as corrupt.
       name: "a newer version whose shape this build does not understand",
-      raw: JSON.stringify({ version: 3, files: "ciphertext" }),
+      raw: JSON.stringify({ version: 4, files: "ciphertext" }),
       want: { ok: false, reason: "unsupportedVersion" },
     },
     {
@@ -212,7 +212,7 @@ test("decodeSnapshot: only the current version is accepted; version 1, missing, 
     { name: "bytes that aren't JSON", raw: "not json", want: { ok: false, reason: "corrupt" } },
     {
       name: "JSON of the wrong shape at the current version",
-      raw: JSON.stringify({ version: 2 }),
+      raw: JSON.stringify({ version: 3 }),
       want: { ok: false, reason: "corrupt" },
     },
     {
@@ -228,16 +228,16 @@ test("decodeSnapshot: only the current version is accepted; version 1, missing, 
       // segment in an otherwise well formed entry (#132).
       name: "a traversal segment in an entry's path",
       raw: JSON.stringify({
-        version: 2,
-        files: [{ path: "../../etc/passwd", size: 1, mtime: 2, hash: "h" }],
+        version: 3,
+        files: [{ path: "../../etc/passwd", size: 1, mtime: 2, hash: "h", blob: "h" }],
       }),
       want: { ok: false, reason: "unsafePath" },
     },
     {
       name: "one unsafe entry fails the whole snapshot, not just that entry",
       raw: JSON.stringify({
-        version: 2,
-        files: [...files, { path: "/etc/passwd", size: 1, mtime: 2, hash: "h" }],
+        version: 3,
+        files: [...files, { path: "/etc/passwd", size: 1, mtime: 2, hash: "h", blob: "h" }],
       }),
       want: { ok: false, reason: "unsafePath" },
     },
@@ -245,19 +245,41 @@ test("decodeSnapshot: only the current version is accepted; version 1, missing, 
       // isSnapshot doesn't validate each entry's shape, so a path that isn't even a string reaches
       // decodeSnapshot's own loop and must read as corrupt rather than crash there.
       name: "an entry whose path isn't a string",
-      raw: JSON.stringify({ version: 2, files: [{ path: 42, size: 1, mtime: 2, hash: "h" }] }),
+      raw: JSON.stringify({
+        version: 3,
+        files: [{ path: 42, size: 1, mtime: 2, hash: "h", blob: "h" }],
+      }),
+      want: { ok: false, reason: "corrupt" },
+    },
+    {
+      // A version 3 entry names the blob its content lives at (#184); one without an address is
+      // an older shape wearing a current marker, and guessing an address for it would fetch
+      // `.geode/blobs/undefined`.
+      name: "an entry with no blob address",
+      raw: JSON.stringify({ version: 3, files: [{ path: "a.md", size: 1, mtime: 2, hash: "h" }] }),
+      want: { ok: false, reason: "corrupt" },
+    },
+    {
+      // An address becomes the last segment of a bucket key, and a signed URL collapses relative
+      // segments itself, so one carrying a traversal would read an object outside the configured
+      // prefix entirely.
+      name: "a blob address that would steer a key out of the blob prefix",
+      raw: JSON.stringify({
+        version: 3,
+        files: [{ path: "a.md", size: 1, mtime: 2, hash: "h", blob: "../../elsewhere" }],
+      }),
       want: { ok: false, reason: "corrupt" },
     },
     {
       // A bare `null` array element reads .path on null, which throws rather than returning
       // undefined; the entry shape check must catch this before that property read happens.
       name: "a null entry",
-      raw: JSON.stringify({ version: 2, files: [null] }),
+      raw: JSON.stringify({ version: 3, files: [null] }),
       want: { ok: false, reason: "corrupt" },
     },
     {
       name: "a non-object entry",
-      raw: JSON.stringify({ version: 2, files: ["not-an-object"] }),
+      raw: JSON.stringify({ version: 3, files: ["not-an-object"] }),
       want: { ok: false, reason: "corrupt" },
     },
     {
@@ -265,10 +287,10 @@ test("decodeSnapshot: only the current version is accepted; version 1, missing, 
       // insensitive filesystems, so pulling both would silently let one overwrite the other (#94).
       name: "two paths differing only by case",
       raw: JSON.stringify({
-        version: 2,
+        version: 3,
         files: [
-          { path: "notes/Todo.md", size: 1, mtime: 2, hash: "h1" },
-          { path: "notes/todo.md", size: 1, mtime: 2, hash: "h2" },
+          { path: "notes/Todo.md", size: 1, mtime: 2, hash: "h1", blob: "h1" },
+          { path: "notes/todo.md", size: 1, mtime: 2, hash: "h2", blob: "h2" },
         ],
       }),
       want: { ok: false, reason: "caseCollision" },
@@ -276,10 +298,10 @@ test("decodeSnapshot: only the current version is accepted; version 1, missing, 
     {
       name: "paths that share a case fold but are otherwise identical are still a collision",
       raw: JSON.stringify({
-        version: 2,
+        version: 3,
         files: [
-          { path: "A.md", size: 1, mtime: 2, hash: "h1" },
-          { path: "a.md", size: 1, mtime: 2, hash: "h2" },
+          { path: "A.md", size: 1, mtime: 2, hash: "h1", blob: "h1" },
+          { path: "a.md", size: 1, mtime: 2, hash: "h2", blob: "h2" },
         ],
       }),
       want: { ok: false, reason: "caseCollision" },
@@ -382,7 +404,7 @@ test("diffSnapshots: an NFC and NFD pair for one file is not a change (#134)", a
 });
 
 test("decodeSnapshot: an NFD path in a manifest decodes to NFC (#134)", () => {
-  const nfdFile = { path: "café.md", size: 5, mtime: 1, hash: "abc" };
+  const nfdFile = { path: "café.md", size: 5, mtime: 1, hash: "abc", blob: "abc" };
   const raw = JSON.stringify({ version: SNAPSHOT_VERSION, files: [nfdFile] });
 
   const decoded = decodeSnapshot(raw);
@@ -396,8 +418,8 @@ test("decodeSnapshot: an NFD path in a manifest decodes to NFC (#134)", () => {
 test("decodeSnapshot: an NFC and NFD entry for one path is refused (#134)", () => {
   // Two entries, one file. Deciding which wins would silently drop an edit, and normalizing them
   // together would leave two manifest rows fighting over the same path on every later pass.
-  const nfcFile = { path: "café.md", size: 5, mtime: 1, hash: "abc" };
-  const nfdFile = { path: "café.md", size: 5, mtime: 1, hash: "def" };
+  const nfcFile = { path: "café.md", size: 5, mtime: 1, hash: "abc", blob: "abc" };
+  const nfdFile = { path: "café.md", size: 5, mtime: 1, hash: "def", blob: "def" };
   const raw = JSON.stringify({ version: SNAPSHOT_VERSION, files: [nfcFile, nfdFile] });
 
   const decoded = decodeSnapshot(raw);
@@ -408,8 +430,8 @@ test("decodeSnapshot: an NFC and NFD entry for one path is refused (#134)", () =
 test("decodeSnapshot: a duplicate path is refused even when the content matches", () => {
   // Identical hashes make this look harmless, but the manifest still names one path twice, and
   // nothing downstream is built to have two rows answer for one file.
-  const nfcFile = { path: "café.md", size: 5, mtime: 1, hash: "abc" };
-  const nfdFile = { path: "café.md", size: 5, mtime: 1, hash: "abc" };
+  const nfcFile = { path: "café.md", size: 5, mtime: 1, hash: "abc", blob: "abc" };
+  const nfdFile = { path: "café.md", size: 5, mtime: 1, hash: "abc", blob: "abc" };
   const raw = JSON.stringify({ version: SNAPSHOT_VERSION, files: [nfcFile, nfdFile] });
 
   const decoded = decodeSnapshot(raw);
@@ -420,8 +442,8 @@ test("decodeSnapshot: a duplicate path is refused even when the content matches"
 test("decodeSnapshot: NFC folding happens before the case fold, so both are caught (#134)", () => {
   // Normalizing first is what makes the #94 case check mean what it says: on the raw bytes an NFD
   // "Café.md" and an NFC "café.md" fold to different lowercase strings and both slip through.
-  const upper = { path: "CAFÉ.md", size: 5, mtime: 1, hash: "abc" };
-  const lower = { path: "café.md", size: 5, mtime: 1, hash: "def" };
+  const upper = { path: "CAFÉ.md", size: 5, mtime: 1, hash: "abc", blob: "abc" };
+  const lower = { path: "café.md", size: 5, mtime: 1, hash: "def", blob: "def" };
   const raw = JSON.stringify({ version: SNAPSHOT_VERSION, files: [upper, lower] });
 
   assert.deepEqual(decodeSnapshot(raw), { ok: false, reason: "caseCollision" });

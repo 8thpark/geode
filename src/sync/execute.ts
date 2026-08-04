@@ -1,3 +1,4 @@
+import { unwrapObject, wrapObject } from "../storage/envelope.ts";
 import type { StorageClient } from "../storage/storage.ts";
 import {
   byPath,
@@ -16,6 +17,8 @@ import { blobKeyFor, conflictCopyPath, MANIFEST_KEY, type SyncAction } from "./p
 // vault/obsidian.ts), and both are the same event to a user: something changed underneath us.
 export const DRIFT_MESSAGE = "changed locally mid sync; sync again to reconcile";
 
+const BLOB_CORRUPT_MESSAGE = "stored blob is not in geode's object format";
+const BLOB_UNREADABLE_MESSAGE = "stored blob is a format this version of geode can't read";
 const HASH_MISMATCH_MESSAGE = "fetched bytes do not match manifest hash; sync again to reconcile";
 const MANIFEST_DRIFT_MESSAGE = "changed remotely mid sync; sync again to reconcile";
 const MANIFEST_MISSING_HASH_MESSAGE = "manifest missing expected hash for this path";
@@ -25,11 +28,13 @@ const MANIFEST_MISSING_HASH_MESSAGE = "manifest missing expected hash for this p
 // the FileState of every path a blob now exists under, hashed from those exact bytes. pushedFiles
 // is not limited to completed actions: a conflict's copy push can succeed even when the rest of
 // that same action later fails, and the copy still needs to reach the manifest. There is no
-// concurrency flag: a remote side write is either additive (a blob keyed by its own hash, which a
-// losing race still leaves holding the right bytes) or, for pushDelete, touches no bucket object at
-// all, so neither can ever discover on its own that the plan's remote view went stale mid pass. The
-// pull family (pull, pullDelete, and a conflict's restore) is different: a pull's own fetch reads a
-// specific blob by the hash the plan already decided on, which by construction always "succeeds"
+// concurrency flag: a remote side write is either additive (a blob keyed by its own address,
+// which a
+// losing race still leaves holding the right bytes) or, for pushDelete, touches no bucket object
+// at all, so neither can ever discover on its own that the plan's remote view went stale mid pass.
+// The pull family (pull, pullDelete, and a conflict's restore) is different: a pull's own fetch
+// reads a specific blob by the address the plan already decided on, which by construction always
+// "succeeds"
 // with exactly that content, and pullDelete has no bucket object of its own to check at all, so
 // neither can notice on its own that a newer manifest has since pointed the path elsewhere or
 // repopulated it; that is what manifestDrifted checks for, with nothing left between it and the
@@ -309,19 +314,24 @@ async function discardStaged(staged: StagedWrite): Promise<void> {
   }
 }
 
-// ensureBlobStored makes sure a blob holding bytes exists in the bucket at hash's key, uploading
-// only when it doesn't. The key is derived from the content itself, so an object already there is
-// guaranteed byte identical to what the caller would otherwise upload: a rename or a duplicate
-// attachment costs one HEAD and nothing more, never a re-upload. A losing ifAbsent PUT still means
-// another device wrote this exact content concurrently, so it counts as success rather than the
-// concurrency failure an ordinary conditional write would report; the key can only ever hold the
-// bytes its own hash names.
+// ensureBlobStored makes sure a blob holding bytes exists in the bucket at address's key,
+// uploading only when it doesn't. The address is derived from the content itself, so an object
+// already there is guaranteed byte identical to what the caller would otherwise upload: a rename or
+// a duplicate attachment costs one HEAD and nothing more, never a re-upload. A losing ifAbsent PUT
+// still means another device wrote this exact content concurrently, so it counts as success rather
+// than the concurrency failure an ordinary conditional write would report; the key can only ever
+// hold the bytes its own address names.
+//
+// The bytes go into the bucket wrapped in an envelope (#184), the same one every geode object
+// carries, so the object says what it is before anything tries to read it. The address is derived
+// from the payload, never from the wrapped body: what identifies content must not move when the
+// framing around it does.
 async function ensureBlobStored(
   storage: StorageClient,
-  hash: string,
+  address: string,
   bytes: Uint8Array,
 ): Promise<{ ok: true } | { ok: false; message: string }> {
-  const key = blobKeyFor(hash);
+  const key = blobKeyFor(address);
   const head = await storage.headObject(key);
   if (head.ok) {
     return { ok: true };
@@ -329,7 +339,7 @@ async function ensureBlobStored(
   if (head.status !== "not_found") {
     return { ok: false, message: head.message };
   }
-  const put = await storage.putObject(key, bytes, { kind: "ifAbsent" });
+  const put = await storage.putObject(key, wrapObject(bytes), { kind: "ifAbsent" });
   if (put.ok || put.status === "conflict") {
     return { ok: true };
   }
@@ -362,7 +372,7 @@ async function executeAction(
     // in the window between the snapshot and this read is never recorded in the manifest as
     // content the bucket doesn't actually hold.
     const pushed = await pushedFile(action.path, bytes, now);
-    const stored = await ensureBlobStored(storage, pushed.hash, bytes);
+    const stored = await ensureBlobStored(storage, pushed.blob, bytes);
     if (!stored.ok) {
       return failedAction(action.path, stored.message);
     }
@@ -554,8 +564,8 @@ function localFailureMessage(err: unknown): string {
 
 // manifestDrifted reports whether the remote manifest has changed since the pass began, checked
 // immediately before a pull family write commits fetched content to disk. A blob fetched by its
-// own hash always reads back exactly that content, so unlike a plaintext path keyed read this can
-// never itself notice a newer manifest having since pointed the path at a different hash; the
+// own address always reads back exactly that content, so unlike a plaintext path keyed read this
+// can never itself notice a newer manifest having since pointed the path at a different blob; the
 // manifest's own etag is the only signal left that the plan's remote view is stale. A HEAD, not a
 // full re-fetch, keeps this cheap enough to run before every such write, the same "check right
 // before the destructive write" shape checkLocalDrift already uses for the local side. A caller
@@ -570,11 +580,17 @@ async function manifestDrifted(storage: StorageClient, etag: string | null): Pro
   return !head.ok || head.etag !== etag;
 }
 
-// pullBlob reads the blob a path's expected FileState names and verifies it against that expected
-// hash before handing it back, so a caller's local write never receives storage's response
-// unchecked. expected comes from the remote manifest the plan was made from; missing it means the
-// plan itself is inconsistent (every pull carries a manifest entry through syncOnce) and there is
-// no key to even attempt a read against.
+// pullBlob reads the blob a path's expected FileState addresses, unwraps its envelope, and
+// verifies the payload against that entry's expected hash before handing it back, so a caller's
+// local write never receives storage's response unchecked. expected comes from the remote manifest
+// the plan was made from; missing it means the plan itself is inconsistent (every pull carries a
+// manifest entry through syncOnce) and there is no key to even attempt a read against.
+//
+// The two checks are not redundant. The envelope says whether this build can read the object at
+// all, which is what a bucket written by a newer geode answers with; the hash says whether the
+// payload inside is the content the manifest promised. An object whose envelope this build cannot
+// open is reported as needing a different build rather than as damage, the same posture the
+// manifest's own version marker takes, so an upgrade is the obvious fix rather than a restore.
 async function pullBlob(
   storage: StorageClient,
   path: string,
@@ -583,16 +599,23 @@ async function pullBlob(
   if (expected === undefined) {
     return { ok: false, failure: { path, message: MANIFEST_MISSING_HASH_MESSAGE } };
   }
-  const fetched = await storage.getObject(blobKeyFor(expected.hash), expected.size);
+  const fetched = await storage.getObject(blobKeyFor(expected.blob), expected.size);
   if (!fetched.ok || fetched.body === null) {
     return { ok: false, failure: { path, message: fetched.message } };
   }
-  const integrity = await verifyFetch(path, fetched.body, expected);
+  const opened = unwrapObject(fetched.body);
+  if (!opened.ok) {
+    if (opened.reason === "corrupt") {
+      return { ok: false, failure: { path, message: BLOB_CORRUPT_MESSAGE } };
+    }
+    return { ok: false, failure: { path, message: BLOB_UNREADABLE_MESSAGE } };
+  }
+  const integrity = await verifyFetch(path, opened.payload, expected);
   if (integrity !== null) {
     return { ok: false, failure: integrity };
   }
 
-  return { ok: true, body: fetched.body };
+  return { ok: true, body: opened.payload };
 }
 
 // pushConflictCopy stores the bytes a conflict moved aside and reports the FileState the manifest
@@ -609,7 +632,7 @@ async function pushConflictCopy(
   failures: SyncFailure[],
 ): Promise<ActionResult> {
   const copyFile = await pushedFile(copyPath, bytes, now);
-  const stored = await ensureBlobStored(storage, copyFile.hash, bytes);
+  const stored = await ensureBlobStored(storage, copyFile.blob, bytes);
   if (!stored.ok) {
     return { failures: [...failures, { path: copyPath, message: stored.message }], pushed: [] };
   }
@@ -618,9 +641,12 @@ async function pushConflictCopy(
 }
 
 // pushedFile returns the FileState for bytes just written to a blob in the bucket, hashed fresh
-// from those exact bytes.
+// from those exact bytes. Unencrypted, a blob is addressed by its own digest, so the two fields
+// hold the same string; see FileState in vault/vault.ts for why they are still recorded separately.
 async function pushedFile(path: string, bytes: Uint8Array, mtime: number): Promise<FileState> {
-  return { path, size: bytes.length, mtime, hash: await hashBytes(bytes) };
+  const hash = await hashBytes(bytes);
+
+  return { path, size: bytes.length, mtime, hash, blob: hash };
 }
 
 // stageForWrite writes fetched bytes to their staging file, converting a thrown I/O error into the
@@ -647,9 +673,9 @@ function successfulAction(pushed: FileState[] = []): ActionResult {
 
 // verifyFetch hashes fetched bytes and compares against the expected hash, closing the gap
 // between "storage answered ok" and "storage answered with the right bytes". A mismatch means the
-// response was truncated, corrupted, or (with a hash derived key) essentially impossible short of
-// storage corruption; writing it to disk would silently propagate damage to every other device on
-// the next sync.
+// response was truncated, corrupted, or (with a content derived key) essentially impossible
+// short of storage corruption; writing it to disk would silently propagate damage to every other
+// device on the next sync.
 async function verifyFetch(
   path: string,
   body: Uint8Array,
