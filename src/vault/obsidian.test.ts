@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { DataAdapter } from "obsidian";
+import type { DataAdapter, Workspace } from "obsidian";
 import { DEFAULT_SETTINGS } from "../settings/settings.ts";
-import { createObsidianLocalWriter, createObsidianStore } from "./obsidian.ts";
+import type { LocalWriter, WriteMode } from "../sync/execute.ts";
+import { createObsidianLocalWriter, createObsidianStore, flushOpenEditors } from "./obsidian.ts";
 import { fingerprintSettings, type Snapshot } from "./vault.ts";
 
 // fakeAdapter returns a DataAdapter whose exists/read/write operate over one in-memory file map,
@@ -21,6 +22,14 @@ function fakeAdapter(seed: Record<string, string> = {}): DataAdapter {
     },
     write: async (path: string, data: string) => {
       files.set(path, data);
+    },
+    rename: async (path: string, newPath: string) => {
+      const data = files.get(path);
+      if (data === undefined) {
+        throw new Error(`no such file: ${path}`);
+      }
+      files.delete(path);
+      files.set(newPath, data);
     },
   };
   return adapter as unknown as DataAdapter;
@@ -83,9 +92,22 @@ function fakeWriterAdapter(
   return { adapter: adapter as unknown as DataAdapter, files, ops };
 }
 
-// bytes encodes body for a writeFile call.
+// bytes encodes body for a staged write.
 function bytes(body: string): Uint8Array {
   return new TextEncoder().encode(body);
+}
+
+// writeThrough stages body at path and commits it, the two step sequence a pull runs its drift
+// checks between, collapsed for tests that only care about where the bytes end up. mode defaults to
+// the ordinary pull's "replace"; the "create" cases pass it explicitly.
+async function writeThrough(
+  writer: LocalWriter,
+  path: string,
+  body: string,
+  mode: WriteMode = "replace",
+): Promise<void> {
+  const staged = await writer.stageFile(path, bytes(body), mode);
+  await staged.commit();
 }
 
 const STATE_PATH = "state.json";
@@ -99,7 +121,7 @@ test("createObsidianLocalWriter: a pull is staged to a hidden temp file and rena
   });
   const writer = createObsidianLocalWriter(adapter);
 
-  await writer.writeFile("notes/a.md", bytes("pulled content"));
+  await writeThrough(writer, "notes/a.md", "pulled content");
 
   assert.equal(files.get("notes/a.md"), "pulled content");
   assert.equal(files.has("notes/.a.md.geode-tmp"), false);
@@ -110,6 +132,26 @@ test("createObsidianLocalWriter: a pull is staged to a hidden temp file and rena
   ]);
 });
 
+test("createObsidianLocalWriter: a pull into a path whose ancestors don't exist creates every folder level, not just the immediate parent", async () => {
+  const { adapter, files, ops } = fakeWriterAdapter({
+    renameOverwrites: true,
+    stagedRenameFails: false,
+    writeBinaryFails: false,
+  });
+  const writer = createObsidianLocalWriter(adapter);
+
+  await writeThrough(writer, "a/b/c/d.md", "pulled content");
+
+  assert.equal(files.get("a/b/c/d.md"), "pulled content");
+  assert.deepEqual(ops, [
+    "mkdir a",
+    "mkdir a/b",
+    "mkdir a/b/c",
+    "writeBinary a/b/c/.d.md.geode-tmp",
+    "rename a/b/c/.d.md.geode-tmp -> a/b/c/d.md",
+  ]);
+});
+
 test("createObsidianLocalWriter: overwriting an existing file replaces it through the temp rename", async () => {
   const { adapter, files, ops } = fakeWriterAdapter(
     { renameOverwrites: true, stagedRenameFails: false, writeBinaryFails: false },
@@ -117,9 +159,43 @@ test("createObsidianLocalWriter: overwriting an existing file replaces it throug
   );
   const writer = createObsidianLocalWriter(adapter);
 
-  await writer.writeFile("a.md", bytes("new content"));
+  await writeThrough(writer, "a.md", "new content");
 
   assert.equal(files.get("a.md"), "new content");
+  assert.equal(files.has(".a.md.geode-tmp"), false);
+  assert.deepEqual(ops, ["writeBinary .a.md.geode-tmp", "rename .a.md.geode-tmp -> a.md"]);
+});
+
+test("createObsidianLocalWriter: a create write onto an occupied destination refuses, never touching what is there", async () => {
+  // A conflict's restore stages its bytes for a path its own rename vacated moments earlier, so a
+  // file at that path was created in the window since and holds content no conflict copy
+  // preserved. The commit must refuse rather than rename over it, and must refuse before the
+  // rename, not after: the destination's own bytes are never in play.
+  const { adapter, files, ops } = fakeWriterAdapter(
+    { renameOverwrites: true, stagedRenameFails: false, writeBinaryFails: false },
+    { "a.md": "recreated mid sync" },
+  );
+  const writer = createObsidianLocalWriter(adapter);
+
+  await assert.rejects(writeThrough(writer, "a.md", "restored content", "create"), {
+    message: "changed locally mid sync; sync again to reconcile",
+  });
+
+  assert.equal(files.get("a.md"), "recreated mid sync");
+  assert.deepEqual(ops, ["writeBinary .a.md.geode-tmp"]);
+});
+
+test("createObsidianLocalWriter: a create write onto a free path renames straight in, with no aside dance", async () => {
+  const { adapter, files, ops } = fakeWriterAdapter({
+    renameOverwrites: true,
+    stagedRenameFails: false,
+    writeBinaryFails: false,
+  });
+  const writer = createObsidianLocalWriter(adapter);
+
+  await writeThrough(writer, "a.md", "restored content", "create");
+
+  assert.equal(files.get("a.md"), "restored content");
   assert.equal(files.has(".a.md.geode-tmp"), false);
   assert.deepEqual(ops, ["writeBinary .a.md.geode-tmp", "rename .a.md.geode-tmp -> a.md"]);
 });
@@ -131,7 +207,7 @@ test("createObsidianLocalWriter: an adapter whose rename refuses to overwrite re
   );
   const writer = createObsidianLocalWriter(adapter);
 
-  await writer.writeFile("a.md", bytes("new content"));
+  await writeThrough(writer, "a.md", "new content");
 
   assert.equal(files.get("a.md"), "new content");
   assert.equal(files.has(".a.md.geode-tmp"), false);
@@ -155,7 +231,7 @@ test("createObsidianLocalWriter: a rename that keeps failing for another reason 
   );
   const writer = createObsidianLocalWriter(adapter);
 
-  await assert.rejects(writer.writeFile("a.md", bytes("new content")));
+  await assert.rejects(writeThrough(writer, "a.md", "new content"));
 
   assert.equal(files.get("a.md"), "old content");
   assert.equal(files.has(".a.md.geode-old"), false);
@@ -177,9 +253,44 @@ test("createObsidianLocalWriter: a failed write of the staged bytes leaves the d
   );
   const writer = createObsidianLocalWriter(adapter);
 
-  await assert.rejects(writer.writeFile("a.md", bytes("new content")));
+  await assert.rejects(writeThrough(writer, "a.md", "new content"));
 
   assert.equal(files.get("a.md"), "old content");
+});
+
+test("createObsidianLocalWriter: discarding a staged write removes the temp file and never touches the destination", async () => {
+  // The path taken whenever a drift check refuses a pull after its payload is already staged: the
+  // staged bytes must go, and the destination must be exactly as it was, since the whole point of
+  // staging before the checks is that nothing at the destination has happened yet.
+  const { adapter, files, ops } = fakeWriterAdapter(
+    { renameOverwrites: true, stagedRenameFails: false, writeBinaryFails: false },
+    { "a.md": "old content" },
+  );
+  const writer = createObsidianLocalWriter(adapter);
+
+  const staged = await writer.stageFile("a.md", bytes("new content"), "replace");
+  await staged.discard();
+
+  assert.equal(files.get("a.md"), "old content");
+  assert.equal(files.has(".a.md.geode-tmp"), false);
+  assert.deepEqual(ops, ["writeBinary .a.md.geode-tmp", "remove .a.md.geode-tmp"]);
+});
+
+test("createObsidianLocalWriter: discarding a staged write twice is not an error", async () => {
+  // discardStaged runs on every refused path and its result is deliberately ignored, so a second
+  // discard (a retry, an unwind that already ran) must be a no-op rather than a throw over a temp
+  // file that is already gone.
+  const { adapter } = fakeWriterAdapter({
+    renameOverwrites: true,
+    stagedRenameFails: false,
+    writeBinaryFails: false,
+  });
+  const writer = createObsidianLocalWriter(adapter);
+
+  const staged = await writer.stageFile("a.md", bytes("new content"), "replace");
+  await staged.discard();
+
+  await assert.doesNotReject(staged.discard());
 });
 
 // fakeDeleteAdapter returns a DataAdapter for exercising deleteFile: trashSystemAvailable mimics an
@@ -287,6 +398,25 @@ test("createObsidianStore: a well shaped snapshot round-trips through write and 
   assert.deepEqual(await store.read(), want);
 });
 
+test("createObsidianStore: an interrupted write leaves the previous state.json untouched, never torn (#136)", async () => {
+  // The write must be staged and installed via rename, the same atomic pattern pulled vault
+  // content already uses, so a failure between the two steps never leaves a half written file for
+  // the next sync to misread as a corrupt or empty ancestor.
+  const previous = JSON.stringify({
+    version: 2,
+    files: [{ path: "a.md", size: 1, mtime: 2, hash: "h" }],
+  });
+  const adapter = fakeAdapter({ [STATE_PATH]: previous });
+  adapter.rename = async () => {
+    throw new Error("disk full");
+  };
+  const store = createObsidianStore(adapter, STATE_PATH, DEFAULT_SETTINGS);
+
+  await assert.rejects(() => store.write({ files: [] }));
+
+  assert.equal(await adapter.read(STATE_PATH), previous);
+});
+
 test("createObsidianStore: a fingerprint mismatch reads back as empty", async () => {
   const adapter = fakeAdapter();
   const store1 = createObsidianStore(adapter, STATE_PATH, DEFAULT_SETTINGS);
@@ -298,6 +428,32 @@ test("createObsidianStore: a fingerprint mismatch reads back as empty", async ()
   const store2 = createObsidianStore(adapter, STATE_PATH, customSettings);
 
   assert.deepEqual(await store2.read(), { files: [] });
+});
+
+test("createObsidianStore: repointing at a bucket prefix reads back as empty (#154)", async () => {
+  // A prefix is where the vault lives, so moving it lands on a folder with its own manifest and its
+  // own sentinel. Carrying the old ancestor across would diff this vault against a stranger's.
+  const adapter = fakeAdapter();
+  const store1 = createObsidianStore(adapter, STATE_PATH, DEFAULT_SETTINGS);
+  const snapshot: Snapshot = { files: [{ path: "a.md", size: 1, mtime: 2, hash: "h" }] };
+
+  await store1.write(snapshot);
+
+  const prefixed = { ...DEFAULT_SETTINGS, prefix: "vaults/personal" };
+  const store2 = createObsidianStore(adapter, STATE_PATH, prefixed);
+
+  assert.deepEqual(await store2.read(), { files: [] });
+});
+
+test("fingerprintSettings: a prefix only written differently is the same target (#154)", () => {
+  // The prefix is stored exactly as typed, so the same folder can be spelled several ways. Treating
+  // those as different targets would throw away a good ancestor and force a full re-hash over a
+  // trailing slash.
+  const typed = { ...DEFAULT_SETTINGS, prefix: "/vaults//personal/" };
+  const tidy = { ...DEFAULT_SETTINGS, prefix: "vaults/personal" };
+
+  assert.equal(fingerprintSettings(typed), fingerprintSettings(tidy));
+  assert.notEqual(fingerprintSettings(tidy), fingerprintSettings(DEFAULT_SETTINGS));
 });
 
 test("createObsidianStore: rotating credentials keeps state, it does not change the target", async () => {
@@ -344,4 +500,46 @@ test("createObsidianStore: a state file from a newer format version reads back a
   );
 
   assert.deepEqual(await store.read(), empty);
+});
+
+// fakeWorkspace returns a Workspace whose getLeavesOfType("markdown") yields one leaf per entry in
+// views, enough to drive flushOpenEditors without the rest of the Workspace surface.
+function fakeWorkspace(views: unknown[]): Workspace {
+  const workspace = {
+    getLeavesOfType: (type: string) => {
+      if (type !== "markdown") {
+        return [];
+      }
+      return views.map((view) => ({ view }));
+    },
+  };
+  return workspace as unknown as Workspace;
+}
+
+test("flushOpenEditors: saves every open markdown leaf", async () => {
+  const saved: string[] = [];
+  const views = [{ save: async () => saved.push("a") }, { save: async () => saved.push("b") }];
+
+  await flushOpenEditors(fakeWorkspace(views));
+
+  assert.deepEqual(saved.sort(), ["a", "b"]);
+});
+
+test("flushOpenEditors: a leaf whose view has no save method is skipped, not treated as an error", async () => {
+  const saved: string[] = [];
+  const views = [{ save: async () => saved.push("a") }, { otherMethod: () => {} }];
+
+  await flushOpenEditors(fakeWorkspace(views));
+
+  assert.deepEqual(saved, ["a"]);
+});
+
+test("flushOpenEditors: no open markdown leaves is a no-op", async () => {
+  await flushOpenEditors(fakeWorkspace([]));
+});
+
+test("flushOpenEditors: a save failure rejects rather than being swallowed", async () => {
+  const views = [{ save: async () => Promise.reject(new Error("disk full")) }];
+
+  await assert.rejects(flushOpenEditors(fakeWorkspace(views)), /disk full/);
 });

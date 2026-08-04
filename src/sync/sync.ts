@@ -4,18 +4,21 @@ import {
   decodeSnapshot,
   encodeSnapshot,
   type FileState,
-  hashBytes,
-  normalizePath,
   type Reader,
   type Snapshot,
   takeSnapshot,
 } from "../vault/vault.ts";
 import { executeSyncPlan, type LocalWriter, type SyncFailure } from "./execute.ts";
 import {
+  BLOB_PREFIX,
+  decodeSentinel,
+  encodeSentinel,
   MANIFEST_KEY,
   manifestAfterSync,
   planSync,
-  RESERVED_PREFIX,
+  resolveVaultIdentity,
+  SENTINEL_KEY,
+  type Sentinel,
   type SyncAction,
 } from "./plan.ts";
 
@@ -56,45 +59,6 @@ export function adoptLiveStats(manifest: Snapshot, live: Snapshot): Snapshot {
   return { files };
 }
 
-// orphanedKeys returns the bucket keys a first sync would strand: objects with no local file at
-// their key, which a manifest built purely from local files would never mention, so no device
-// would ever pull, list, or delete them again (#109). Keys under the reserved prefix are geode's
-// own bookkeeping (the manifest, trashed deletions), never vault files, and are not counted; if
-// the manifest appears in the listing (another device's first sync landing mid pass) the
-// conditional manifest upload catches it loudly. Exported for its tests; syncOnce is the only
-// production caller.
-export function orphanedKeys(objects: ObjectMeta[], local: Snapshot): string[] {
-  const localByPath = byPath(local.files);
-  const orphans: string[] = [];
-  for (const object of objects) {
-    const key = normalizePath(object.key);
-    if (key.startsWith(RESERVED_PREFIX)) {
-      continue;
-    }
-    if (!localByPath.has(key)) {
-      orphans.push(key);
-    }
-  }
-
-  return orphans;
-}
-
-// legacyNFDKeys returns S3 objects whose key is not in NFC form. When such an object exists at an
-// NFD key while the local vault has the same file at the NFC path, the NFD object is a legacy
-// artifact that must be migrated: copied to the NFC key and deleted from the NFD key, so future
-// syncs never see two representations of the same file. Exported for its tests; syncOnce is the
-// only production caller.
-export function legacyNFDKeys(objects: ObjectMeta[]): string[] {
-  const keys: string[] = [];
-  for (const object of objects) {
-    if (object.key !== normalizePath(object.key)) {
-      keys.push(object.key);
-    }
-  }
-
-  return keys;
-}
-
 // readRemoteManifest fetches and parses the remote manifest. A confirmed 404 means no manifest
 // has ever been written, the safe assumption for a first sync against an empty bucket, so that's
 // treated as an empty snapshot flagged firstSync. Any other failure (network, auth, a real 5xx)
@@ -127,14 +91,22 @@ export async function readRemoteManifest(
       if (decoded.reason === "unsupportedVersion") {
         return {
           ok: false,
-          message: "remote manifest needs a newer version of geode",
+          message: "remote manifest is a format this version of geode can't read",
         };
       }
-      if (decoded.reason === "duplicatePaths") {
+      if (decoded.reason === "unsafePath") {
+        return { ok: false, message: "remote manifest contains a path unsafe to write" };
+      }
+      if (decoded.reason === "caseCollision") {
         return {
           ok: false,
-          message:
-            "remote manifest has duplicate paths after normalization; rename one file locally and retry",
+          message: "remote manifest contains two paths that differ only by case",
+        };
+      }
+      if (decoded.reason === "duplicatePath") {
+        return {
+          ok: false,
+          message: "remote manifest names the same path twice",
         };
       }
       return { ok: false, message: "remote manifest is corrupt" };
@@ -146,16 +118,40 @@ export async function readRemoteManifest(
     if (fetched.etag === null) {
       return { ok: false, message: "remote manifest has no etag" };
     }
-    return {
-      ok: true,
-      snapshot: decoded.snapshot,
-      firstSync: false,
-      etag: fetched.etag,
-    };
+    return { ok: true, snapshot: decoded.snapshot, firstSync: false, etag: fetched.etag };
   }
 
   if (fetched.status === "not_found") {
     return { ok: true, snapshot: { files: [] }, firstSync: true };
+  }
+  return { ok: false, message: fetched.message };
+}
+
+// readSentinel fetches and parses the remote sentinel (#183). A confirmed 404 is reported as
+// `sentinel: null`, the same "definitely absent, not merely unreadable" distinction
+// readRemoteManifest already draws for the manifest, since resolveVaultIdentity needs to tell
+// "this bucket has never had one" from "something is wrong reading it" apart.
+export async function readSentinel(
+  storage: StorageClient,
+): Promise<{ ok: true; sentinel: Sentinel | null } | { ok: false; message: string }> {
+  const fetched = await storage.getObject(SENTINEL_KEY);
+
+  if (fetched.ok && fetched.body !== null) {
+    const decoded = decodeSentinel(new TextDecoder().decode(fetched.body));
+    if (!decoded.ok) {
+      if (decoded.reason === "unsupportedVersion") {
+        return {
+          ok: false,
+          message: "remote sentinel is a format this version of geode can't read",
+        };
+      }
+      return { ok: false, message: "remote sentinel is corrupt" };
+    }
+    return { ok: true, sentinel: decoded.sentinel };
+  }
+
+  if (fetched.status === "not_found") {
+    return { ok: true, sentinel: null };
   }
   return { ok: false, message: fetched.message };
 }
@@ -192,17 +188,37 @@ export function revertFailedPaths(
 // reflecting what the bucket now actually holds. previous is passed in and the new
 // snapshot returned rather than read or written internally, so the caller owns persistence (the
 // plugin through state.json, tests through their own store) and this stays pure over its inputs.
-// now is injected so a conflict copy's name is deterministic under test.
+// now is injected so a conflict copy's name is deterministic under test. newVaultId mints the
+// identifier resolveVaultIdentity attaches to a bucket the first time this pass sees it, injected
+// for the same reason: real syncs use crypto.randomUUID(), tests want a fixed value. deviceId names
+// this machine in any conflict copy the pass writes (#103).
 export async function syncOnce(
   previous: Snapshot,
   reader: Reader,
   localWriter: LocalWriter,
   storage: StorageClient,
   now: number,
+  newVaultId: () => string = () => crypto.randomUUID(),
+  deviceId = "",
 ): Promise<SyncOutcome> {
-  const remote = await readRemoteManifest(storage);
+  const [remote, sentinelResult] = await Promise.all([
+    readRemoteManifest(storage),
+    readSentinel(storage),
+  ]);
   if (!remote.ok) {
     return { ok: false, message: remote.message, failures: [], snapshot: null };
+  }
+  if (!sentinelResult.ok) {
+    return { ok: false, message: sentinelResult.message, failures: [], snapshot: null };
+  }
+  const identity = resolveVaultIdentity(
+    remote.firstSync,
+    sentinelResult.sentinel,
+    previous.vaultId,
+    newVaultId,
+  );
+  if (!identity.ok) {
+    return { ok: false, message: identity.message, failures: [], snapshot: null };
   }
 
   // No remote manifest means no prior sync ever completed against this bucket, so previous (the
@@ -218,186 +234,46 @@ export async function syncOnce(
   const local = await takeSnapshot(reader, ancestor);
 
   // A missing manifest usually means a fresh bucket, but not always: a lifecycle rule, manual
-  // cleanup, or partial restore can remove the manifest while file objects survive (#109). The
-  // pass below would build a manifest purely from local files, leaving every surviving object
-  // invisible: never pulled, never listed, orphaned forever. Refuse loudly instead when the
-  // bucket holds objects no local file accounts for. Objects that do match a local path are safe
-  // to proceed over — an interrupted first sync leaves exactly those, and each push's own
-  // precondition adopts identical bytes and refuses divergent ones.
+  // cleanup, or partial restore can remove the manifest while blob objects survive (#109). Unlike
+  // the plaintext path keyed layout this replaced, that survival is not automatically a hazard: a
+  // blob's key is its own content hash, so a survivor whose hash matches something the local
+  // vault still holds needs no recovery at all, the ordinary push below finds it already there
+  // (one HEAD, no re-upload) and the manifest this pass writes describes it correctly. What
+  // remains dangerous is a survivor whose hash matches nothing local: unexplained content this
+  // device cannot account for, most plausibly a different vault's data that once shared this
+  // bucket, or the very race #109 first named.
+  //
+  // This is reported rather than refused outright. An earlier version blocked the whole pass on
+  // any unexplained survivor, but that has no path back to a clean state when the explanation is
+  // mundane rather than sinister: an interrupted first sync leaves a blob behind, the local file
+  // it belonged to is deleted before the retry, and now nothing local will ever explain it again.
+  // Since remote.firstSync only flips to false once a manifest actually lands, a hard refusal here
+  // never writes one, so every retry hits the identical refusal forever, a permanent deadlock over
+  // an entirely ordinary local edit, worse than the silent stranding #109 fixed. Proceeding lets a
+  // real first sync complete and end firstSync state, at the cost that content #109 would have
+  // caught explicitly now stays unreferenced instead: still sitting in the bucket, never destroyed,
+  // just unreachable through any manifest until someone notices this failure and investigates.
+  const remoteView = remote.snapshot;
+  const strandedFailures: SyncFailure[] = [];
   if (remote.firstSync) {
-    const listed = await storage.listObjects();
+    const listed = await storage.listObjects(BLOB_PREFIX);
     if (!listed.ok) {
-      return {
-        ok: false,
-        message: listed.message,
-        failures: [],
-        snapshot: null,
-      };
+      return { ok: false, message: listed.message, failures: [], snapshot: null };
     }
-    const orphans = orphanedKeys(listed.objects, local);
-    if (orphans.length > 0) {
-      const failures: SyncFailure[] = [];
-      for (const key of orphans) {
-        failures.push({
-          path: key,
-          message: "in the bucket but not in the local vault",
-        });
-      }
-      return {
-        ok: false,
-        message: "bucket has files but no manifest; sync would orphan them",
-        failures,
-        snapshot: null,
-      };
-    }
-
-    // Migrate legacy NFD keys to NFC so every object in the bucket uses the canonical form and
-    // future syncs never see two representations of the same file. Objects are grouped by the NFC
-    // path they'd collapse onto — a group can hold more than one source key when multiple NFD
-    // variants (or an NFD variant and the real NFC object) normalize to the same path. A failed
-    // byte comparison or a failed delete both fail the whole sync rather than being silently
-    // ignored, since this migration only runs on first sync and won't be retried once a manifest
-    // exists.
-    const groups = new Map<string, ObjectMeta[]>();
-    for (const obj of listed.objects) {
-      const nfcKey = normalizePath(obj.key);
-      const arr = groups.get(nfcKey) ?? [];
-      arr.push(obj);
-      groups.set(nfcKey, arr);
-    }
-
-    const conflicts: SyncFailure[] = [];
-    const toDelete: string[] = [];
-    const toCopy: { from: string; to: string }[] = [];
-
-    for (const [nfcKey, members] of groups) {
-      if (members.length === 1 && members[0].key === nfcKey) {
-        continue; // already canonical, nothing to migrate
-      }
-
-      if (members.length > 1) {
-        // More than one object would land on this path. Only safe to collapse them if every
-        // member is byte-identical; picking a "winner" otherwise would silently discard data.
-        const bodies: Uint8Array[] = [];
-        let readFailed = false;
-        for (const member of members) {
-          const got = await storage.getObject(member.key);
-          if (!got.ok || got.body === null) {
-            readFailed = true;
-            break;
-          }
-          bodies.push(got.body);
-        }
-        if (readFailed) {
-          conflicts.push({
-            path: nfcKey,
-            message: "could not read remote objects to compare content; retry",
-          });
-          continue;
-        }
-        const hashes = await Promise.all(bodies.map((b) => hashBytes(b)));
-        if (!hashes.every((h) => h === hashes[0])) {
-          conflicts.push({
-            path: nfcKey,
-            message:
-              "multiple keys normalize to the same path with different content; resolve locally and retry",
-          });
-          continue;
-        }
-      }
-
-      const canonical = members.find((m) => m.key === nfcKey);
-      if (canonical === undefined) {
-        toCopy.push({ from: members[0].key, to: nfcKey });
-      }
-      for (const member of members) {
-        if (member.key !== nfcKey) {
-          toDelete.push(member.key);
-        }
-      }
-    }
-
-    if (conflicts.length > 0) {
-      return {
-        ok: false,
-        message: "bucket has conflicting NFD and NFC versions of the same file",
-        failures: conflicts,
-        snapshot: null,
-      };
-    }
-
-    for (const { from, to } of toCopy) {
-      // Conditional on the destination still being absent: the group was built from a listing
-      // taken before this loop ran, so a concurrent writer could have created `to` in the
-      // meantime. An unconditional copy would silently overwrite that write, and the delete of
-      // `from` below would then discard the only remaining copy with no way to recover it.
-      const copied = await storage.copyObject(from, to, { kind: "ifAbsent" });
-      if (!copied.ok) {
-        if (copied.status === "conflict") {
-          return {
-            ok: false,
-            message: `${to} was created remotely during migration; sync again`,
-            failures: [],
-            snapshot: null,
-          };
-        }
-        return {
-          ok: false,
-          message: `failed to migrate ${from} to NFC: ${copied.message}`,
-          failures: [],
-          snapshot: null,
-        };
-      }
-    }
-
-    for (const nfdKey of toDelete) {
-      const nfcKey = normalizePath(nfdKey);
-
-      // Re-verify content immediately before deleting, rather than trusting the earlier group comparison
-      const nfcGet = await storage.getObject(nfcKey);
-      if (!nfcGet.ok || nfcGet.body === null) {
-        return {
-          ok: false,
-          message: `could not re-verify ${nfcKey} before deleting legacy key ${nfdKey}; retry`,
-          failures: [],
-          snapshot: null,
-        };
-      }
-      const nfdGet = await storage.getObject(nfdKey);
-      if (!nfdGet.ok || nfdGet.body === null) {
-        return {
-          ok: false,
-          message: `could not re-verify ${nfdKey} before deletion; retry`,
-          failures: [],
-          snapshot: null,
-        };
-      }
-      const [nfcHash, nfdHash] = await Promise.all([
-        hashBytes(nfcGet.body),
-        hashBytes(nfdGet.body),
-      ]);
-      if (nfcHash !== nfdHash) {
-        return {
-          ok: false,
-          message: `${nfcKey} changed remotely during migration; sync again`,
-          failures: [],
-          snapshot: null,
-        };
-      }
-
-      const deleted = await storage.deleteObject(nfdKey);
-      if (!deleted.ok) {
-        return {
-          ok: false,
-          message: `failed to delete legacy key ${nfdKey} after migration: ${deleted.message}`,
-          failures: [],
-          snapshot: null,
-        };
-      }
+    for (const key of unexplainedBlobs(listed.objects, local)) {
+      strandedFailures.push({ path: key, message: "in the bucket but not in the local vault" });
     }
   }
 
-  const actions = planSync(ancestor, local, remote.snapshot);
+  // A pull family action re-checks this etag immediately before it writes fetched content locally
+  // (execute.ts's manifestDrifted), so a manifest another device replaces mid pass is caught before
+  // stale content lands on disk rather than only afterward, when this pass's own manifest upload
+  // fails. null on a first sync: there is no manifest yet for a pull to have gone stale against.
+  let manifestEtag: string | null = null;
+  if (!remote.firstSync) {
+    manifestEtag = remote.etag;
+  }
+  const actions = planSync(ancestor, local, remoteView);
   const executed = await executeSyncPlan(
     actions,
     local,
@@ -405,31 +281,25 @@ export async function syncOnce(
     localWriter,
     storage,
     now,
-    remote.snapshot,
+    remoteView,
+    manifestEtag,
+    deviceId,
   );
-
-  // A failed file precondition means the plan's remote snapshot is no longer current. Do not
-  // upload any manifest from that stale view, even if its own CAS has not lost yet: another pass
-  // may have uploaded the file object but still be about to upload its manifest.
-  if (executed.concurrent) {
-    return {
-      ok: false,
-      message: "another device synced at the same time; sync again",
-      failures: executed.failures,
-      snapshot: null,
-    };
-  }
 
   // The manifest is derived from what the plan just did to the bucket, never from a fresh disk
   // snapshot: a file edited while the plan ran would land in a re-snapshot claiming content the
   // bucket never received, the edit would then never upload (state.json already agrees with the
   // manifest), and another device could later push the stale bucket copy back over it (#84). The
   // re-snapshot here only refreshes stats, so a mid sync edit keeps its bucket entry and reads as
-  // a local change on the next pass. Only completed actions feed in, so a failed action's path
-  // keeps the entry the bucket really holds; the manifest is uploaded even when some actions
-  // failed, so one bad file never leaves the rest of the pass's pushes invisible to every other
-  // device (#87).
-  const manifest = manifestAfterSync(local, remote.snapshot, executed.completed, now);
+  // a local change on the next pass. completed is only consulted for pushDelete, so a failed
+  // delete's path keeps the entry the bucket really holds; every pushed entry is recorded at the
+  // hash executed.pushedFiles carries, hashed from the bytes executeSyncPlan actually wrote to the
+  // bucket rather than this local snapshot or the owning action's own success, so neither an edit
+  // landing between the snapshot and a push's own read nor a conflict's copy succeeding while its
+  // restore fails ever leaves the manifest silent about content the bucket really holds. The
+  // manifest is uploaded even when some actions failed, so one bad file never leaves the rest of
+  // the pass's pushes invisible to every other device (#87).
+  const manifest = manifestAfterSync(remoteView, executed.completed, executed.pushedFiles);
   const final = adoptLiveStats(manifest, await takeSnapshot(reader, local));
   const manifestBody = new TextEncoder().encode(encodeSnapshot(final));
 
@@ -461,16 +331,71 @@ export async function syncOnce(
     };
   }
 
+  // The manifest existing now is what every future pass uses to tell this bucket apart from one
+  // nobody has synced (see resolveVaultIdentity), so write the sentinel the moment that becomes
+  // true: on a genuine first sync, and on the self heal for one that has a manifest but lost its
+  // sentinel along the way. ifAbsent guards two devices racing to bootstrap the same bucket; the
+  // loser's pass fails here rather than overwriting a vaultId another device already committed to,
+  // and its retry adopts whichever one actually won.
+  if (sentinelResult.sentinel === null) {
+    const sentinelBody = new TextEncoder().encode(
+      encodeSentinel({ vaultId: identity.vaultId, createdAt: now }),
+    );
+    const sentinelUploaded = await storage.putObject(SENTINEL_KEY, sentinelBody, {
+      kind: "ifAbsent",
+    });
+    if (!sentinelUploaded.ok) {
+      return {
+        ok: false,
+        message: "could not write the vault sentinel; sync again",
+        failures: executed.failures,
+        snapshot: null,
+      };
+    }
+  }
+
   // The count comes from failed (one entry per planned path), not failures: a conflict can report
   // two operation failures (copy push and pull) for the same file, and the message counts files.
-  if (executed.failed.length > 0) {
+  // strandedFailures adds to it without adding to failed: there is no action, planned or
+  // otherwise, for a path a stranded blob doesn't have, so there is nothing for revertFailedPaths
+  // to revert; it is folded in here purely so the pass reports itself failed and names what it
+  // could not explain, rather than returning ok on a first sync that left content unreferenced.
+  if (executed.failed.length > 0 || strandedFailures.length > 0) {
     return {
       ok: false,
-      message: `${executed.failed.length} file(s) failed to sync`,
-      failures: executed.failures,
+      message: `${executed.failed.length + strandedFailures.length} file(s) failed to sync`,
+      failures: [...executed.failures, ...strandedFailures],
       snapshot: revertFailedPaths(final, ancestor, executed.failed),
     };
   }
 
-  return { ok: true, snapshot: final, changeCount: actions.length };
+  // vaultId is attached only now, after manifestBody was already encoded from final: it belongs on
+  // the snapshot this pass hands back for local persistence, never inside the remote manifest.
+  return {
+    ok: true,
+    snapshot: { ...final, vaultId: identity.vaultId },
+    changeCount: actions.length,
+  };
+}
+
+// unexplainedBlobs returns the blob keys a first sync cannot account for: survivors whose content
+// hash matches nothing in the local vault, so nothing this pass is about to do would ever
+// reference them. Every other survivor, whose hash a local file already carries, needs no special
+// handling: the ordinary push below finds it already there and folds it into the manifest for
+// free. Exported for its tests; syncOnce is the only production caller.
+export function unexplainedBlobs(objects: ObjectMeta[], local: Snapshot): string[] {
+  const localHashes = new Set<string>();
+  for (const entry of local.files) {
+    localHashes.add(entry.hash);
+  }
+
+  const unexplained: string[] = [];
+  for (const object of objects) {
+    const hash = object.key.slice(BLOB_PREFIX.length);
+    if (!localHashes.has(hash)) {
+      unexplained.push(object.key);
+    }
+  }
+
+  return unexplained;
 }
