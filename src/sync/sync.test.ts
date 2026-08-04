@@ -3,10 +3,17 @@ import { test } from "node:test";
 import { encodeSnapshot, hashBytes, type Snapshot } from "../vault/vault.ts";
 import type { LocalWriter } from "./execute.ts";
 import { empty, fakeLocalWriter, fakeReader, fakeStorage, file, snapshot } from "./fake.ts";
-import { blobKeyFor, conflictCopyPath, MANIFEST_KEY } from "./plan.ts";
+import {
+  blobKeyFor,
+  conflictCopyPath,
+  encodeSentinel,
+  MANIFEST_KEY,
+  SENTINEL_KEY,
+} from "./plan.ts";
 import {
   adoptLiveStats,
   readRemoteManifest,
+  readSentinel,
   revertFailedPaths,
   syncOnce,
   unexplainedBlobs,
@@ -116,6 +123,26 @@ test("readRemoteManifest: a manifest entry with a traversal path refuses the pas
   });
 });
 
+test("readRemoteManifest: two paths differing only by case refuse the pass (#94)", async () => {
+  // Bucket keys are case sensitive; macOS, Windows, and Android are not by default. Pulling both
+  // would silently let one overwrite the other with no conflict ever raised.
+  const raw = JSON.stringify({
+    version: 2,
+    files: [
+      { path: "notes/Todo.md", size: 1, mtime: 2, hash: "h1" },
+      { path: "notes/todo.md", size: 1, mtime: 2, hash: "h2" },
+    ],
+  });
+  const { storage } = fakeStorage({ [MANIFEST_KEY]: raw });
+
+  const result = await readRemoteManifest(storage);
+
+  assert.deepEqual(result, {
+    ok: false,
+    message: "remote manifest contains two paths that differ only by case",
+  });
+});
+
 test("readRemoteManifest: a non 404 failure is reported, never guessed at as empty", async () => {
   const { storage } = fakeStorage();
   storage.getObject = async () => ({
@@ -129,6 +156,43 @@ test("readRemoteManifest: a non 404 failure is reported, never guessed at as emp
   const result = await readRemoteManifest(storage);
 
   assert.deepEqual(result, { ok: false, message: "Storage rejected the read (500)" });
+});
+
+test("readSentinel: a 404 is reported as sentinel: null, not a failure", async () => {
+  const { storage } = fakeStorage();
+
+  const result = await readSentinel(storage);
+
+  assert.deepEqual(result, { ok: true, sentinel: null });
+});
+
+test("readSentinel: valid JSON is parsed into a sentinel", async () => {
+  const sentinel = { vaultId: "abc-123", createdAt: 1000 };
+  const { storage } = fakeStorage({ [SENTINEL_KEY]: encodeSentinel(sentinel) });
+
+  const result = await readSentinel(storage);
+
+  assert.deepEqual(result, { ok: true, sentinel });
+});
+
+test("readSentinel: corrupt JSON is reported as a failure, not an absent sentinel", async () => {
+  const { storage } = fakeStorage({ [SENTINEL_KEY]: "not json" });
+
+  const result = await readSentinel(storage);
+
+  assert.deepEqual(result, { ok: false, message: "remote sentinel is corrupt" });
+});
+
+test("readSentinel: an unknown format version refuses the pass", async () => {
+  const raw = JSON.stringify({ version: 3, vaultId: "abc-123", createdAt: 1000 });
+  const { storage } = fakeStorage({ [SENTINEL_KEY]: raw });
+
+  const result = await readSentinel(storage);
+
+  assert.deepEqual(result, {
+    ok: false,
+    message: "remote sentinel is a format this version of geode can't read",
+  });
 });
 
 test("syncOnce: a manifest format this build doesn't know halts the pass before any sync work", async () => {
@@ -159,7 +223,10 @@ test("syncOnce: a manifest format this build doesn't know halts the pass before 
   });
   const getObject = storage.getObject;
   storage.getObject = async (key) => {
-    assert.equal(key, MANIFEST_KEY);
+    // syncOnce reads the sentinel alongside the manifest before deciding anything; only these two
+    // reserved keys are ever legitimate here, and nothing past them should be reached once the
+    // manifest itself refuses.
+    assert.ok(key === MANIFEST_KEY || key === SENTINEL_KEY, key);
     return getObject(key);
   };
   storage.headObject = async () => {
@@ -183,6 +250,76 @@ test("syncOnce: a manifest format this build doesn't know halts the pass before 
     failures: [],
     snapshot: null,
   });
+});
+
+test("syncOnce: a genuinely new bucket writes a sentinel too (#183)", async () => {
+  const reader = fakeReader({ "a.md": "alpha" });
+  const { writer } = fakeLocalWriter();
+  const { storage, objects } = fakeStorage();
+
+  const outcome = await syncOnce(empty, reader, writer, storage, 1, () => "minted-id");
+
+  assert.equal(outcome.ok, true);
+  assert.ok(outcome.ok && outcome.snapshot.vaultId === "minted-id");
+  assert.ok(objects.has(SENTINEL_KEY));
+  assert.ok(objects.has(MANIFEST_KEY));
+  // The sentinel's identity, not the manifest's content, is what a future pass checks the bucket
+  // against, so it must carry the same vaultId the pass just committed to.
+  const written = objects.get(SENTINEL_KEY);
+  assert.ok(written !== undefined);
+  assert.equal(JSON.parse(written as string).vaultId, "minted-id");
+});
+
+test("syncOnce: a device pointed at a different vault's sentinel refuses (#183)", async () => {
+  // This device already trusts a different vaultId (its state.json carries one from a prior
+  // successful sync), and the bucket it is pointed at now belongs to a genuinely different vault.
+  // Whether that other vault's manifest happens to exist is irrelevant here; the mismatch alone is
+  // the danger #183 exists to catch (a typo in a configured prefix, the wrong bucket entirely).
+  const reader = fakeReader({ "a.md": "alpha" });
+  reader.listFiles = async () => {
+    throw new Error("unexpected local listing");
+  };
+  const { writer } = fakeLocalWriter();
+  writer.stageFile = async () => {
+    throw new Error("unexpected local write");
+  };
+  const { storage } = fakeStorage({
+    [SENTINEL_KEY]: encodeSentinel({ vaultId: "known-id", createdAt: 1000 }),
+  });
+  storage.putObject = async () => {
+    throw new Error("unexpected remote write");
+  };
+  storage.listObjects = async () => {
+    throw new Error("unexpected remote listing");
+  };
+  const previous: Snapshot = { files: [], vaultId: "other-id" };
+
+  const outcome = await syncOnce(previous, reader, writer, storage, 1);
+
+  assert.deepEqual(outcome, {
+    ok: false,
+    message: "this bucket belongs to a different vault than the one last synced here",
+    failures: [],
+    snapshot: null,
+  });
+});
+
+test("syncOnce: a never-synced device proceeds without a manifest (#109)", async () => {
+  // The sentinel proves someone has used this bucket before, but this particular device has no
+  // history of its own to protect, so it must fall through to the ordinary first-sync path rather
+  // than refuse: exactly the #109 scenario a manifest deleted while its blob survives, which the
+  // existing unexplainedBlobs reporting already resolves. Refusing here for every device, not just
+  // ones with something to lose, would silently reinstate that permanent deadlock.
+  const reader = fakeReader({ "a.md": "alpha" });
+  const { writer } = fakeLocalWriter();
+  const { storage } = fakeStorage({
+    [SENTINEL_KEY]: encodeSentinel({ vaultId: "known-id", createdAt: 1000 }),
+  });
+
+  const outcome = await syncOnce(empty, reader, writer, storage, 1);
+
+  assert.equal(outcome.ok, true);
+  assert.ok(outcome.ok && outcome.snapshot.vaultId === "known-id");
 });
 
 test("syncOnce: a stale ancestor is ignored on a first sync, so a populated vault is pushed, not wiped", async () => {
@@ -388,8 +525,9 @@ test("syncOnce: retry adopts an identical orphaned upload with a HEAD, not anoth
   };
   const reader = fakeReader({ "a.md": "ours!" });
   const { writer } = fakeLocalWriter();
+  const newVaultId = () => "fixed-vault-id";
 
-  const first = await syncOnce(ancestor, reader, writer, storage, 1);
+  const first = await syncOnce(ancestor, reader, writer, storage, 1, newVaultId);
 
   assert.deepEqual(first, {
     ok: false,
@@ -402,18 +540,22 @@ test("syncOnce: retry adopts an identical orphaned upload with a HEAD, not anoth
 
   // The manifest is still at the ancestor while the blob already holds our bytes, so the retry's
   // HEAD must find it and skip the PUT entirely.
-  const retry = await syncOnce(ancestor, reader, writer, storage, 1);
+  const retry = await syncOnce(ancestor, reader, writer, storage, 1, newVaultId);
 
   assert.deepEqual(retry, {
     ok: true,
     snapshot: {
       files: [{ path: "a.md", size: 5, mtime: 1, hash: oursHash }],
+      vaultId: "fixed-vault-id",
     },
     changeCount: 1,
   });
   assert.equal(filePuts, 1, "retry replaced an identical orphaned upload with a HEAD, not a PUT");
   assert.ok(retry.ok);
-  assert.equal(objects.get(MANIFEST_KEY), encodeSnapshot(retry.snapshot));
+  // The stored manifest never carries vaultId, only the snapshot syncOnce hands back for local
+  // persistence does (#183), so the comparison strips it before checking the two agree.
+  const { vaultId: _vaultId, ...storedShape } = retry.snapshot;
+  assert.equal(objects.get(MANIFEST_KEY), encodeSnapshot(storedShape));
 });
 
 test("syncOnce: a file changed mid sync is not recorded in the manifest and is pushed next pass", async () => {
@@ -548,6 +690,41 @@ test("syncOnce: a file edited mid sync is never overwritten by a pull, and the r
   assert.equal(files.get(copyPath), "edited mid sync");
   assert.equal(objects.get(blobKeyFor(await hashOf("edited mid sync"))), "edited mid sync");
   assert.equal(files.get("b.md"), "b v2");
+});
+
+test("syncOnce: a conflict copy carries the device that made the edit (#103)", async () => {
+  // Both sides changed relative to the ancestor, so the local edit is preserved under a conflict
+  // copy. On a three device vault a timestamp alone leaves whose edit it holds to be guessed, so
+  // the device this pass ran on has to be in the name, on disk and in the uploaded manifest.
+  const remoteHash = await hashOf("from another device");
+  const ancestor = snapshot({ path: "a.md", size: 4, mtime: 1, hash: await hashOf("shared base") });
+  const remoteManifest = encodeSnapshot(
+    snapshot({ path: "a.md", size: 19, mtime: 1, hash: remoteHash }),
+  );
+  const { storage, objects } = fakeStorage({
+    [MANIFEST_KEY]: remoteManifest,
+    [blobKeyFor(remoteHash)]: "from another device",
+  });
+  const reader = fakeReader({ "a.md": "my own edit" });
+  const { writer, files } = fakeLocalWriter();
+  files.set("a.md", "my own edit");
+  const now = Date.parse("2026-07-14T14:37:22.123Z");
+
+  const outcome = await syncOnce(ancestor, reader, writer, storage, now, undefined, "mac-k3pl7qna");
+
+  assert.equal(outcome.ok, true);
+  const copyPath = conflictCopyPath("a.md", now, "mac-k3pl7qna");
+  assert.equal(copyPath, "a_conflict_mac-k3pl7qna_20260714-143722-123.md");
+  // The preserved edit sits under the device named copy, and the remote version claimed the path.
+  assert.equal(files.get(copyPath), "my own edit");
+  assert.equal(files.get("a.md"), "from another device");
+  // Other devices see it too: the copy reached the bucket and the manifest names it.
+  assert.equal(objects.get(blobKeyFor(await hashOf("my own edit"))), "my own edit");
+  const manifestBody = objects.get(MANIFEST_KEY);
+  assert.ok(manifestBody !== undefined);
+  const manifest = JSON.parse(manifestBody) as Snapshot;
+  const paths = manifest.files.map((f) => f.path);
+  assert.ok(paths.includes(copyPath), paths.join(", "));
 });
 
 test("syncOnce: a manifest that moves on mid pull is caught before stale content lands on disk", async () => {

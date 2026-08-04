@@ -6,6 +6,7 @@ import {
   encodeSnapshot,
   type FileInfo,
   fingerprintSettings,
+  normalizePath,
   type Reader,
   type Snapshot,
   type Store,
@@ -24,14 +25,15 @@ import {
 export function createObsidianLocalWriter(adapter: DataAdapter): LocalWriter {
   return {
     stageFile: async (path, data, mode) => {
-      await ensureParentDir(adapter, path);
+      const normalized = normalizePath(path);
+      await ensureParentDir(adapter, normalized);
       const buffer = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
-      const tempPath = hiddenSiblingPath(path, ".geode-tmp");
+      const tempPath = hiddenSiblingPath(normalized, ".geode-tmp");
       await adapter.writeBinary(tempPath, buffer as ArrayBuffer);
 
       return {
         commit: async () => {
-          await installStaged(adapter, tempPath, path, mode);
+          await installStaged(adapter, tempPath, normalized, mode);
         },
         discard: async () => {
           const exists = await adapter.exists(tempPath);
@@ -43,7 +45,8 @@ export function createObsidianLocalWriter(adapter: DataAdapter): LocalWriter {
       };
     },
     deleteFile: async (path) => {
-      const exists = await adapter.exists(path);
+      const normalized = normalizePath(path);
+      const exists = await adapter.exists(normalized);
       if (!exists) {
         return;
       }
@@ -52,15 +55,17 @@ export function createObsidianLocalWriter(adapter: DataAdapter): LocalWriter {
       // manual delete. System trash is tried first and the vault-local .trash folder is the
       // fallback when the OS has no trash (mobile, a headless host), so the file is always
       // recoverable somewhere rather than gone.
-      const trashed = await adapter.trashSystem(path);
+      const trashed = await adapter.trashSystem(normalized);
       if (trashed) {
         return;
       }
-      await adapter.trashLocal(path);
+      await adapter.trashLocal(normalized);
     },
     renameFile: async (path, newPath) => {
-      await ensureParentDir(adapter, newPath);
-      await adapter.rename(path, newPath);
+      const normalizedOld = normalizePath(path);
+      const normalizedNew = normalizePath(newPath);
+      await ensureParentDir(adapter, normalizedNew);
+      await adapter.rename(normalizedOld, normalizedNew);
     },
   };
 }
@@ -73,14 +78,19 @@ export function createObsidianReader(vault: Vault): Reader {
     listFiles: async () => {
       const files: FileInfo[] = [];
       for (const file of vault.getFiles()) {
-        files.push({ path: file.path, size: file.stat.size, mtime: file.stat.mtime });
+        files.push({
+          path: normalizePath(file.path),
+          size: file.stat.size,
+          mtime: file.stat.mtime,
+        });
       }
       return files;
     },
     readFile: async (path) => {
-      const file = vault.getFileByPath(path);
+      const normalized = normalizePath(path);
+      const file = vault.getFileByPath(normalized);
       if (file === null) {
-        throw new Error(`file disappeared during snapshot: ${path}`);
+        throw new Error(`file disappeared during snapshot: ${normalized}`);
       }
       const buffer = await vault.readBinary(file);
       return new Uint8Array(buffer);
@@ -89,7 +99,7 @@ export function createObsidianReader(vault: Vault): Reader {
     // lookup rather than a filesystem call: cheap enough to run immediately before a destructive
     // write, which is the whole reason a pull can confirm a path is untouched without rereading it.
     stat: async (path) => {
-      const file = vault.getFileByPath(path);
+      const file = vault.getFileByPath(normalizePath(path));
       if (file === null) {
         return { present: false, size: 0, mtime: 0 };
       }
@@ -104,6 +114,13 @@ export function createObsidianReader(vault: Vault): Reader {
 // to crash sync: an empty ancestor can at worst produce conflict copies, never data loss, and a
 // state.json from a newer format only ever appears alongside a newer format manifest, which
 // readRemoteManifest refuses before the ancestor matters.
+//
+// write stages the new content to a hidden temp file and installs it the same way a pulled file
+// is installed (#136): statePath is the one file every sync's safety reasoning rests on as the
+// common ancestor, so a crash mid write must never leave it torn. A torn read used to fall back to
+// "no snapshot" above, which is safe on its own but still turns every remotely deleted file into a
+// resurrection and every divergence into a conflict copy; atomic writes mean that fallback is
+// never actually exercised by an interrupted write.
 export function createObsidianStore(
   adapter: DataAdapter,
   statePath: string,
@@ -138,7 +155,9 @@ export function createObsidianStore(
         ...snapshot,
         settingsFingerprint: fingerprintSettings(settings),
       };
-      await adapter.write(statePath, encodeSnapshot(withFingerprint));
+      const tempPath = hiddenSiblingPath(statePath, ".geode-tmp");
+      await adapter.write(tempPath, encodeSnapshot(withFingerprint));
+      await installStaged(adapter, tempPath, statePath, "replace");
     },
   };
 }

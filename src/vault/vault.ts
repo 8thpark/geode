@@ -1,4 +1,9 @@
-import { endpointFor, type GeodeSettings, regionFor } from "../settings/settings.ts";
+import {
+  endpointFor,
+  type GeodeSettings,
+  normalizePrefix,
+  regionFor,
+} from "../settings/settings.ts";
 
 // SNAPSHOT_VERSION is the format version stamped into every serialized snapshot, remote manifest
 // and local state.json alike, so a future format change (encryption, chunked upload) has
@@ -53,11 +58,16 @@ export type Change = {
 };
 
 // DecodedSnapshot is the result of parsing a serialized snapshot: the snapshot itself, or why it
-// cannot be used — bytes that don't parse into the expected shape, an entry whose path is unsafe
-// to ever write to disk, or a format version this build does not know how to read.
+// cannot be used — bytes that don't parse into the expected shape, two entries naming the same
+// path once Unicode composition is accounted for, two entries whose paths differ only by case, an
+// entry whose path is unsafe to ever write to disk, or a format version this build does not know
+// how to read.
 export type DecodedSnapshot =
   | { ok: true; snapshot: Snapshot }
-  | { ok: false; reason: "corrupt" | "unsafePath" | "unsupportedVersion" };
+  | {
+      ok: false;
+      reason: "caseCollision" | "corrupt" | "duplicatePath" | "unsafePath" | "unsupportedVersion";
+    };
 
 // FileInfo is one file as seen live in the vault, before hashing.
 export type FileInfo = {
@@ -99,10 +109,17 @@ export type Reader = {
   stat: (path: string) => Promise<FileStat>;
 };
 
-// Snapshot is every file geode saw the last time it took a snapshot.
+// Snapshot is every file geode saw the last time it took a snapshot. vaultId, when present, is the
+// identifier of the bucket this snapshot was last synced against (see resolveVaultIdentity in
+// sync/plan.ts, #183): carried on the local state.json copy so a device can tell "I have never
+// synced" from "I have synced, and this bucket now looks wrong" the next time a manifest and
+// sentinel are both missing. Never populated on the remote manifest itself; syncOnce only ever
+// attaches it to the snapshot it hands back to the caller for persistence, after the manifest body
+// has already been encoded.
 export type Snapshot = {
   files: FileState[];
   settingsFingerprint?: string;
+  vaultId?: string;
 };
 
 // Store reads and writes the persisted snapshot. The real implementation stores it inside
@@ -146,6 +163,13 @@ export function byPath(files: FileState[]): Map<string, FileState> {
 // state.json flows through this same decoder), and a single unsafe path fails the whole snapshot
 // rather than being silently dropped, so nothing downstream ever has to re-check what decode
 // already promised (#132).
+//
+// Two entries whose paths differ only by case are refused the same way (#94): bucket keys are
+// case sensitive, but macOS, Windows, and Android filesystems are case insensitive by default, so
+// pulling both onto a device with any of those would silently let the second write replace the
+// first with no conflict ever raised. This is checked for every snapshot regardless of which
+// filesystem decodes it, since a manifest a case sensitive device wrote is still headed for
+// whichever device syncs it next, and geode has no way to know in advance which that will be.
 export function decodeSnapshot(raw: string): DecodedSnapshot {
   let parsed: unknown;
   try {
@@ -166,6 +190,9 @@ export function decodeSnapshot(raw: string): DecodedSnapshot {
   if (version === undefined) {
     return { ok: false, reason: "unsupportedVersion" };
   }
+  const files: FileState[] = [];
+  const normalizedPaths = new Set<string>();
+  const foldedPaths = new Set<string>();
   for (const file of parsed.files) {
     // isSnapshot only confirms files is an array, not that every entry is shaped like a
     // FileState, so an attacker-controlled manifest can still put a non-object entry (reading
@@ -174,15 +201,37 @@ export function decodeSnapshot(raw: string): DecodedSnapshot {
     if (typeof file !== "object" || file === null || typeof file.path !== "string") {
       return { ok: false, reason: "corrupt" };
     }
-    if (!isSafePath(file.path)) {
+
+    // Normalizing before every check below is what makes them mean what they claim. A macOS
+    // device decomposes (NFD) where Linux and Android compose (NFC), so the same visible filename
+    // arrives here as two different byte sequences (#134); folding case on the raw path would let
+    // an NFD "Café.md" and an NFC "café.md" both pass as distinct, and every path recorded from
+    // here on is the composed form, so one visible name is one identity across every device.
+    const path = normalizePath(file.path);
+    if (!isSafePath(path)) {
       return { ok: false, reason: "unsafePath" };
     }
+    if (normalizedPaths.has(path)) {
+      return { ok: false, reason: "duplicatePath" };
+    }
+    const folded = path.toLowerCase();
+    if (foldedPaths.has(folded)) {
+      return { ok: false, reason: "caseCollision" };
+    }
+    normalizedPaths.add(path);
+    foldedPaths.add(folded);
+    files.push({ ...file, path });
   }
   const settingsFingerprint = (parsed as { settingsFingerprint?: unknown }).settingsFingerprint;
   const fingerprintStr = typeof settingsFingerprint === "string" ? settingsFingerprint : undefined;
-  const snapshot: Snapshot = { files: parsed.files };
+  const vaultId = (parsed as { vaultId?: unknown }).vaultId;
+  const vaultIdStr = typeof vaultId === "string" ? vaultId : undefined;
+  const snapshot: Snapshot = { files };
   if (fingerprintStr !== undefined) {
     snapshot.settingsFingerprint = fingerprintStr;
+  }
+  if (vaultIdStr !== undefined) {
+    snapshot.vaultId = vaultIdStr;
   }
 
   return { ok: true, snapshot };
@@ -217,12 +266,20 @@ export function diffSnapshots(previous: Snapshot, current: Snapshot): Change[] {
 // encodeSnapshot serializes a snapshot for persistence, stamping the format version so every
 // manifest and state.json written from here on carries the marker decodeSnapshot branches on.
 export function encodeSnapshot(snapshot: Snapshot): string {
-  const result: { version: number; files: FileState[]; settingsFingerprint?: string } = {
+  const result: {
+    version: number;
+    files: FileState[];
+    settingsFingerprint?: string;
+    vaultId?: string;
+  } = {
     version: SNAPSHOT_VERSION,
     files: snapshot.files,
   };
   if (snapshot.settingsFingerprint !== undefined) {
     result.settingsFingerprint = snapshot.settingsFingerprint;
+  }
+  if (snapshot.vaultId !== undefined) {
+    result.vaultId = snapshot.vaultId;
   }
 
   return JSON.stringify(result);
@@ -230,10 +287,12 @@ export function encodeSnapshot(snapshot: Snapshot): string {
 
 // fingerprintSettings returns a stable string identifying the sync target, so we can detect when
 // that target changes and invalidate old state (#89). It covers only where the vault lives, the
-// fields normalized through endpointFor/regionFor to match what a connection actually uses.
-// Credentials (accessKeyId, secretId) are deliberately excluded: they authorize access to a
-// target, they do not identify one, so rotating a key must not invalidate state and force a full
-// re-hash. A genuine target change always moves one of the fields below.
+// fields normalized through endpointFor/regionFor/normalizePrefix to match what a connection
+// actually uses. Credentials (accessKeyId, secretId) are deliberately excluded: they authorize
+// access to a target, they do not identify one, so rotating a key must not invalidate state and
+// force a full re-hash. A genuine target change always moves one of the fields below, and a prefix
+// is one: repointing at another folder in the same bucket lands somewhere with its own manifest and
+// its own sentinel, so carrying the old state across would diff the vault against a stranger.
 export function fingerprintSettings(settings: GeodeSettings): string {
   return JSON.stringify({
     provider: settings.provider,
@@ -241,6 +300,7 @@ export function fingerprintSettings(settings: GeodeSettings): string {
     endpoint: endpointFor(settings),
     region: regionFor(settings),
     bucket: settings.bucket,
+    prefix: normalizePrefix(settings.prefix),
   });
 }
 
@@ -299,6 +359,14 @@ export function isSnapshot(value: unknown): value is Snapshot {
   return typeof value === "object" && value !== null && Array.isArray((value as Snapshot).files);
 }
 
+// normalizePath returns path with Unicode NFC normalization applied, so the same visible filename
+// is always the same byte sequence regardless of which platform composed it. macOS and iOS
+// decompose (NFD) by default; Linux and Android compose (NFC). Without this, the same note
+// produces two distinct S3 keys and manifest identities when synced across platforms.
+export function normalizePath(path: string): string {
+  return path.normalize("NFC");
+}
+
 // takeSnapshot walks every file the reader currently sees and returns their content hashes. A
 // file whose size and mtime both match the previous snapshot reuses that hash instead of
 // rereading content — the same stat gated hashing rsync, git, and Syncthing all use, since mtime
@@ -322,7 +390,8 @@ export async function takeSnapshot(
   const budget = byteSemaphore(byteBudget);
 
   const files = await mapWithConcurrency(liveFiles, concurrency, async (file) => {
-    const known = previousByPath.get(file.path);
+    const normalizedPath = normalizePath(file.path);
+    const known = previousByPath.get(normalizedPath);
     if (known !== undefined && known.size === file.size && known.mtime === file.mtime) {
       return known;
     }
@@ -338,7 +407,7 @@ export async function takeSnapshot(
       hold.resize(bytes.length);
 
       return {
-        path: file.path,
+        path: normalizedPath,
         size: file.size,
         mtime: file.mtime,
         hash: await hashBytes(bytes),

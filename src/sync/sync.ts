@@ -9,7 +9,18 @@ import {
   takeSnapshot,
 } from "../vault/vault.ts";
 import { executeSyncPlan, type LocalWriter, type SyncFailure } from "./execute.ts";
-import { BLOB_PREFIX, MANIFEST_KEY, manifestAfterSync, planSync, type SyncAction } from "./plan.ts";
+import {
+  BLOB_PREFIX,
+  decodeSentinel,
+  encodeSentinel,
+  MANIFEST_KEY,
+  manifestAfterSync,
+  planSync,
+  resolveVaultIdentity,
+  SENTINEL_KEY,
+  type Sentinel,
+  type SyncAction,
+} from "./plan.ts";
 
 // SyncOutcome is the result of a single sync pass. On success it carries the new snapshot to
 // persist as the next sync's starting point and how many actions were applied; on failure it
@@ -86,6 +97,18 @@ export async function readRemoteManifest(
       if (decoded.reason === "unsafePath") {
         return { ok: false, message: "remote manifest contains a path unsafe to write" };
       }
+      if (decoded.reason === "caseCollision") {
+        return {
+          ok: false,
+          message: "remote manifest contains two paths that differ only by case",
+        };
+      }
+      if (decoded.reason === "duplicatePath") {
+        return {
+          ok: false,
+          message: "remote manifest names the same path twice",
+        };
+      }
       return { ok: false, message: "remote manifest is corrupt" };
     }
     // Every S3 compatible server returns an ETag on a successful read; without one (a stripping
@@ -100,6 +123,35 @@ export async function readRemoteManifest(
 
   if (fetched.status === "not_found") {
     return { ok: true, snapshot: { files: [] }, firstSync: true };
+  }
+  return { ok: false, message: fetched.message };
+}
+
+// readSentinel fetches and parses the remote sentinel (#183). A confirmed 404 is reported as
+// `sentinel: null`, the same "definitely absent, not merely unreadable" distinction
+// readRemoteManifest already draws for the manifest, since resolveVaultIdentity needs to tell
+// "this bucket has never had one" from "something is wrong reading it" apart.
+export async function readSentinel(
+  storage: StorageClient,
+): Promise<{ ok: true; sentinel: Sentinel | null } | { ok: false; message: string }> {
+  const fetched = await storage.getObject(SENTINEL_KEY);
+
+  if (fetched.ok && fetched.body !== null) {
+    const decoded = decodeSentinel(new TextDecoder().decode(fetched.body));
+    if (!decoded.ok) {
+      if (decoded.reason === "unsupportedVersion") {
+        return {
+          ok: false,
+          message: "remote sentinel is a format this version of geode can't read",
+        };
+      }
+      return { ok: false, message: "remote sentinel is corrupt" };
+    }
+    return { ok: true, sentinel: decoded.sentinel };
+  }
+
+  if (fetched.status === "not_found") {
+    return { ok: true, sentinel: null };
   }
   return { ok: false, message: fetched.message };
 }
@@ -136,17 +188,37 @@ export function revertFailedPaths(
 // reflecting what the bucket now actually holds. previous is passed in and the new
 // snapshot returned rather than read or written internally, so the caller owns persistence (the
 // plugin through state.json, tests through their own store) and this stays pure over its inputs.
-// now is injected so a conflict copy's name is deterministic under test.
+// now is injected so a conflict copy's name is deterministic under test. newVaultId mints the
+// identifier resolveVaultIdentity attaches to a bucket the first time this pass sees it, injected
+// for the same reason: real syncs use crypto.randomUUID(), tests want a fixed value. deviceId names
+// this machine in any conflict copy the pass writes (#103).
 export async function syncOnce(
   previous: Snapshot,
   reader: Reader,
   localWriter: LocalWriter,
   storage: StorageClient,
   now: number,
+  newVaultId: () => string = () => crypto.randomUUID(),
+  deviceId = "",
 ): Promise<SyncOutcome> {
-  const remote = await readRemoteManifest(storage);
+  const [remote, sentinelResult] = await Promise.all([
+    readRemoteManifest(storage),
+    readSentinel(storage),
+  ]);
   if (!remote.ok) {
     return { ok: false, message: remote.message, failures: [], snapshot: null };
+  }
+  if (!sentinelResult.ok) {
+    return { ok: false, message: sentinelResult.message, failures: [], snapshot: null };
+  }
+  const identity = resolveVaultIdentity(
+    remote.firstSync,
+    sentinelResult.sentinel,
+    previous.vaultId,
+    newVaultId,
+  );
+  if (!identity.ok) {
+    return { ok: false, message: identity.message, failures: [], snapshot: null };
   }
 
   // No remote manifest means no prior sync ever completed against this bucket, so previous (the
@@ -211,6 +283,7 @@ export async function syncOnce(
     now,
     remoteView,
     manifestEtag,
+    deviceId,
   );
 
   // The manifest is derived from what the plan just did to the bucket, never from a fresh disk
@@ -258,6 +331,29 @@ export async function syncOnce(
     };
   }
 
+  // The manifest existing now is what every future pass uses to tell this bucket apart from one
+  // nobody has synced (see resolveVaultIdentity), so write the sentinel the moment that becomes
+  // true: on a genuine first sync, and on the self heal for one that has a manifest but lost its
+  // sentinel along the way. ifAbsent guards two devices racing to bootstrap the same bucket; the
+  // loser's pass fails here rather than overwriting a vaultId another device already committed to,
+  // and its retry adopts whichever one actually won.
+  if (sentinelResult.sentinel === null) {
+    const sentinelBody = new TextEncoder().encode(
+      encodeSentinel({ vaultId: identity.vaultId, createdAt: now }),
+    );
+    const sentinelUploaded = await storage.putObject(SENTINEL_KEY, sentinelBody, {
+      kind: "ifAbsent",
+    });
+    if (!sentinelUploaded.ok) {
+      return {
+        ok: false,
+        message: "could not write the vault sentinel; sync again",
+        failures: executed.failures,
+        snapshot: null,
+      };
+    }
+  }
+
   // The count comes from failed (one entry per planned path), not failures: a conflict can report
   // two operation failures (copy push and pull) for the same file, and the message counts files.
   // strandedFailures adds to it without adding to failed: there is no action, planned or
@@ -273,7 +369,13 @@ export async function syncOnce(
     };
   }
 
-  return { ok: true, snapshot: final, changeCount: actions.length };
+  // vaultId is attached only now, after manifestBody was already encoded from final: it belongs on
+  // the snapshot this pass hands back for local persistence, never inside the remote manifest.
+  return {
+    ok: true,
+    snapshot: { ...final, vaultId: identity.vaultId },
+    changeCount: actions.length,
+  };
 }
 
 // unexplainedBlobs returns the blob keys a first sync cannot account for: survivors whose content

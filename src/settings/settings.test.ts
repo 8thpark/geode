@@ -9,7 +9,9 @@ import {
   type GeodeSettings,
   hasConnectionConfig,
   isCurrentConnectionResult,
+  normalizePrefix,
   normalizeSettings,
+  prefixError,
   regionFor,
   saveDraft,
   settingsEqual,
@@ -230,6 +232,21 @@ const normalizeCases: { name: string; input: unknown; want: GeodeSettings }[] = 
     input: { secretId: "foo" },
     want: { ...DEFAULT_SETTINGS, secretId: "foo" },
   },
+  {
+    name: "prefix missing defaults to the bucket root",
+    input: {},
+    want: DEFAULT_SETTINGS,
+  },
+  {
+    name: "prefix non-string coerced to the bucket root",
+    input: { prefix: 42 },
+    want: DEFAULT_SETTINGS,
+  },
+  {
+    name: "prefix is stored exactly as typed, not canonicalized",
+    input: { prefix: "/vaults/personal/" },
+    want: { ...DEFAULT_SETTINGS, prefix: "/vaults/personal/" },
+  },
 ];
 
 for (const { name, input, want } of normalizeCases) {
@@ -301,6 +318,80 @@ for (const { name, input, want } of regionCases) {
   });
 }
 
+const normalizePrefixCases: { name: string; input: string; want: string }[] = [
+  { name: "empty is the bucket root", input: "", want: "" },
+  { name: "whitespace only is the bucket root", input: "   ", want: "" },
+  { name: "a plain path is left alone", input: "vaults/personal", want: "vaults/personal" },
+  { name: "a leading slash is dropped", input: "/vaults/personal", want: "vaults/personal" },
+  { name: "a trailing slash is dropped", input: "vaults/personal/", want: "vaults/personal" },
+  { name: "surrounding whitespace is dropped", input: "  vaults  ", want: "vaults" },
+  { name: "repeated slashes collapse", input: "vaults//personal", want: "vaults/personal" },
+  { name: "slashes alone are the bucket root", input: "///", want: "" },
+  { name: "a single segment survives", input: "vaults", want: "vaults" },
+  { name: "interior spaces are content, not padding", input: "my vaults", want: "my vaults" },
+];
+
+for (const { name, input, want } of normalizePrefixCases) {
+  test(`normalizePrefix: ${name}`, () => {
+    assert.strictEqual(normalizePrefix(input), want);
+  });
+}
+
+test("normalizePrefix: canonicalizing an already canonical prefix changes nothing", () => {
+  // The prefix is canonicalized at every point of use rather than on save, so it runs over its own
+  // output constantly; a second pass that moved it would make the key an object lives at depend on
+  // how many times the value had been round tripped.
+  for (const { input } of normalizePrefixCases) {
+    const once = normalizePrefix(input);
+
+    assert.strictEqual(normalizePrefix(once), once, input);
+  }
+});
+
+const prefixErrorCases: { name: string; input: string; want: string }[] = [
+  { name: "empty is fine", input: "", want: "" },
+  { name: "a plain path is fine", input: "vaults/personal", want: "" },
+  { name: "slashes normalizePrefix absorbs are fine", input: "//vaults//", want: "" },
+  { name: "a dot inside a name is fine", input: "vaults/v1.2", want: "" },
+  { name: "a leading dot is fine", input: ".vaults", want: "" },
+  {
+    name: "a backslash is refused",
+    input: "vaults\\personal",
+    want: "Prefix separates folders with /, not \\",
+  },
+  {
+    name: "a newline is refused",
+    input: "vaults\npersonal",
+    want: "Prefix can't contain control characters",
+  },
+  {
+    name: "a tab is refused",
+    input: "vaults\tpersonal",
+    want: "Prefix can't contain control characters",
+  },
+  {
+    name: "a relative parent segment is refused",
+    input: "vaults/../personal",
+    want: "Prefix can't use . or .. as a folder",
+  },
+  {
+    name: "a relative current segment is refused",
+    input: "vaults/./personal",
+    want: "Prefix can't use . or .. as a folder",
+  },
+  {
+    name: "a lone parent segment is refused",
+    input: "..",
+    want: "Prefix can't use . or .. as a folder",
+  },
+];
+
+for (const { name, input, want } of prefixErrorCases) {
+  test(`prefixError: ${name}`, () => {
+    assert.strictEqual(prefixError(input), want);
+  });
+}
+
 const settingsEqualCases: { name: string; a: GeodeSettings; b: GeodeSettings; want: boolean }[] = [
   {
     name: "identical values are equal",
@@ -318,6 +409,12 @@ const settingsEqualCases: { name: string; a: GeodeSettings; b: GeodeSettings; wa
     name: "different provider is not equal",
     a: DEFAULT_SETTINGS,
     b: { ...DEFAULT_SETTINGS, provider: "custom" },
+    want: false,
+  },
+  {
+    name: "different prefix is not equal",
+    a: DEFAULT_SETTINGS,
+    b: { ...DEFAULT_SETTINGS, prefix: "vaults/personal" },
     want: false,
   },
   {

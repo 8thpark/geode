@@ -6,6 +6,7 @@ export const DEFAULT_SETTINGS: GeodeSettings = {
   endpoint: "",
   region: "",
   bucket: "",
+  prefix: "",
   accessKeyId: "",
   secretId: "",
 };
@@ -21,9 +22,18 @@ export type GeodeSettings = {
   endpoint: string;
   region: string;
   bucket: string;
+  // prefix is the folder inside the bucket the vault lives under, empty for the bucket root
+  // (#154). Stored exactly as typed and canonicalized at the point of use by normalizePrefix, the
+  // same way endpoint and region are, so a trailing slash never reads back as an unsaved change.
+  //
+  // A value normalizeSettings loads is never checked against prefixError, and is deliberately kept
+  // even when unusable: blanking it would silently repoint a vault at the bucket root, and showing
+  // an empty field gives a user nothing to correct. createS3Client is what refuses to act on one,
+  // so an unusable prefix always fails loudly and always survives long enough to be fixed.
+  prefix: string;
   accessKeyId: string;
   // secretId is a SecretStorage reference name, not the secret value itself. Obsidian's
-  // SecretComponent picker lets a user pick or create a secret under any name of their choosing;
+  // SecretComponent picker lets a user pick or create a secret name of their choosing;
   // it does not support forcing new entries onto a fixed ID, so we have to remember whichever
   // one they picked.
   secretId: string;
@@ -120,6 +130,22 @@ export function isCurrentConnectionResult(
   return settingsEqual(testedSettings, currentSettings);
 }
 
+// normalizePrefix returns the canonical bucket key prefix for a raw settings value: surrounding
+// whitespace gone, and empty segments dropped, so "/vaults/personal/", "vaults//personal" and
+// "vaults/personal" all address the same place. Forgiving about slashes on purpose; what it cannot
+// make sense of is left for prefixError to refuse rather than quietly reinterpreted.
+export function normalizePrefix(raw: string): string {
+  const segments: string[] = [];
+  for (const segment of raw.trim().split("/")) {
+    if (segment === "") {
+      continue;
+    }
+    segments.push(segment);
+  }
+
+  return segments.join("/");
+}
+
 // normalizeSettings returns a complete GeodeSettings from whatever loadData produced,
 // filling gaps with defaults.
 export function normalizeSettings(raw: unknown): GeodeSettings {
@@ -136,9 +162,38 @@ export function normalizeSettings(raw: unknown): GeodeSettings {
     endpoint: stringOr(source.endpoint, DEFAULT_SETTINGS.endpoint),
     region: stringOr(source.region, DEFAULT_SETTINGS.region),
     bucket: stringOr(source.bucket, DEFAULT_SETTINGS.bucket),
+    prefix: stringOr(source.prefix, DEFAULT_SETTINGS.prefix),
     accessKeyId: stringOr(source.accessKeyId, DEFAULT_SETTINGS.accessKeyId),
     secretId: stringOr(source.secretId, DEFAULT_SETTINGS.secretId),
   };
+}
+
+// prefixError returns a short message describing why raw cannot be used as a bucket prefix, or ""
+// when it can, so an unusable value is caught while a user is typing it rather than as a baffling
+// provider error on the next sync. Only what normalizePrefix cannot canonicalize is refused: it
+// already absorbs surrounding and repeated slashes, so what reaches here is a typo rather than a
+// formatting preference. Relative segments are refused instead of resolved because the URL a
+// request is signed against collapses them itself, so "notes/../vault" would sync somewhere other
+// than what was typed, and control characters because they cannot survive a URL intact.
+export function prefixError(raw: string): string {
+  const prefix = normalizePrefix(raw);
+  if (prefix === "") {
+    return "";
+  }
+  if (prefix.includes("\\")) {
+    return "Prefix separates folders with /, not \\";
+  }
+  if (hasControlCharacter(prefix)) {
+    return "Prefix can't contain control characters";
+  }
+
+  for (const segment of prefix.split("/")) {
+    if (segment === "." || segment === "..") {
+      return "Prefix can't use . or .. as a folder";
+    }
+  }
+
+  return "";
 }
 
 // providerOr returns "custom" if v is "custom", otherwise "r2".
@@ -184,9 +239,26 @@ export function settingsEqual(a: GeodeSettings, b: GeodeSettings): boolean {
     a.endpoint === b.endpoint &&
     a.region === b.region &&
     a.bucket === b.bucket &&
+    a.prefix === b.prefix &&
     a.accessKeyId === b.accessKeyId &&
     a.secretId === b.secretId
   );
+}
+
+// hasControlCharacter reports whether value holds any C0 or DEL character, none of which can be
+// carried through a request URL as itself.
+function hasControlCharacter(value: string): boolean {
+  for (const char of value) {
+    const code = char.codePointAt(0);
+    if (code === undefined) {
+      continue;
+    }
+    if (code < 0x20 || code === 0x7f) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 // stringOr returns v if it is a string, otherwise fallback.
