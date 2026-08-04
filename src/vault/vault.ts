@@ -58,12 +58,16 @@ export type Change = {
 };
 
 // DecodedSnapshot is the result of parsing a serialized snapshot: the snapshot itself, or why it
-// cannot be used — bytes that don't parse into the expected shape, two entries whose paths differ
-// only by case, an entry whose path is unsafe to ever write to disk, or a format version this
-// build does not know how to read.
+// cannot be used — bytes that don't parse into the expected shape, two entries naming the same
+// path once Unicode composition is accounted for, two entries whose paths differ only by case, an
+// entry whose path is unsafe to ever write to disk, or a format version this build does not know
+// how to read.
 export type DecodedSnapshot =
   | { ok: true; snapshot: Snapshot }
-  | { ok: false; reason: "caseCollision" | "corrupt" | "unsafePath" | "unsupportedVersion" };
+  | {
+      ok: false;
+      reason: "caseCollision" | "corrupt" | "duplicatePath" | "unsafePath" | "unsupportedVersion";
+    };
 
 // FileInfo is one file as seen live in the vault, before hashing.
 export type FileInfo = {
@@ -186,6 +190,8 @@ export function decodeSnapshot(raw: string): DecodedSnapshot {
   if (version === undefined) {
     return { ok: false, reason: "unsupportedVersion" };
   }
+  const files: FileState[] = [];
+  const normalizedPaths = new Set<string>();
   const foldedPaths = new Set<string>();
   for (const file of parsed.files) {
     // isSnapshot only confirms files is an array, not that every entry is shaped like a
@@ -195,20 +201,32 @@ export function decodeSnapshot(raw: string): DecodedSnapshot {
     if (typeof file !== "object" || file === null || typeof file.path !== "string") {
       return { ok: false, reason: "corrupt" };
     }
-    if (!isSafePath(file.path)) {
+
+    // Normalizing before every check below is what makes them mean what they claim. A macOS
+    // device decomposes (NFD) where Linux and Android compose (NFC), so the same visible filename
+    // arrives here as two different byte sequences (#134); folding case on the raw path would let
+    // an NFD "Café.md" and an NFC "café.md" both pass as distinct, and every path recorded from
+    // here on is the composed form, so one visible name is one identity across every device.
+    const path = normalizePath(file.path);
+    if (!isSafePath(path)) {
       return { ok: false, reason: "unsafePath" };
     }
-    const folded = file.path.toLowerCase();
+    if (normalizedPaths.has(path)) {
+      return { ok: false, reason: "duplicatePath" };
+    }
+    const folded = path.toLowerCase();
     if (foldedPaths.has(folded)) {
       return { ok: false, reason: "caseCollision" };
     }
+    normalizedPaths.add(path);
     foldedPaths.add(folded);
+    files.push({ ...file, path });
   }
   const settingsFingerprint = (parsed as { settingsFingerprint?: unknown }).settingsFingerprint;
   const fingerprintStr = typeof settingsFingerprint === "string" ? settingsFingerprint : undefined;
   const vaultId = (parsed as { vaultId?: unknown }).vaultId;
   const vaultIdStr = typeof vaultId === "string" ? vaultId : undefined;
-  const snapshot: Snapshot = { files: parsed.files };
+  const snapshot: Snapshot = { files };
   if (fingerprintStr !== undefined) {
     snapshot.settingsFingerprint = fingerprintStr;
   }
@@ -341,6 +359,14 @@ export function isSnapshot(value: unknown): value is Snapshot {
   return typeof value === "object" && value !== null && Array.isArray((value as Snapshot).files);
 }
 
+// normalizePath returns path with Unicode NFC normalization applied, so the same visible filename
+// is always the same byte sequence regardless of which platform composed it. macOS and iOS
+// decompose (NFD) by default; Linux and Android compose (NFC). Without this, the same note
+// produces two distinct S3 keys and manifest identities when synced across platforms.
+export function normalizePath(path: string): string {
+  return path.normalize("NFC");
+}
+
 // takeSnapshot walks every file the reader currently sees and returns their content hashes. A
 // file whose size and mtime both match the previous snapshot reuses that hash instead of
 // rereading content — the same stat gated hashing rsync, git, and Syncthing all use, since mtime
@@ -364,7 +390,8 @@ export async function takeSnapshot(
   const budget = byteSemaphore(byteBudget);
 
   const files = await mapWithConcurrency(liveFiles, concurrency, async (file) => {
-    const known = previousByPath.get(file.path);
+    const normalizedPath = normalizePath(file.path);
+    const known = previousByPath.get(normalizedPath);
     if (known !== undefined && known.size === file.size && known.mtime === file.mtime) {
       return known;
     }
@@ -380,7 +407,7 @@ export async function takeSnapshot(
       hold.resize(bytes.length);
 
       return {
-        path: file.path,
+        path: normalizedPath,
         size: file.size,
         mtime: file.mtime,
         hash: await hashBytes(bytes),

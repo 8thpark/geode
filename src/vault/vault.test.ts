@@ -8,6 +8,7 @@ import {
   type FileInfo,
   isSafePath,
   isSnapshot,
+  normalizePath,
   type Reader,
   SNAPSHOT_VERSION,
   type Snapshot,
@@ -333,6 +334,97 @@ test("takeSnapshot: concurrency is bounded by the limit", async () => {
 
   assert.equal(snapshot.files.length, 10);
   assert.ok(peakInflight <= 2, `expected at most 2 concurrent reads, got ${peakInflight}`);
+});
+
+const normalizePathCases: { name: string; input: string; want: string }[] = [
+  { name: "NFC string passes through unchanged", input: "café.md", want: "café.md" },
+  {
+    name: "NFD accented filename is normalized to NFC",
+    input: "caf\u0065\u0301.md",
+    want: "café.md",
+  },
+  {
+    name: "path with accented directory and file",
+    input: "n\u00f5t\u00e9s/cafe\u0301.md",
+    want: "nõtés/café.md",
+  },
+  { name: "ASCII-only path is unchanged", input: "hello.md", want: "hello.md" },
+  { name: "empty string returns empty string", input: "", want: "" },
+];
+
+for (const { name, input, want } of normalizePathCases) {
+  test(`normalizePath: ${name}`, () => {
+    assert.equal(normalizePath(input), want);
+  });
+}
+
+test("takeSnapshot: an NFD path from the reader is recorded as NFC (#134)", async () => {
+  // macOS decomposes filenames to NFD; the reader hands back whatever the platform holds, but the
+  // snapshot records the composed form so every device agrees on one identity for the file.
+  const { reader } = fakeReader({ "café.md": { content: "hello", mtime: 1 } });
+
+  const snapshot = await takeSnapshot(reader, empty);
+
+  assert.equal(snapshot.files.length, 1);
+  assert.equal(snapshot.files[0].path, "café.md");
+});
+
+test("diffSnapshots: an NFC and NFD pair for one file is not a change (#134)", async () => {
+  // The payoff: the same note snapshotted on Linux and then on macOS must not read as a rename,
+  // which is a delete plus a create, and would push a duplicate out to every other device.
+  const { reader: nfc } = fakeReader({ "café.md": { content: "hello", mtime: 1 } });
+  const previous = await takeSnapshot(nfc, empty);
+
+  const { reader: nfd } = fakeReader({ "café.md": { content: "hello", mtime: 1 } });
+  const current = await takeSnapshot(nfd, previous);
+
+  assert.deepEqual(diffSnapshots(previous, current), []);
+});
+
+test("decodeSnapshot: an NFD path in a manifest decodes to NFC (#134)", () => {
+  const nfdFile = { path: "café.md", size: 5, mtime: 1, hash: "abc" };
+  const raw = JSON.stringify({ version: SNAPSHOT_VERSION, files: [nfdFile] });
+
+  const decoded = decodeSnapshot(raw);
+
+  assert.equal(decoded.ok, true);
+  if (decoded.ok) {
+    assert.equal(decoded.snapshot.files[0].path, "café.md");
+  }
+});
+
+test("decodeSnapshot: an NFC and NFD entry for one path is refused (#134)", () => {
+  // Two entries, one file. Deciding which wins would silently drop an edit, and normalizing them
+  // together would leave two manifest rows fighting over the same path on every later pass.
+  const nfcFile = { path: "café.md", size: 5, mtime: 1, hash: "abc" };
+  const nfdFile = { path: "café.md", size: 5, mtime: 1, hash: "def" };
+  const raw = JSON.stringify({ version: SNAPSHOT_VERSION, files: [nfcFile, nfdFile] });
+
+  const decoded = decodeSnapshot(raw);
+
+  assert.deepEqual(decoded, { ok: false, reason: "duplicatePath" });
+});
+
+test("decodeSnapshot: a duplicate path is refused even when the content matches", () => {
+  // Identical hashes make this look harmless, but the manifest still names one path twice, and
+  // nothing downstream is built to have two rows answer for one file.
+  const nfcFile = { path: "café.md", size: 5, mtime: 1, hash: "abc" };
+  const nfdFile = { path: "café.md", size: 5, mtime: 1, hash: "abc" };
+  const raw = JSON.stringify({ version: SNAPSHOT_VERSION, files: [nfcFile, nfdFile] });
+
+  const decoded = decodeSnapshot(raw);
+
+  assert.deepEqual(decoded, { ok: false, reason: "duplicatePath" });
+});
+
+test("decodeSnapshot: NFC folding happens before the case fold, so both are caught (#134)", () => {
+  // Normalizing first is what makes the #94 case check mean what it says: on the raw bytes an NFD
+  // "Café.md" and an NFC "café.md" fold to different lowercase strings and both slip through.
+  const upper = { path: "CAFÉ.md", size: 5, mtime: 1, hash: "abc" };
+  const lower = { path: "café.md", size: 5, mtime: 1, hash: "def" };
+  const raw = JSON.stringify({ version: SNAPSHOT_VERSION, files: [upper, lower] });
+
+  assert.deepEqual(decodeSnapshot(raw), { ok: false, reason: "caseCollision" });
 });
 
 test("takeSnapshot: in-flight bytes are bounded by the byte budget", async () => {

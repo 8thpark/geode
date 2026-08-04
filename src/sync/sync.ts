@@ -103,6 +103,12 @@ export async function readRemoteManifest(
           message: "remote manifest contains two paths that differ only by case",
         };
       }
+      if (decoded.reason === "duplicatePath") {
+        return {
+          ok: false,
+          message: "remote manifest names the same path twice",
+        };
+      }
       return { ok: false, message: "remote manifest is corrupt" };
     }
     // Every S3 compatible server returns an ETag on a successful read; without one (a stripping
