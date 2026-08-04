@@ -71,7 +71,10 @@ export function normalizeEndpoint(endpoint: string): string {
   }
 
   // Require an explicit scheme to prevent generic network errors
-  if (!normalized.startsWith("http://") && !normalized.startsWith("https://")) {
+  const hasScheme =
+    normalized.toLowerCase().startsWith("http://") ||
+    normalized.toLowerCase().startsWith("https://");
+  if (!hasScheme) {
     normalized = `https://${normalized}`;
   }
 
