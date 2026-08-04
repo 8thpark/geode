@@ -12,10 +12,18 @@ import {
 // moved file content off the vault path and onto a content addressed key under the manifest's own
 // bucket (`.geode/blobs/<hash>`, see sync/plan.ts); a version 1 manifest is refused rather than
 // read, since its paths point at objects this build never looks for again, and reading it as
-// version 2 would plan every push and pull against keys that were never written. There is no
-// migration path at this version: a bucket written before this change needs a fresh bucket, not an
-// upgrade.
-export const SNAPSHOT_VERSION = 2;
+// version 2 would plan every push and pull against keys that were never written. Version 3 split
+// where a file's content lives from what that content hashes to (FileState.blob against
+// FileState.hash, #184), so a version 2 manifest names no address for any of its entries and is
+// refused rather than have one guessed for it.
+//
+// None of these versions migrate: a bucket written before this change needs a fresh bucket, not an
+// upgrade. That is only acceptable because every one of them was settled before 0.1.0, while the
+// only vaults in a bucket were the project's own. From 0.1.0 onwards a bucket must be migrated
+// forward instead, so a version below SNAPSHOT_VERSION but at or above 3 is a decoder's job to
+// read and upgrade in place, never to refuse. Only a version above it stays refused, since no
+// build can migrate forward from a format that did not exist when it shipped.
+export const SNAPSHOT_VERSION = 3;
 
 // SNAPSHOT_BYTE_BUDGET caps how many bytes takeSnapshot buffers across its concurrent reads, low
 // enough that a vault of large attachments cannot pile eight full files into memory at once and
@@ -87,11 +95,27 @@ export type FileStat = {
 };
 
 // FileState is what geode remembers about one vault file as of the last snapshot.
+//
+// hash and blob answer two different questions that happen to have the same answer today. hash is
+// the SHA-256 of the file's own bytes: what the content is, how a diff notices an edit, and what a
+// pulled body is verified against before it lands on disk. blob is where those bytes live in the
+// bucket (`.geode/blobs/<blob>`, see blobKeyFor): an address, not a claim about content.
+//
+// They are separate fields because at 0.3.0 they stop being the same string (#184). An encrypted
+// vault addresses a blob by a keyed hash of the plaintext rather than its bare digest, so that
+// anyone who can list the bucket cannot test whether a file they already hold is in it; deriving
+// that address needs the vault key, which a device pulling a file it has never seen does not have
+// a plaintext to apply it to. So the address has to be written down against the path, next to,
+// rather than instead of, the digest that says whether the bytes came back intact.
+//
+// Every producer of a FileState derives blob from the file's own content, so two entries with the
+// same hash always carry the same blob and nothing downstream has to reconcile the two.
 export type FileState = {
   path: string;
   size: number;
   mtime: number;
   hash: string;
+  blob: string;
 };
 
 // Reader lists files present in the vault right now, reads their bytes, and reports what the index
@@ -158,6 +182,12 @@ export function byPath(files: FileState[]): Map<string, FileState> {
 // The returned snapshot carries only the in-memory shape; the version is a wire concern that
 // encodeSnapshot stamps back on at the next write.
 //
+// Refusing every version but the current one is only correct while every older version predates
+// 0.1.0 and so has no vaults to strand. Once a released format is superseded, this is where its
+// migration belongs: read the older shape, upgrade it to the current one, and hand it back ok, so
+// the next write stamps the new version and the bucket moves forward on its own. Only a version
+// above SNAPSHOT_VERSION stays refused (see the constant).
+//
 // Every entry's path is checked with isSafePath before the snapshot is handed back: both callers
 // are untrusted input (a remote manifest can be shaped by anyone who can write to the bucket, and
 // state.json flows through this same decoder), and a single unsafe path fails the whole snapshot
@@ -199,6 +229,17 @@ export function decodeSnapshot(raw: string): DecodedSnapshot {
     // .path off null or undefined throws) or a non-string path here despite what the narrowed
     // type above claims.
     if (typeof file !== "object" || file === null || typeof file.path !== "string") {
+      return { ok: false, reason: "corrupt" };
+    }
+
+    // A blob address is the only field here that becomes a bucket key, and it arrives from the
+    // same untrusted place every path does. encodeKey preserves "/" as a separator and leaves
+    // dots alone, and a signed URL collapses relative segments itself, so an address of
+    // "../../elsewhere" would read an object outside the configured prefix entirely; the same
+    // reasoning storage.ts refuses a bad prefix for. A missing address is refused by the same
+    // check, which is how a version 2 shaped entry smuggled in under a version 3 marker fails
+    // here rather than fetching `.geode/blobs/undefined`.
+    if (!isSafeAddress(file.blob)) {
       return { ok: false, reason: "corrupt" };
     }
 
@@ -405,12 +446,16 @@ export async function takeSnapshot(
     try {
       const bytes = await reader.readFile(file.path);
       hold.resize(bytes.length);
+      // Unencrypted, a blob is addressed by its own digest, so the two fields hold the same
+      // string; see FileState for why they are still recorded separately.
+      const hash = await hashBytes(bytes);
 
       return {
         path: normalizedPath,
         size: file.size,
         mtime: file.mtime,
-        hash: await hashBytes(bytes),
+        hash,
+        blob: hash,
       };
     } finally {
       hold.release();
@@ -485,6 +530,23 @@ function byteSemaphore(budget: number): { acquire: (bytes: number) => Promise<Ho
       });
     },
   };
+}
+
+// isSafeAddress reports whether value can be used as the last segment of a blob key. It is
+// deliberately a statement about keys rather than about digests: an address is 64 lowercase hex
+// characters today, but a future suite is free to encode it differently (#184), and a check that
+// pinned the alphabet would have to be relaxed exactly when the format changed. What must hold for
+// every scheme is that an address addresses one object under the blob prefix and cannot steer a
+// request anywhere else, so a separator or a relative segment is what's refused here.
+function isSafeAddress(value: unknown): boolean {
+  if (typeof value !== "string" || value === "") {
+    return false;
+  }
+  if (value.includes("/") || value.includes("\\")) {
+    return false;
+  }
+
+  return value !== "." && value !== "..";
 }
 
 // isWindowsReservedName reports whether segment is a Windows reserved device name, matched

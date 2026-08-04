@@ -2,7 +2,15 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { hashBytes, type Reader } from "../vault/vault.ts";
 import { executeSyncPlan } from "./execute.ts";
-import { empty, fakeLocalWriter, fakeReader, fakeStorage, file, snapshot } from "./fake.ts";
+import {
+  empty,
+  fakeLocalWriter,
+  fakeReader,
+  fakeStorage,
+  file,
+  snapshot,
+  wrapped,
+} from "./fake.ts";
 import { blobKeyFor, conflictCopyPath, MANIFEST_KEY, type SyncAction } from "./plan.ts";
 
 // hashOf returns the real content hash of text, for building local snapshots whose entries
@@ -28,9 +36,9 @@ test("executeSyncPlan: push reads the local file and puts its blob remotely", as
 
   const hash = await hashOf("hello");
   assert.deepEqual(failures, []);
-  assert.equal(objects.get(blobKeyFor(hash)), "hello");
+  assert.equal(objects.get(blobKeyFor(hash)), wrapped("hello"));
   assert.equal(files.size, 0);
-  assert.deepEqual(pushedFiles, [{ path: "a.md", size: 5, mtime: 1, hash }]);
+  assert.deepEqual(pushedFiles, [{ path: "a.md", size: 5, mtime: 1, hash, blob: hash }]);
 });
 
 test("executeSyncPlan: a push records the bytes it actually uploaded, not the pre push snapshot's hash", async () => {
@@ -54,9 +62,9 @@ test("executeSyncPlan: a push records the bytes it actually uploaded, not the pr
 
   const hash = await hashOf("edited after snapshot");
   assert.deepEqual(failures, []);
-  assert.equal(objects.get(blobKeyFor(hash)), "edited after snapshot");
+  assert.equal(objects.get(blobKeyFor(hash)), wrapped("edited after snapshot"));
   assert.deepEqual(pushedFiles, [
-    { path: "a.md", size: "edited after snapshot".length, mtime: 1, hash },
+    { path: "a.md", size: "edited after snapshot".length, mtime: 1, hash, blob: hash },
   ]);
 });
 
@@ -66,7 +74,7 @@ test("executeSyncPlan: pushing content already stored under another path costs a
   const reader = fakeReader({ "b.md": "hello" });
   const { writer } = fakeLocalWriter();
   const hash = await hashOf("hello");
-  const { storage, objects } = fakeStorage({ [blobKeyFor(hash)]: "hello" });
+  const { storage, objects } = fakeStorage({ [blobKeyFor(hash)]: wrapped("hello") });
   let puts = 0;
   storage.putObject = async () => {
     puts++;
@@ -85,14 +93,14 @@ test("executeSyncPlan: pushing content already stored under another path costs a
   assert.deepEqual(failures, []);
   assert.equal(puts, 0);
   assert.equal(objects.size, 1);
-  assert.deepEqual(pushedFiles, [{ path: "b.md", size: 5, mtime: 1, hash }]);
+  assert.deepEqual(pushedFiles, [{ path: "b.md", size: 5, mtime: 1, hash, blob: hash }]);
 });
 
 test("executeSyncPlan: pushDelete completes without touching the bucket, and the blob survives", async () => {
   const reader = fakeReader({});
   const { writer } = fakeLocalWriter();
   const hash = await hashOf("hello");
-  const { storage, objects } = fakeStorage({ [blobKeyFor(hash)]: "hello" });
+  const { storage, objects } = fakeStorage({ [blobKeyFor(hash)]: wrapped("hello") });
   const remote = snapshot(file("a.md", hash));
 
   const { completed, failures } = await executeSyncPlan(
@@ -109,7 +117,7 @@ test("executeSyncPlan: pushDelete completes without touching the bucket, and the
   assert.deepEqual(completed, [{ kind: "pushDelete", path: "a.md" }]);
   // Deletion is a manifest change, never a bucket write: the blob is never destroyed, so it stays
   // reachable at its hash for as long as any retained manifest, past or present, still names it.
-  assert.equal(objects.get(blobKeyFor(hash)), "hello");
+  assert.equal(objects.get(blobKeyFor(hash)), wrapped("hello"));
 });
 
 test("executeSyncPlan: pushDelete succeeds even when the bucket never held a blob for the path", async () => {
@@ -135,7 +143,7 @@ test("executeSyncPlan: pull fetches the remote blob and writes it locally", asyn
   const reader = fakeReader({});
   const { writer, files } = fakeLocalWriter();
   const hash = await hashOf("hello");
-  const { storage } = fakeStorage({ [blobKeyFor(hash)]: "hello" });
+  const { storage } = fakeStorage({ [blobKeyFor(hash)]: wrapped("hello") });
   const remote = snapshot(file("a.md", hash));
 
   const { failures } = await executeSyncPlan(
@@ -158,7 +166,7 @@ test("executeSyncPlan: pull overwrites a local file that still matches the snaps
   files.set("a.md", "unchanged");
   const local = snapshot(file("a.md", await hashOf("unchanged")));
   const remoteHash = await hashOf("remote edit");
-  const { storage } = fakeStorage({ [blobKeyFor(remoteHash)]: "remote edit" });
+  const { storage } = fakeStorage({ [blobKeyFor(remoteHash)]: wrapped("remote edit") });
   const remote = snapshot(file("a.md", remoteHash));
 
   const { failures } = await executeSyncPlan(
@@ -187,8 +195,8 @@ test("executeSyncPlan: pull onto a file edited after the snapshot is refused and
   const aHash = await hashOf("remote edit");
   const bHash = await hashOf("remote b");
   const { storage } = fakeStorage({
-    [blobKeyFor(aHash)]: "remote edit",
-    [blobKeyFor(bHash)]: "remote b",
+    [blobKeyFor(aHash)]: wrapped("remote edit"),
+    [blobKeyFor(bHash)]: wrapped("remote b"),
   });
   const remote = snapshot(file("a.md", aHash), file("b.md", bHash));
 
@@ -214,7 +222,7 @@ test("executeSyncPlan: pull onto a file created after the snapshot is refused", 
   const { writer, files } = fakeLocalWriter();
   files.set("a.md", "created after snapshot");
   const hash = await hashOf("remote edit");
-  const { storage } = fakeStorage({ [blobKeyFor(hash)]: "remote edit" });
+  const { storage } = fakeStorage({ [blobKeyFor(hash)]: wrapped("remote edit") });
   const remote = snapshot(file("a.md", hash));
 
   const { failures } = await executeSyncPlan(
@@ -350,7 +358,7 @@ test("executeSyncPlan: a conflict renames the local copy, pushes its blob to sto
   const { writer, files } = fakeLocalWriter();
   files.set("a.md", "local edit");
   const remoteHash = await hashOf("remote edit");
-  const { storage, objects } = fakeStorage({ [blobKeyFor(remoteHash)]: "remote edit" });
+  const { storage, objects } = fakeStorage({ [blobKeyFor(remoteHash)]: wrapped("remote edit") });
   const remote = snapshot(file("a.md", remoteHash));
   const now = Date.parse("2026-07-14T10:00:00.000Z");
 
@@ -371,7 +379,7 @@ test("executeSyncPlan: a conflict renames the local copy, pushes its blob to sto
   // The conflict copy's blob must also reach storage: otherwise the manifest uploaded after this
   // sync claims a path pointing at a blob that doesn't exist, and every other device fails
   // forever trying to pull it.
-  assert.equal(objects.get(blobKeyFor(copyHash)), "local edit");
+  assert.equal(objects.get(blobKeyFor(copyHash)), wrapped("local edit"));
   // Recorded at the hash of the copy's own bytes, the same race a push closes: the conflict copy
   // is read fresh at execution time, never assumed from a pre-sync snapshot.
   assert.deepEqual(pushedFiles, [
@@ -380,6 +388,7 @@ test("executeSyncPlan: a conflict renames the local copy, pushes its blob to sto
       size: "local edit".length,
       mtime: now,
       hash: copyHash,
+      blob: copyHash,
     },
   ]);
 });
@@ -388,7 +397,7 @@ test("executeSyncPlan: a conflict with nothing local to preserve just pulls the 
   const reader = fakeReader({});
   const { writer, files } = fakeLocalWriter();
   const hash = await hashOf("remote edit");
-  const { storage } = fakeStorage({ [blobKeyFor(hash)]: "remote edit" });
+  const { storage } = fakeStorage({ [blobKeyFor(hash)]: wrapped("remote edit") });
   const remote = snapshot(file("a.md", hash));
   const now = Date.parse("2026-07-14T10:00:00.000Z");
 
@@ -442,7 +451,7 @@ test("executeSyncPlan: a conflict restore onto a path recreated after the snapsh
   const { writer, files } = fakeLocalWriter();
   files.set("a.md", "recreated after snapshot");
   const hash = await hashOf("remote edit");
-  const { storage } = fakeStorage({ [blobKeyFor(hash)]: "remote edit" });
+  const { storage } = fakeStorage({ [blobKeyFor(hash)]: wrapped("remote edit") });
   const remote = snapshot(file("a.md", hash));
   const now = Date.parse("2026-07-14T10:00:00.000Z");
 
@@ -477,7 +486,7 @@ test("executeSyncPlan: a conflict restore onto a path recreated after its own re
     files.set(path, "recreated mid sync");
   };
   const remoteHash = await hashOf("remote edit");
-  const { storage, objects } = fakeStorage({ [blobKeyFor(remoteHash)]: "remote edit" });
+  const { storage, objects } = fakeStorage({ [blobKeyFor(remoteHash)]: wrapped("remote edit") });
   const remote = snapshot(file("a.md", remoteHash));
   const now = Date.parse("2026-07-14T10:00:00.000Z");
 
@@ -501,13 +510,14 @@ test("executeSyncPlan: a conflict restore onto a path recreated after its own re
   // sync sees the recreated file as a local change and replans the path as an ordinary conflict.
   const copyHash = await hashOf("local edit");
   assert.equal(files.get(conflictCopyPath("a.md", now)), "local edit");
-  assert.equal(objects.get(blobKeyFor(copyHash)), "local edit");
+  assert.equal(objects.get(blobKeyFor(copyHash)), wrapped("local edit"));
   assert.deepEqual(pushedFiles, [
     {
       path: conflictCopyPath("a.md", now),
       size: "local edit".length,
       mtime: now,
       hash: copyHash,
+      blob: copyHash,
     },
   ]);
 });
@@ -521,7 +531,7 @@ test("executeSyncPlan: a conflict restore is refused by its commit even when the
   const { writer, files } = fakeLocalWriter();
   files.set("a.md", "created but not yet indexed");
   const hash = await hashOf("remote edit");
-  const { storage } = fakeStorage({ [blobKeyFor(hash)]: "remote edit" });
+  const { storage } = fakeStorage({ [blobKeyFor(hash)]: wrapped("remote edit") });
   const remote = snapshot(file("a.md", hash));
   const now = Date.parse("2026-07-14T10:00:00.000Z");
 
@@ -550,7 +560,7 @@ test("executeSyncPlan: an ordinary pull still replaces the file its plan decided
   const { writer, files } = fakeLocalWriter();
   files.set("a.md", "as snapshotted");
   const hash = await hashOf("remote edit");
-  const { storage } = fakeStorage({ [blobKeyFor(hash)]: "remote edit" });
+  const { storage } = fakeStorage({ [blobKeyFor(hash)]: wrapped("remote edit") });
   const remote = snapshot(file("a.md", hash));
 
   const { failures } = await executeSyncPlan(
@@ -587,7 +597,7 @@ test("executeSyncPlan: a conflict with nothing remote to pull preserves the loca
   assert.deepEqual(failures, []);
   assert.equal(files.has("a.md"), false);
   assert.equal(files.get(conflictCopyPath("a.md", now)), "local edit");
-  assert.equal(objects.get(blobKeyFor(copyHash)), "local edit");
+  assert.equal(objects.get(blobKeyFor(copyHash)), wrapped("local edit"));
 });
 
 test("executeSyncPlan: a push whose local file vanished is reported and doesn't stop the rest of the plan", async () => {
@@ -606,7 +616,7 @@ test("executeSyncPlan: a push whose local file vanished is reported and doesn't 
 
   const worldHash = await hashOf("world");
   assert.deepEqual(failures, [{ path: "a.md", message: "no such file: a.md" }]);
-  assert.equal(objects.get(blobKeyFor(worldHash)), "world");
+  assert.equal(objects.get(blobKeyFor(worldHash)), wrapped("world"));
 });
 
 test("executeSyncPlan: a conflict whose local file vanished is reported, nothing is renamed or pushed, and the plan continues", async () => {
@@ -629,7 +639,7 @@ test("executeSyncPlan: a conflict whose local file vanished is reported, nothing
   // No conflict copy was created locally or remotely from a file that wasn't there to preserve.
   assert.equal(files.has(conflictCopyPath("a.md", now)), false);
   // The following action still ran.
-  assert.equal(objects.get(blobKeyFor(worldHash)), "world");
+  assert.equal(objects.get(blobKeyFor(worldHash)), wrapped("world"));
 });
 
 test("executeSyncPlan: a failed push is reported and doesn't stop the rest of the plan", async () => {
@@ -660,7 +670,7 @@ test("executeSyncPlan: a failed push is reported and doesn't stop the rest of th
 
   const worldHash = await hashOf("world");
   assert.deepEqual(failures, [{ path: "a.md", message: "Storage rejected the write (500)" }]);
-  assert.equal(objects.get(blobKeyFor(worldHash)), "world");
+  assert.equal(objects.get(blobKeyFor(worldHash)), wrapped("world"));
   assert.equal(files.size, 0);
   // The pass reports exactly which actions completed and which didn't, so syncOnce can record
   // b.md's progress in the manifest while leaving a.md pending for the next pass (#87).
@@ -676,7 +686,7 @@ test("executeSyncPlan: a conflict whose copy push fails is a failed action, even
   const { writer, files } = fakeLocalWriter();
   files.set("a.md", "local edit");
   const remoteHash = await hashOf("remote edit");
-  const { storage, objects } = fakeStorage({ [blobKeyFor(remoteHash)]: "remote edit" });
+  const { storage, objects } = fakeStorage({ [blobKeyFor(remoteHash)]: wrapped("remote edit") });
   const remote = snapshot(file("a.md", remoteHash));
   storage.putObject = async () => ({
     ok: false,
@@ -728,8 +738,8 @@ test("executeSyncPlan: a pull whose local write throws is reported and doesn't s
   const aHash = await hashOf("remote a");
   const bHash = await hashOf("remote b");
   const { storage } = fakeStorage({
-    [blobKeyFor(aHash)]: "remote a",
-    [blobKeyFor(bHash)]: "remote b",
+    [blobKeyFor(aHash)]: wrapped("remote a"),
+    [blobKeyFor(bHash)]: wrapped("remote b"),
   });
   const remote = snapshot(file("a.md", aHash), file("b.md", bHash));
 
@@ -754,7 +764,7 @@ test("executeSyncPlan: a conflict whose rename throws is reported and the local 
     throw new Error("EACCES: permission denied");
   };
   const hash = await hashOf("remote edit");
-  const { storage, objects } = fakeStorage({ [blobKeyFor(hash)]: "remote edit" });
+  const { storage, objects } = fakeStorage({ [blobKeyFor(hash)]: wrapped("remote edit") });
   const remote = snapshot(file("a.md", hash));
   const now = Date.parse("2026-07-14T10:00:00.000Z");
 
@@ -779,7 +789,7 @@ test("executeSyncPlan: pull with matching hash writes the file to disk", async (
   const reader = fakeReader({});
   const { writer, files } = fakeLocalWriter();
   const hash = await hashOf("hello");
-  const { storage } = fakeStorage({ [blobKeyFor(hash)]: "hello" });
+  const { storage } = fakeStorage({ [blobKeyFor(hash)]: wrapped("hello") });
   const remote = snapshot(file("a.md", hash));
 
   const { failures } = await executeSyncPlan(
@@ -803,7 +813,7 @@ test("executeSyncPlan: pull with hash mismatch is refused and nothing is written
   const reader = fakeReader({});
   const { writer, files } = fakeLocalWriter();
   const correctHash = await hashOf("correct content");
-  const { storage } = fakeStorage({ [blobKeyFor(correctHash)]: "wrong content" });
+  const { storage } = fakeStorage({ [blobKeyFor(correctHash)]: wrapped("wrong content") });
   const remote = snapshot(file("a.md", correctHash));
 
   const { failures } = await executeSyncPlan(
@@ -825,11 +835,64 @@ test("executeSyncPlan: pull with hash mismatch is refused and nothing is written
   assert.equal(files.has("a.md"), false);
 });
 
+test("executeSyncPlan: pull of a blob that isn't a geode object is refused, never written as content", async () => {
+  // Whatever is at this key, it did not come from a geode that wrote an envelope (#184): another
+  // tool's object, or a truncated one. Handing its bytes on as the file's content would write
+  // whatever it happens to be straight into the vault.
+  const reader = fakeReader({});
+  const { writer, files } = fakeLocalWriter();
+  const hash = await hashOf("hello");
+  const { storage } = fakeStorage({ [blobKeyFor(hash)]: "hello" });
+  const remote = snapshot(file("a.md", hash));
+
+  const { failures } = await executeSyncPlan(
+    [{ kind: "pull", path: "a.md" }],
+    empty,
+    reader,
+    writer,
+    storage,
+    1,
+    remote,
+  );
+
+  assert.deepEqual(failures, [
+    { path: "a.md", message: "stored blob is not in geode's object format" },
+  ]);
+  assert.equal(files.has("a.md"), false);
+});
+
+test("executeSyncPlan: pull of a blob a newer build wrote reports needing an update, not damage", async () => {
+  // An envelope this build can read the header of but not the payload of: the bucket was written
+  // by a geode that knows a suite this one doesn't, which at 0.3.0 is an encrypted vault. The fix
+  // is updating the plugin, so it must not be reported as corruption.
+  const reader = fakeReader({});
+  const { writer, files } = fakeLocalWriter();
+  const hash = await hashOf("hello");
+  const newerSuite = new Uint8Array([0x47, 0x45, 0x4f, 0x44, 0x01, 0x09, 0x68, 0x69]);
+  const { storage } = fakeStorage({ [blobKeyFor(hash)]: new TextDecoder().decode(newerSuite) });
+  const remote = snapshot(file("a.md", hash));
+
+  const { failures } = await executeSyncPlan(
+    [{ kind: "pull", path: "a.md" }],
+    empty,
+    reader,
+    writer,
+    storage,
+    1,
+    remote,
+  );
+
+  assert.deepEqual(failures, [
+    { path: "a.md", message: "stored blob is a format this version of geode can't read" },
+  ]);
+  assert.equal(files.has("a.md"), false);
+});
+
 test("executeSyncPlan: pull with truncated body is refused and nothing is written to disk", async () => {
   const reader = fakeReader({});
   const { writer, files } = fakeLocalWriter();
   const hash = await hashOf("hello");
-  const { storage } = fakeStorage({ [blobKeyFor(hash)]: "hel" });
+  const { storage } = fakeStorage({ [blobKeyFor(hash)]: wrapped("hel") });
   const remote = snapshot(file("a.md", hash));
 
   const { failures } = await executeSyncPlan(
@@ -860,7 +923,10 @@ test("executeSyncPlan: pull refuses when the manifest has moved on, rather than 
   const reader = fakeReader({});
   const { writer, files } = fakeLocalWriter();
   const hash = await hashOf("hello");
-  const { storage } = fakeStorage({ [blobKeyFor(hash)]: "hello", [MANIFEST_KEY]: "irrelevant" });
+  const { storage } = fakeStorage({
+    [blobKeyFor(hash)]: wrapped("hello"),
+    [MANIFEST_KEY]: "irrelevant",
+  });
   const remote = snapshot(file("a.md", hash));
 
   const { failures } = await executeSyncPlan(
@@ -884,7 +950,10 @@ test("executeSyncPlan: pull proceeds when the manifest etag still matches what t
   const reader = fakeReader({});
   const { writer, files } = fakeLocalWriter();
   const hash = await hashOf("hello");
-  const { storage } = fakeStorage({ [blobKeyFor(hash)]: "hello", [MANIFEST_KEY]: "current" });
+  const { storage } = fakeStorage({
+    [blobKeyFor(hash)]: wrapped("hello"),
+    [MANIFEST_KEY]: "current",
+  });
   const remote = snapshot(file("a.md", hash));
   const manifestHead = await storage.headObject(MANIFEST_KEY);
 
@@ -929,7 +998,7 @@ test("executeSyncPlan: a pull whose local file is edited while its payload stage
     };
   };
   const hash = await hashOf("remote a");
-  const { storage } = fakeStorage({ [blobKeyFor(hash)]: "remote a" });
+  const { storage } = fakeStorage({ [blobKeyFor(hash)]: wrapped("remote a") });
   const remote = snapshot(file("a.md", hash));
 
   const { failures, completed } = await executeSyncPlan(
@@ -987,7 +1056,10 @@ test("executeSyncPlan: a pull stages its payload, then checks cheapest-last, and
     };
   };
   const hash = await hashOf("hello");
-  const { storage } = fakeStorage({ [blobKeyFor(hash)]: "hello", [MANIFEST_KEY]: "current" });
+  const { storage } = fakeStorage({
+    [blobKeyFor(hash)]: wrapped("hello"),
+    [MANIFEST_KEY]: "current",
+  });
   const innerHead = storage.headObject;
   storage.headObject = async (key) => {
     if (key === MANIFEST_KEY) {
@@ -1003,6 +1075,7 @@ test("executeSyncPlan: a pull stages its payload, then checks cheapest-last, and
     size: "as snapshotted".length,
     mtime: 1,
     hash: await hashOf("as snapshotted"),
+    blob: await hashOf("as snapshotted"),
   });
 
   const { failures } = await executeSyncPlan(
@@ -1044,11 +1117,15 @@ test("executeSyncPlan: a pull whose local file is edited while the manifest chec
     size: "as snapshotted".length,
     mtime: 1,
     hash: await hashOf("as snapshotted"),
+    blob: await hashOf("as snapshotted"),
   });
   const { writer, files } = fakeLocalWriter();
   files.set("a.md", "as snapshotted");
   const hash = await hashOf("remote a");
-  const { storage } = fakeStorage({ [blobKeyFor(hash)]: "remote a", [MANIFEST_KEY]: "current" });
+  const { storage } = fakeStorage({
+    [blobKeyFor(hash)]: wrapped("remote a"),
+    [MANIFEST_KEY]: "current",
+  });
   const head = await storage.headObject(MANIFEST_KEY);
   const innerHead = storage.headObject;
   storage.headObject = async (key) => {
@@ -1091,11 +1168,15 @@ test("executeSyncPlan: a pull refused when the edit landing during the manifest 
     size: "hello world".length,
     mtime: 1,
     hash: await hashOf("hello world"),
+    blob: await hashOf("hello world"),
   });
   const { writer, files } = fakeLocalWriter();
   files.set("a.md", "hello world");
   const hash = await hashOf("remote a");
-  const { storage } = fakeStorage({ [blobKeyFor(hash)]: "remote a", [MANIFEST_KEY]: "current" });
+  const { storage } = fakeStorage({
+    [blobKeyFor(hash)]: wrapped("remote a"),
+    [MANIFEST_KEY]: "current",
+  });
   const head = await storage.headObject(MANIFEST_KEY);
   const innerHead = storage.headObject;
   storage.headObject = async (key) => {
@@ -1137,6 +1218,7 @@ test("executeSyncPlan: a pullDelete refused when the edit landing during the man
     size: "hello world".length,
     mtime: 1,
     hash: await hashOf("hello world"),
+    blob: await hashOf("hello world"),
   });
   const { writer, files } = fakeLocalWriter();
   files.set("a.md", "hello world");
@@ -1178,6 +1260,7 @@ test("executeSyncPlan: a pullDelete whose local file is edited while the manifes
     size: "as snapshotted".length,
     mtime: 1,
     hash: await hashOf("as snapshotted"),
+    blob: await hashOf("as snapshotted"),
   });
   const { writer, files } = fakeLocalWriter();
   files.set("a.md", "as snapshotted");
@@ -1238,7 +1321,7 @@ test("executeSyncPlan: a conflict fetches, stages and checks the manifest before
   };
   const remoteHash = await hashOf("remote edit");
   const { storage } = fakeStorage({
-    [blobKeyFor(remoteHash)]: "remote edit",
+    [blobKeyFor(remoteHash)]: wrapped("remote edit"),
     [MANIFEST_KEY]: "current",
   });
   const head = await storage.headObject(MANIFEST_KEY);
@@ -1299,7 +1382,10 @@ test("executeSyncPlan: a pull refused by manifest drift discards its staged payl
     };
   };
   const hash = await hashOf("hello");
-  const { storage } = fakeStorage({ [blobKeyFor(hash)]: "hello", [MANIFEST_KEY]: "irrelevant" });
+  const { storage } = fakeStorage({
+    [blobKeyFor(hash)]: wrapped("hello"),
+    [MANIFEST_KEY]: "irrelevant",
+  });
   const remote = snapshot(file("a.md", hash));
 
   const { failures } = await executeSyncPlan(
@@ -1338,7 +1424,10 @@ test("executeSyncPlan: a discard that itself fails never masks the failure that 
     };
   };
   const hash = await hashOf("hello");
-  const { storage } = fakeStorage({ [blobKeyFor(hash)]: "hello", [MANIFEST_KEY]: "irrelevant" });
+  const { storage } = fakeStorage({
+    [blobKeyFor(hash)]: wrapped("hello"),
+    [MANIFEST_KEY]: "irrelevant",
+  });
   const remote = snapshot(file("a.md", hash));
 
   const { failures } = await executeSyncPlan(
@@ -1368,7 +1457,7 @@ test("executeSyncPlan: a conflict restore refuses when the manifest has moved on
   files.set("a.md", "local edit");
   const hash = await hashOf("remote edit");
   const { storage, objects } = fakeStorage({
-    [blobKeyFor(hash)]: "remote edit",
+    [blobKeyFor(hash)]: wrapped("remote edit"),
     [MANIFEST_KEY]: "irrelevant",
   });
   const remote = snapshot(file("a.md", hash));
@@ -1398,7 +1487,7 @@ test("executeSyncPlan: conflict restore with hash mismatch is refused and nothin
   const reader = fakeReader({});
   const { writer, files } = fakeLocalWriter();
   const correctHash = await hashOf("correct content");
-  const { storage } = fakeStorage({ [blobKeyFor(correctHash)]: "wrong content" });
+  const { storage } = fakeStorage({ [blobKeyFor(correctHash)]: wrapped("wrong content") });
   const remote = snapshot(file("a.md", correctHash));
   const now = Date.parse("2026-07-14T10:00:00.000Z");
 
@@ -1430,7 +1519,7 @@ test("executeSyncPlan: conflict with hash mismatch on remote restore leaves the 
   const { writer, files } = fakeLocalWriter();
   files.set("a.md", "local edit");
   const correctHash = await hashOf("correct content");
-  const { storage, objects } = fakeStorage({ [blobKeyFor(correctHash)]: "wrong content" });
+  const { storage, objects } = fakeStorage({ [blobKeyFor(correctHash)]: wrapped("wrong content") });
   const remote = snapshot(file("a.md", correctHash));
   const now = Date.parse("2026-07-14T10:00:00.000Z");
 

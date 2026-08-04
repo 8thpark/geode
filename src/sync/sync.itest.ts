@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { DEFAULT_SETTINGS, type GeodeSettings } from "../settings/settings.ts";
+import { unwrapObject } from "../storage/envelope.ts";
 import { createS3Client, fetchTransport, type StorageClient } from "../storage/storage.ts";
 import { nodeVault } from "../vault/fs.ts";
 import {
@@ -85,6 +86,19 @@ async function readLocal(d: Device, path: string): Promise<string | undefined> {
   } catch {
     return undefined;
   }
+}
+
+// contentOf returns the payload inside a bucket object's envelope (#184), so a test asserting on
+// what the bucket holds compares content rather than framing. A body that is not a geode object at
+// all throws: every object these tests read was written by a sync moments earlier, so anything
+// else is the test itself being wrong about what it fetched.
+function contentOf(body: Uint8Array | null): string {
+  const opened = unwrapObject(body ?? new Uint8Array());
+  if (!opened.ok) {
+    throw new Error(`not a geode object: ${opened.reason}`);
+  }
+
+  return new TextDecoder().decode(opened.payload);
 }
 
 // hashOf returns the real content hash of text, for reading back the blob a given piece of
@@ -216,7 +230,7 @@ test("sync: a two device conflict pushes the copy so the other device pulls it c
     // not referencing content that doesn't exist.
     const remoteCopy = await storage.getObject(blobKeyFor(await hashOf("B side edit")));
     assert.equal(remoteCopy.ok, true);
-    assert.equal(new TextDecoder().decode(remoteCopy.body ?? new Uint8Array()), "B side edit");
+    assert.equal(contentOf(remoteCopy.body), "B side edit");
 
     // A syncs again and must complete cleanly, pulling the conflict copy rather than erroring on a
     // 404 for an object that never existed. This is exactly what broke before the fix.
@@ -263,7 +277,7 @@ test("sync: a file deleted independently on both devices converges without a con
     // manifest describes no files at all.
     const manifestBody = await storage.getObject(MANIFEST_KEY);
     assert.equal(manifestBody.ok, true);
-    const decoded = decodeSnapshot(new TextDecoder().decode(manifestBody.body ?? new Uint8Array()));
+    const decoded = decodeSnapshot(contentOf(manifestBody.body));
     assert.ok(decoded.ok);
     assert.deepEqual(decoded.snapshot.files, []);
   } finally {
@@ -324,8 +338,8 @@ test("sync: a stale state.json from an older build never deletes the vault on th
     // Both files' blobs reached the bucket rather than being wiped from it.
     const one = await storage.getObject(blobKeyFor(await hashOf("first note")));
     const two = await storage.getObject(blobKeyFor(await hashOf("second note")));
-    assert.equal(new TextDecoder().decode(one.body ?? new Uint8Array()), "first note");
-    assert.equal(new TextDecoder().decode(two.body ?? new Uint8Array()), "second note");
+    assert.equal(contentOf(one.body), "first note");
+    assert.equal(contentOf(two.body), "second note");
 
     // A second device now syncs clean and converges, proving the manifest the first sync uploaded
     // is real and the ancestor reset was a one time first sync affordance, not a lasting behaviour.
@@ -415,7 +429,7 @@ test("sync: a deleted manifest with unexplained blobs reports and proceeds, rath
     // B's own file still pushed and a manifest still landed; A's blob is untouched, unreferenced
     // but not destroyed.
     const kept = await storage.getObject(survivorKey);
-    assert.equal(new TextDecoder().decode(kept.body ?? new Uint8Array()), "a's note");
+    assert.equal(contentOf(kept.body), "a's note");
     assert.equal((await storage.getObject(blobKeyFor(await hashOf("b's note")))).ok, true);
     assert.equal((await storage.getObject(MANIFEST_KEY)).ok, true);
 
@@ -455,7 +469,7 @@ test("sync: a deleted manifest over locally diverged content reports and proceed
     // A's original content is untouched, unreferenced but not destroyed; B's edit still pushed
     // under its own path.
     const kept = await storage.getObject(survivorKey);
-    assert.equal(new TextDecoder().decode(kept.body ?? new Uint8Array()), "from A");
+    assert.equal(contentOf(kept.body), "from A");
     assert.equal(await readLocal(b, "ten/note.md"), "B's own edit");
     assert.equal((await storage.getObject(MANIFEST_KEY)).ok, true);
 
