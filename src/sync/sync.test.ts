@@ -303,6 +303,99 @@ test("syncOnce: a genuinely new bucket writes a sentinel too (#183)", async () =
   assert.equal(JSON.parse(unwrapped(written as string)).vaultId, "minted-id");
 });
 
+test("syncOnce: a pass with nothing to do writes nothing at all (#102)", async () => {
+  // Ancestor, local vault, and remote manifest all agree, so planSync produces no actions. Every
+  // manifest upload is a compare-and-swap, so a device with nothing to say is a device that can
+  // lose a race it had no reason to enter; under automatic sync (#93) two idle devices on a timer
+  // would trade "another device synced at the same time" errors over a vault nobody touched.
+  const ancestor: Snapshot = { files: [file("a.md", "h1")], vaultId: "known-id" };
+  const remoteManifest = wrapped(encodeSnapshot(snapshot(file("a.md", "h1"))));
+  const { storage, objects } = fakeStorage({
+    [MANIFEST_KEY]: remoteManifest,
+    [SENTINEL_KEY]: wrapped(encodeSentinel({ vaultId: "known-id", createdAt: 1000 })),
+  });
+  const written: string[] = [];
+  const inner = storage.putObject;
+  storage.putObject = async (key, body, condition) => {
+    written.push(key);
+    return inner(key, body, condition);
+  };
+  // "h1" and "xy" are both two bytes, so takeSnapshot stat-skips a.md and reuses the ancestor's
+  // hash: the local side is genuinely unchanged, not merely hashing to the same thing by luck.
+  const reader = fakeReader({ "a.md": "xy" });
+  const { writer } = fakeLocalWriter();
+
+  const outcome = await syncOnce(ancestor, reader, writer, storage, 1);
+
+  assert.ok(outcome.ok);
+  assert.equal(outcome.changeCount, 0);
+  assert.deepEqual(written, []);
+  // The bucket holds exactly what it held before the pass ran, down to the bytes.
+  assert.equal(objects.get(MANIFEST_KEY), remoteManifest);
+  // state.json still advances: skipping the remote write must never cost the next pass its
+  // stat-skip, or an idle sync would trade one wasted upload for a full rehash of the vault.
+  assert.deepEqual(outcome.snapshot.files, [file("a.md", "h1")]);
+  assert.equal(outcome.snapshot.vaultId, "known-id");
+});
+
+test("syncOnce: a first sync with nothing to do still writes the manifest (#102)", async () => {
+  // An empty vault against an empty bucket plans nothing, but the manifest existing is what tells
+  // every later pass this bucket has been synced before (see resolveVaultIdentity). Skipping it
+  // because the plan was empty would leave the bucket stuck in first sync state forever.
+  const reader = fakeReader({});
+  const { writer } = fakeLocalWriter();
+  const { storage, objects } = fakeStorage();
+
+  const outcome = await syncOnce(empty, reader, writer, storage, 1, () => "minted-id");
+
+  assert.ok(outcome.ok);
+  assert.equal(outcome.changeCount, 0);
+  assert.ok(objects.has(MANIFEST_KEY));
+  assert.ok(objects.has(SENTINEL_KEY));
+
+  // And the bootstrap really does end: the next pass reads a real manifest, is no longer a first
+  // sync, and goes back to writing nothing.
+  const written: string[] = [];
+  const inner = storage.putObject;
+  storage.putObject = async (key, body, condition) => {
+    written.push(key);
+    return inner(key, body, condition);
+  };
+
+  const again = await syncOnce(outcome.snapshot, reader, writer, storage, 1);
+
+  assert.ok(again.ok);
+  assert.deepEqual(written, []);
+});
+
+test("syncOnce: a pass with nothing to do still writes a missing sentinel (#102, #183)", async () => {
+  // The manifest exists but the sentinel does not: an upgrade from before sentinels existed, or a
+  // crash between the two writes of an otherwise successful first sync. Skipping the manifest write
+  // must not skip the repair. The sentinel write carries its own condition precisely so a bucket
+  // that lost one heals on the next pass, whether or not that pass had anything else to do.
+  const ancestor: Snapshot = { files: [file("a.md", "h1")] };
+  const { storage, objects } = fakeStorage({
+    [MANIFEST_KEY]: wrapped(encodeSnapshot(snapshot(file("a.md", "h1")))),
+  });
+  const written: string[] = [];
+  const inner = storage.putObject;
+  storage.putObject = async (key, body, condition) => {
+    written.push(key);
+    return inner(key, body, condition);
+  };
+  const reader = fakeReader({ "a.md": "xy" });
+  const { writer } = fakeLocalWriter();
+
+  const outcome = await syncOnce(ancestor, reader, writer, storage, 1, () => "minted-id");
+
+  assert.ok(outcome.ok);
+  assert.equal(outcome.changeCount, 0);
+  // The sentinel, and only the sentinel.
+  assert.deepEqual(written, [SENTINEL_KEY]);
+  assert.ok(objects.has(SENTINEL_KEY));
+  assert.equal(outcome.snapshot.vaultId, "minted-id");
+});
+
 test("syncOnce: a device pointed at a different vault's sentinel refuses (#183)", async () => {
   // This device already trusts a different vaultId (its state.json carries one from a prior
   // successful sync), and the bucket it is pointed at now belongs to a genuinely different vault.

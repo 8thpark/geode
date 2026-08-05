@@ -212,7 +212,8 @@ export function revertFailedPaths(
 // syncOnce runs one full sync pass over the injected local vault (reader/localWriter) and remote
 // bucket (storage): it snapshots the local vault against previous (the last synced snapshot),
 // reads the remote manifest, plans and executes the reconciliation, then uploads a manifest
-// reflecting what the bucket now actually holds. previous is passed in and the new
+// reflecting what the bucket now actually holds, unless it planned nothing and the manifest
+// already there already describes exactly that (#102). previous is passed in and the new
 // snapshot returned rather than read or written internally, so the caller owns persistence (the
 // plugin through state.json, tests through their own store) and this stays pure over its inputs.
 // now is injected so a conflict copy's name is deterministic under test. newVaultId mints the
@@ -328,34 +329,57 @@ export async function syncOnce(
   // the pass's pushes invisible to every other device (#87).
   const manifest = manifestAfterSync(remoteView, executed.completed, executed.pushedFiles);
   const final = adoptLiveStats(manifest, await takeSnapshot(reader, local));
-  const manifestBody = wrapObject(new TextEncoder().encode(encodeSnapshot(final)));
 
-  // The upload is conditional on the remote manifest still being exactly what this pass read at
-  // the start (or still absent, on a first sync). An unconditional put would last-writer-win
-  // against a device syncing at overlapping times, and the loser's pushes would then read as
-  // remote deletions on the winner's next sync: files silently deleted (#83). Losing the race
-  // fails this pass loudly instead; state.json doesn't advance, and the next sync re-reads the
-  // fresh manifest and reconciles both devices' work with nothing lost.
-  let condition: PutCondition = { kind: "ifAbsent" };
-  if (!remote.firstSync) {
-    condition = { kind: "ifMatch", etag: remote.etag };
-  }
-  const uploaded = await storage.putObject(MANIFEST_KEY, manifestBody, condition);
-  if (!uploaded.ok) {
-    if (uploaded.status === "conflict") {
+  // A pass that planned nothing did nothing, so the manifest it would write names exactly the
+  // paths, hashes, and blob addresses the one already in the bucket names. Only the per entry size
+  // and mtime differ, and no reader of a remote manifest consults either: diffSnapshots compares
+  // hashes, and the stat-skip that does read them reads state.json, never the bucket.
+  //
+  // Writing it anyway is not merely a wasted request (#102). Every manifest upload is a
+  // compare-and-swap, so a device with nothing to say is a device that can lose a race it had no
+  // reason to enter and report "another device synced at the same time" over a vault nobody
+  // touched. Under manual sync that costs one baffling click; under automatic sync (#93) it
+  // becomes a recurring error on a vault at rest, which is how a user learns to stop reading the
+  // status bar.
+  //
+  // A first sync uploads even having planned nothing: the manifest existing is what tells every
+  // later pass this bucket has been synced before (see resolveVaultIdentity), so an empty vault
+  // against an empty bucket must still write one or stay in first sync state forever. The sentinel
+  // write below is on its own condition for the same reason, and so still self heals a bucket that
+  // lost one, whether or not this pass had anything else to do.
+  //
+  // state.json is unaffected either way: the snapshot returned below still carries the fresh local
+  // stats adoptLiveStats just folded in, so skipping the remote write never costs the next pass
+  // its stat-skip.
+  if (actions.length > 0 || remote.firstSync) {
+    // The upload is conditional on the remote manifest still being exactly what this pass read at
+    // the start (or still absent, on a first sync). An unconditional put would last-writer-win
+    // against a device syncing at overlapping times, and the loser's pushes would then read as
+    // remote deletions on the winner's next sync: files silently deleted (#83). Losing the race
+    // fails this pass loudly instead; state.json doesn't advance, and the next sync re-reads the
+    // fresh manifest and reconciles both devices' work with nothing lost.
+    let condition: PutCondition = { kind: "ifAbsent" };
+    if (!remote.firstSync) {
+      condition = { kind: "ifMatch", etag: remote.etag };
+    }
+    const manifestBody = wrapObject(new TextEncoder().encode(encodeSnapshot(final)));
+    const uploaded = await storage.putObject(MANIFEST_KEY, manifestBody, condition);
+    if (!uploaded.ok) {
+      if (uploaded.status === "conflict") {
+        return {
+          ok: false,
+          message: "another device synced at the same time; sync again",
+          failures: executed.failures,
+          snapshot: null,
+        };
+      }
       return {
         ok: false,
-        message: "another device synced at the same time; sync again",
+        message: uploaded.message,
         failures: executed.failures,
         snapshot: null,
       };
     }
-    return {
-      ok: false,
-      message: uploaded.message,
-      failures: executed.failures,
-      snapshot: null,
-    };
   }
 
   // The manifest existing now is what every future pass uses to tell this bucket apart from one
