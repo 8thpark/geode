@@ -46,11 +46,17 @@ export function draftForDisplay(
 }
 
 // endpointFor returns the storage endpoint URL to use for the given settings.
+// The Amazon S3 endpoint interpolates the region into the URL authority, so a region carrying
+// authority delimiters (`x@attacker.example:443#`) would silently redirect signed vault requests
+// to another host. An unrecognised region yields "" rather than a host we never meant to talk to.
 export function endpointFor(settings: GeodeSettings): string {
   if (settings.provider === "r2") {
     return `https://${settings.accountId}.r2.cloudflarestorage.com`;
   }
   if (settings.provider === "s3") {
+    if (!isAwsRegion(settings.region)) {
+      return "";
+    }
     return `https://s3.${settings.region}.amazonaws.com`;
   }
 
@@ -66,9 +72,16 @@ export function hasConnectionConfig(settings: GeodeSettings): boolean {
     return settings.accountId !== "";
   }
   if (settings.provider === "s3") {
-    return settings.region !== "";
+    return isAwsRegion(settings.region);
   }
   return settings.endpoint !== "" && settings.region !== "";
+}
+
+// isAwsRegion reports whether region looks like an AWS region identifier ("us-east-1",
+// "eu-west-2", "us-gov-west-1"). Only the restricted alphabet matters for safety: it admits no
+// character that can terminate or redirect a URL authority.
+export function isAwsRegion(region: string): boolean {
+  return /^[a-z]{2}(-[a-z]+){1,2}-\d{1,2}$/.test(region);
 }
 
 // normalizeSettings returns a complete GeodeSettings from whatever loadData produced,

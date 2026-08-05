@@ -1,5 +1,5 @@
 import { AwsClient } from "aws4fetch";
-import { endpointFor, type GeodeSettings, regionFor } from "../settings/settings.ts";
+import { endpointFor, type GeodeSettings, isAwsRegion, regionFor } from "../settings/settings.ts";
 import { encodeComponent, encodeKey } from "./encode.ts";
 import { messageFor, statusForHttp } from "./errors.ts";
 import { parseListObjectsXml } from "./xml.ts";
@@ -248,6 +248,11 @@ function missingFieldFor(settings: GeodeSettings, secretAccessKey: string): stri
   }
   if (settings.region === "") {
     return "region";
+  }
+  // Amazon S3 builds its endpoint host from the region, so a region that isn't a real region
+  // identifier has no endpoint to sign against and is reported the same as a missing one.
+  if (settings.provider === "s3" && !isAwsRegion(settings.region)) {
+    return "region (for example us-east-1)";
   }
 
   return "";

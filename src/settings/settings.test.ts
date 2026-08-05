@@ -6,6 +6,7 @@ import {
   endpointFor,
   type GeodeSettings,
   hasConnectionConfig,
+  isAwsRegion,
   normalizeSettings,
   providerOptions,
   regionFor,
@@ -112,11 +113,47 @@ const endpointCases: { name: string; input: GeodeSettings; want: string }[] = [
     input: { ...DEFAULT_SETTINGS, provider: "custom", endpoint: "https://s3.example.com" },
     want: "https://s3.example.com",
   },
+  {
+    name: "amazon s3 with a region carrying URL authority delimiters yields no endpoint",
+    input: { ...DEFAULT_SETTINGS, provider: "s3", region: "x@attacker.example:443#" },
+    want: "",
+  },
+  {
+    name: "amazon s3 with a region carrying a path separator yields no endpoint",
+    input: { ...DEFAULT_SETTINGS, provider: "s3", region: "us-east-1/../evil" },
+    want: "",
+  },
+  {
+    name: "amazon s3 with an empty region yields no endpoint",
+    input: { ...DEFAULT_SETTINGS, provider: "s3", region: "" },
+    want: "",
+  },
 ];
 
 for (const { name, input, want } of endpointCases) {
   test(`endpointFor: ${name}`, () => {
     assert.strictEqual(endpointFor(input), want);
+  });
+}
+
+const awsRegionCases: { region: string; want: boolean }[] = [
+  { region: "us-east-1", want: true },
+  { region: "eu-west-2", want: true },
+  { region: "ap-southeast-1", want: true },
+  { region: "us-gov-west-1", want: true },
+  { region: "", want: false },
+  { region: "US-EAST-1", want: false },
+  { region: "us-east", want: false },
+  { region: "us-east-1 ", want: false },
+  { region: "x@attacker.example:443#", want: false },
+  { region: "us-east-1@attacker.example", want: false },
+  { region: "us-east-1/../evil", want: false },
+  { region: "us-east-1\nx", want: false },
+];
+
+for (const { region, want } of awsRegionCases) {
+  test(`isAwsRegion: ${JSON.stringify(region)} is ${want}`, () => {
+    assert.strictEqual(isAwsRegion(region), want);
   });
 }
 
@@ -231,6 +268,18 @@ const hasConnectionConfigCases: { name: string; input: GeodeSettings; want: bool
       secretId: "s",
     },
     want: true,
+  },
+  {
+    name: "s3 with a region that is not an AWS region identifier is incomplete",
+    input: {
+      ...DEFAULT_SETTINGS,
+      provider: "s3",
+      region: "x@attacker.example:443#",
+      bucket: "b",
+      accessKeyId: "a",
+      secretId: "s",
+    },
+    want: false,
   },
   {
     name: "custom missing region is incomplete",
