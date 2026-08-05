@@ -271,6 +271,26 @@ const endpointCases: { name: string; input: GeodeSettings; want: string }[] = [
     input: { ...DEFAULT_SETTINGS, provider: "custom", endpoint: "https://s3.example.com" },
     want: "https://s3.example.com",
   },
+  {
+    name: "custom with no scheme is prefixed with https",
+    input: { ...DEFAULT_SETTINGS, provider: "custom", endpoint: "s3.example.com" },
+    want: "https://s3.example.com",
+  },
+  {
+    name: "custom with uppercase scheme is left alone",
+    input: { ...DEFAULT_SETTINGS, provider: "custom", endpoint: "HTTP://s3.example.com" },
+    want: "HTTP://s3.example.com",
+  },
+  {
+    name: "custom with trailing slash is stripped",
+    input: { ...DEFAULT_SETTINGS, provider: "custom", endpoint: "https://s3.example.com/" },
+    want: "https://s3.example.com",
+  },
+  {
+    name: "custom with surrounding whitespace is trimmed",
+    input: { ...DEFAULT_SETTINGS, provider: "custom", endpoint: "  https://s3.example.com  " },
+    want: "https://s3.example.com",
+  },
 ];
 
 for (const { name, input, want } of endpointCases) {
