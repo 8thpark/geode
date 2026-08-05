@@ -1,3 +1,4 @@
+import { unwrapObject, wrapObject } from "../storage/envelope.ts";
 import type { ObjectMeta, PutCondition, StorageClient } from "../storage/storage.ts";
 import {
   byPath,
@@ -86,7 +87,23 @@ export async function readRemoteManifest(
   const fetched = await storage.getObject(MANIFEST_KEY);
 
   if (fetched.ok && fetched.body !== null) {
-    const decoded = decodeSnapshot(new TextDecoder().decode(fetched.body));
+    // The envelope is read before the JSON inside it, and its two unsupported reasons report the
+    // same thing an unknown manifest version does: this bucket was written by a build that knows
+    // something this one doesn't, so update rather than start over. That is the whole reason the
+    // envelope carries a version and a suite at all (#184): at 0.3.0 the payload here is
+    // ciphertext, and a build with no idea how to decrypt it must say so instead of handing bytes
+    // to a JSON parser and reporting the vault as corrupt.
+    const opened = unwrapObject(fetched.body);
+    if (!opened.ok) {
+      if (opened.reason === "corrupt") {
+        return { ok: false, message: "remote manifest is corrupt" };
+      }
+      return {
+        ok: false,
+        message: "remote manifest is a format this version of geode can't read",
+      };
+    }
+    const decoded = decodeSnapshot(new TextDecoder().decode(opened.payload));
     if (!decoded.ok) {
       if (decoded.reason === "unsupportedVersion") {
         return {
@@ -137,7 +154,17 @@ export async function readSentinel(
   const fetched = await storage.getObject(SENTINEL_KEY);
 
   if (fetched.ok && fetched.body !== null) {
-    const decoded = decodeSentinel(new TextDecoder().decode(fetched.body));
+    const opened = unwrapObject(fetched.body);
+    if (!opened.ok) {
+      if (opened.reason === "corrupt") {
+        return { ok: false, message: "remote sentinel is corrupt" };
+      }
+      return {
+        ok: false,
+        message: "remote sentinel is a format this version of geode can't read",
+      };
+    }
+    const decoded = decodeSentinel(new TextDecoder().decode(opened.payload));
     if (!decoded.ok) {
       if (decoded.reason === "unsupportedVersion") {
         return {
@@ -236,9 +263,9 @@ export async function syncOnce(
   // A missing manifest usually means a fresh bucket, but not always: a lifecycle rule, manual
   // cleanup, or partial restore can remove the manifest while blob objects survive (#109). Unlike
   // the plaintext path keyed layout this replaced, that survival is not automatically a hazard: a
-  // blob's key is its own content hash, so a survivor whose hash matches something the local
-  // vault still holds needs no recovery at all, the ordinary push below finds it already there
-  // (one HEAD, no re-upload) and the manifest this pass writes describes it correctly. What
+  // blob's key is an address derived from its own content, so a survivor at an address the local
+  // vault still resolves to needs no recovery at all, the ordinary push below finds it already
+  // there (one HEAD, no re-upload) and the manifest this pass writes describes it correctly. What
   // remains dangerous is a survivor whose hash matches nothing local: unexplained content this
   // device cannot account for, most plausibly a different vault's data that once shared this
   // bucket, or the very race #109 first named.
@@ -301,7 +328,7 @@ export async function syncOnce(
   // the pass's pushes invisible to every other device (#87).
   const manifest = manifestAfterSync(remoteView, executed.completed, executed.pushedFiles);
   const final = adoptLiveStats(manifest, await takeSnapshot(reader, local));
-  const manifestBody = new TextEncoder().encode(encodeSnapshot(final));
+  const manifestBody = wrapObject(new TextEncoder().encode(encodeSnapshot(final)));
 
   // The upload is conditional on the remote manifest still being exactly what this pass read at
   // the start (or still absent, on a first sync). An unconditional put would last-writer-win
@@ -338,8 +365,8 @@ export async function syncOnce(
   // loser's pass fails here rather than overwriting a vaultId another device already committed to,
   // and its retry adopts whichever one actually won.
   if (sentinelResult.sentinel === null) {
-    const sentinelBody = new TextEncoder().encode(
-      encodeSentinel({ vaultId: identity.vaultId, createdAt: now }),
+    const sentinelBody = wrapObject(
+      new TextEncoder().encode(encodeSentinel({ vaultId: identity.vaultId, createdAt: now })),
     );
     const sentinelUploaded = await storage.putObject(SENTINEL_KEY, sentinelBody, {
       kind: "ifAbsent",
@@ -378,21 +405,23 @@ export async function syncOnce(
   };
 }
 
-// unexplainedBlobs returns the blob keys a first sync cannot account for: survivors whose content
-// hash matches nothing in the local vault, so nothing this pass is about to do would ever
-// reference them. Every other survivor, whose hash a local file already carries, needs no special
+// unexplainedBlobs returns the blob keys a first sync cannot account for: survivors sitting at an
+// address no local file resolves to, so nothing this pass is about to do would ever reference
+// them. Every other survivor, at an address a local file already carries, needs no special
 // handling: the ordinary push below finds it already there and folds it into the manifest for
-// free. Exported for its tests; syncOnce is the only production caller.
+// free. The comparison is against addresses rather than content hashes because an address is what
+// a key is, and the two only coincide while the vault is unencrypted (#184). Exported for its
+// tests; syncOnce is the only production caller.
 export function unexplainedBlobs(objects: ObjectMeta[], local: Snapshot): string[] {
-  const localHashes = new Set<string>();
+  const localAddresses = new Set<string>();
   for (const entry of local.files) {
-    localHashes.add(entry.hash);
+    localAddresses.add(entry.blob);
   }
 
   const unexplained: string[] = [];
   for (const object of objects) {
-    const hash = object.key.slice(BLOB_PREFIX.length);
-    if (!localHashes.has(hash)) {
+    const address = object.key.slice(BLOB_PREFIX.length);
+    if (!localAddresses.has(address)) {
       unexplained.push(object.key);
     }
   }

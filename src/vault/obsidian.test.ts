@@ -386,7 +386,7 @@ test("createObsidianStore: state that parses but is the wrong shape reads back a
 });
 
 test("createObsidianStore: a well shaped snapshot round-trips through write and read", async () => {
-  const snapshot: Snapshot = { files: [{ path: "a.md", size: 1, mtime: 2, hash: "h" }] };
+  const snapshot: Snapshot = { files: [{ path: "a.md", size: 1, mtime: 2, hash: "h", blob: "h" }] };
   const store = createObsidianStore(fakeAdapter(), STATE_PATH, DEFAULT_SETTINGS);
 
   await store.write(snapshot);
@@ -404,7 +404,7 @@ test("createObsidianStore: an interrupted write leaves the previous state.json u
   // the next sync to misread as a corrupt or empty ancestor.
   const previous = JSON.stringify({
     version: 2,
-    files: [{ path: "a.md", size: 1, mtime: 2, hash: "h" }],
+    files: [{ path: "a.md", size: 1, mtime: 2, hash: "h", blob: "h" }],
   });
   const adapter = fakeAdapter({ [STATE_PATH]: previous });
   adapter.rename = async () => {
@@ -420,7 +420,7 @@ test("createObsidianStore: an interrupted write leaves the previous state.json u
 test("createObsidianStore: a fingerprint mismatch reads back as empty", async () => {
   const adapter = fakeAdapter();
   const store1 = createObsidianStore(adapter, STATE_PATH, DEFAULT_SETTINGS);
-  const snapshot: Snapshot = { files: [{ path: "a.md", size: 1, mtime: 2, hash: "h" }] };
+  const snapshot: Snapshot = { files: [{ path: "a.md", size: 1, mtime: 2, hash: "h", blob: "h" }] };
 
   await store1.write(snapshot);
 
@@ -435,7 +435,7 @@ test("createObsidianStore: repointing at a bucket prefix reads back as empty (#1
   // own sentinel. Carrying the old ancestor across would diff this vault against a stranger's.
   const adapter = fakeAdapter();
   const store1 = createObsidianStore(adapter, STATE_PATH, DEFAULT_SETTINGS);
-  const snapshot: Snapshot = { files: [{ path: "a.md", size: 1, mtime: 2, hash: "h" }] };
+  const snapshot: Snapshot = { files: [{ path: "a.md", size: 1, mtime: 2, hash: "h", blob: "h" }] };
 
   await store1.write(snapshot);
 
@@ -459,7 +459,7 @@ test("fingerprintSettings: a prefix only written differently is the same target 
 test("createObsidianStore: rotating credentials keeps state, it does not change the target", async () => {
   const adapter = fakeAdapter();
   const store1 = createObsidianStore(adapter, STATE_PATH, DEFAULT_SETTINGS);
-  const snapshot: Snapshot = { files: [{ path: "a.md", size: 1, mtime: 2, hash: "h" }] };
+  const snapshot: Snapshot = { files: [{ path: "a.md", size: 1, mtime: 2, hash: "h", blob: "h" }] };
 
   await store1.write(snapshot);
 
@@ -479,7 +479,7 @@ test("createObsidianStore: a pre-marker state file with no version field and no 
   // State written by a build before the format version marker existed (#91) is version 1 by
   // definition; an upgrader's ancestor must survive the upgrade, not silently reset.
   // With fingerprinting added, it does NOT survive unless it has a fingerprint matching current. So it reads back as empty.
-  const files = [{ path: "a.md", size: 1, mtime: 2, hash: "h" }];
+  const files = [{ path: "a.md", size: 1, mtime: 2, hash: "h", blob: "h" }];
   const store = createObsidianStore(
     fakeAdapter({ [STATE_PATH]: JSON.stringify({ files }) }),
     STATE_PATH,
