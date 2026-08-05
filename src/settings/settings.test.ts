@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  bucketFor,
   type ConnectionStatus,
   canSave,
   DEFAULT_SETTINGS,
@@ -267,6 +268,11 @@ const endpointCases: { name: string; input: GeodeSettings; want: string }[] = [
     want: "https://abc123.r2.cloudflarestorage.com",
   },
   {
+    name: "r2 with surrounding whitespace on accountId is trimmed",
+    input: { ...DEFAULT_SETTINGS, accountId: "  abc123  " },
+    want: "https://abc123.r2.cloudflarestorage.com",
+  },
+  {
     name: "custom",
     input: { ...DEFAULT_SETTINGS, provider: "custom", endpoint: "https://s3.example.com" },
     want: "https://s3.example.com",
@@ -310,11 +316,40 @@ const regionCases: { name: string; input: GeodeSettings; want: string }[] = [
     input: { ...DEFAULT_SETTINGS, provider: "custom", region: "eu-west-2" },
     want: "eu-west-2",
   },
+  {
+    name: "custom with surrounding whitespace on region is trimmed",
+    input: { ...DEFAULT_SETTINGS, provider: "custom", region: "  eu-west-2  " },
+    want: "eu-west-2",
+  },
 ];
 
 for (const { name, input, want } of regionCases) {
   test(`regionFor: ${name}`, () => {
     assert.strictEqual(regionFor(input), want);
+  });
+}
+
+const bucketCases: { name: string; input: GeodeSettings; want: string }[] = [
+  {
+    name: "a plain bucket is left alone",
+    input: { ...DEFAULT_SETTINGS, bucket: "my-vault" },
+    want: "my-vault",
+  },
+  {
+    name: "surrounding whitespace is trimmed",
+    input: { ...DEFAULT_SETTINGS, bucket: "  my-vault  " },
+    want: "my-vault",
+  },
+  {
+    name: "a leading space no longer survives into the connection",
+    input: { ...DEFAULT_SETTINGS, bucket: " my-vault" },
+    want: "my-vault",
+  },
+];
+
+for (const { name, input, want } of bucketCases) {
+  test(`bucketFor: ${name}`, () => {
+    assert.strictEqual(bucketFor(input), want);
   });
 }
 

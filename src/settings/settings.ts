@@ -96,10 +96,16 @@ export function normalizeEndpoint(endpoint: string): string {
   return normalized;
 }
 
+// bucketFor returns the bucket name a connection actually uses, with surrounding whitespace
+// removed so an accidental leading space cannot turn a valid bucket into a 400.
+export function bucketFor(settings: GeodeSettings): string {
+  return settings.bucket.trim();
+}
+
 // endpointFor returns the storage endpoint URL to use for the given settings.
 export function endpointFor(settings: GeodeSettings): string {
   if (settings.provider === "r2") {
-    return `https://${settings.accountId}.r2.cloudflarestorage.com`;
+    return `https://${settings.accountId.trim()}.r2.cloudflarestorage.com`;
   }
 
   return normalizeEndpoint(settings.endpoint);
@@ -107,13 +113,17 @@ export function endpointFor(settings: GeodeSettings): string {
 
 // hasConnectionConfig reports whether settings have enough filled in to attempt a connection.
 export function hasConnectionConfig(settings: GeodeSettings): boolean {
-  if (settings.bucket === "" || settings.accessKeyId === "" || settings.secretId === "") {
+  if (
+    bucketFor(settings) === "" ||
+    settings.accessKeyId.trim() === "" ||
+    settings.secretId === ""
+  ) {
     return false;
   }
   if (settings.provider === "r2") {
-    return settings.accountId !== "";
+    return settings.accountId.trim() !== "";
   }
-  return settings.endpoint !== "" && settings.region !== "";
+  return settings.endpoint.trim() !== "" && settings.region.trim() !== "";
 }
 
 // isCurrentConnectionResult reports whether a completed test still describes the current draft.
@@ -206,12 +216,13 @@ export function providerOr(v: unknown): "r2" | "custom" {
 
 // regionFor returns the signing region to use for the given settings. R2 always signs with
 // "auto" regardless of what a user might type, so custom is the only provider that needs one.
+// Whitespace is trimmed so an accidental space cannot produce a signing region S3 rejects.
 export function regionFor(settings: GeodeSettings): string {
   if (settings.provider === "r2") {
     return "auto";
   }
 
-  return settings.region;
+  return settings.region.trim();
 }
 
 // saveDraft persists a copy of draft when the current connection state allows it.

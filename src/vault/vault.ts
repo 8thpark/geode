@@ -1,4 +1,5 @@
 import {
+  bucketFor,
   endpointFor,
   type GeodeSettings,
   normalizePrefix,
@@ -337,10 +338,10 @@ export function encodeSnapshot(snapshot: Snapshot): string {
 export function fingerprintSettings(settings: GeodeSettings): string {
   return JSON.stringify({
     provider: settings.provider,
-    accountId: settings.accountId,
+    accountId: settings.accountId.trim(),
     endpoint: endpointFor(settings),
     region: regionFor(settings),
-    bucket: settings.bucket,
+    bucket: bucketFor(settings),
     prefix: normalizePrefix(settings.prefix),
   });
 }
