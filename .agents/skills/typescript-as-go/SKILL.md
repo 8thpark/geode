@@ -6,7 +6,7 @@ compatibility: Designed for Claude Code (or similar products)
 metadata:
   author: revett
   repo: https://github.com/revett/typescript-as-go
-  version: 0.5.1
+  version: 0.6.0
 ---
 
 # TypeScript As Go
@@ -68,7 +68,7 @@ writing Typescript, as well as the strict file layout rules.
     cannot derive from the code rather than restating what the code already says; a tuned
     constant's comment says why the value is what it is, since a number cannot justify itself,
     and any rationale too long to fit belongs in the project's documentation, linked from the
-    comment by a bare path (`see docs/syncing.md`)
+    comment by a bare path (`see docs/architecture.md`)
 19. Table driven tests with `node:test` and `node:assert/strict` and no test framework dependency,
     each test sitting beside the code it covers as `name.test.ts`, mirroring Go's `_test.go` pattern
 20. Reach for a small, focused dependency when hand rolling something fiddly to get right (request
