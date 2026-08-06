@@ -16,7 +16,7 @@ import {
 } from "./vault.ts";
 
 // fakeReader returns a Reader backed by an in-memory map, and a counter of how many times
-// readFile was called , used to prove the stat gate skips rereading unchanged files.
+// readFile was called, used to prove the stat gate skips rereading unchanged files.
 function fakeReader(files: Record<string, { content: string; mtime: number }>): {
   reader: Reader;
   readCount: () => number;

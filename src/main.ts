@@ -234,7 +234,7 @@ export default class GeodePlugin extends Plugin {
         this.schedule = noteFocus(this.schedule, false, Date.now());
       });
       // Reconnecting only ends a backoff whose premise has visibly expired, and is never proof
-      // anything works..onLine.
+      // anything works. Nothing gates on navigator.onLine, which reports far less than it seems.
       this.registerDomEvent(window, "online", () => {
         this.schedule = noteResumed(this.schedule);
       });
