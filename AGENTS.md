@@ -36,6 +36,15 @@ Current documentation:
 - `CONTRIBUTING.md`
 - `docs/*.md`
 
+The `docs/*.md` directory is a flat list of files, using the `TOPIC_PAGE-TITLE.md` filename format,
+e.g. `technical_object-format.md`.
+
+Documentation within `docs/*.md` is written in Markdown, in a casual, conversational tone, with the
+end user in mind, and with the goal of being easy to understand and follow. It should start with a
+TL;DR style introduction, followed by a table of contents, and then the content of the page. Pages
+should start simple in complexity, and then build in to more complex and detailed sections as
+needed. Be concise and to the point, and documentation across the project should feel consistent.
+
 ## Remember
 
 Less is always more, simple is always better, boring is best, avoid the magic! Whilst still meeting
