@@ -8,22 +8,24 @@ import {
   Setting,
 } from "obsidian";
 import type GeodePlugin from "../main";
+import { obsidianTransport } from "../storage/obsidian";
 import { testConnection } from "../storage/storage";
 import {
+  type ConnectionStatus,
+  canSave,
   draftForDisplay,
   type GeodeSettings,
   hasConnectionConfig,
+  isCurrentConnectionResult,
+  prefixError,
   providerOptions,
   providerOr,
+  saveDraft,
   settingsEqual,
 } from "./settings";
 
 // DEBUG_LABEL_WIDTH is the column width debug info labels are padded to, so values line up.
 const DEBUG_LABEL_WIDTH = 12;
-
-// ConnectionStatus is the last known state of a Test Connection check. It lives only in memory;
-// it is never persisted and resets to "unknown" whenever the draft changes.
-type ConnectionStatus = "unknown" | "checking" | "ok" | "error";
 
 // renderSettingsTab draws every section into containerEl from the tab's current draft state.
 export function renderSettingsTab(tab: GeodeSettingTab, containerEl: HTMLElement): void {
@@ -83,9 +85,21 @@ function flashButtonText(button: ButtonComponent, original: string, feedback: st
 // onFieldChanged clears any stale connection status and updates the actions row without
 // redrawing the whole tab, so text inputs never lose focus mid keystroke. Whether the draft
 // counts as dirty is derived by comparing it to saved settings, not tracked here.
+//
+// A value the storage layer would refuse outright (a malformed prefix) is reported as a connection
+// error rather than through a field of its own: that reuses the one status line and the Save
+// gating already keyed to it, so an unusable draft can't be saved and left to fail at sync time
+// instead, and no new UI has to exist to say so.
 function onFieldChanged(tab: GeodeSettingTab): void {
   tab.connectionStatus = "unknown";
   tab.connectionMessage = "";
+
+  const badPrefix = prefixError(tab.draft.prefix);
+  if (badPrefix !== "") {
+    tab.connectionStatus = "error";
+    tab.connectionMessage = badPrefix;
+  }
+
   tab.refreshActionsUI();
 }
 
@@ -303,6 +317,19 @@ function renderStorageSection(tab: GeodeSettingTab, containerEl: HTMLElement): v
     );
 
   new Setting(card)
+    .setName("Prefix")
+    .setDesc("Optional folder inside the bucket to sync into. Empty syncs to the bucket root.")
+    .addText((text) =>
+      text
+        .setPlaceholder("vaults/personal")
+        .setValue(tab.draft.prefix)
+        .onChange((value) => {
+          tab.draft.prefix = value;
+          onFieldChanged(tab);
+        }),
+    );
+
+  new Setting(card)
     .setName("Access key ID")
     .setDesc("The access key ID for your storage credentials.")
     .addText((text) =>
@@ -434,7 +461,7 @@ export class GeodeSettingTab extends PluginSettingTab {
   // dirty reminder never inherits the connection status colour.
   refreshActionsUI(): void {
     if (this.saveButtonEl !== null) {
-      this.saveButtonEl.setDisabled(!this.dirty);
+      this.saveButtonEl.setDisabled(!canSave(this.dirty, this.connectionStatus));
     }
 
     if (this.statusDotEl !== null) {
@@ -468,35 +495,34 @@ export class GeodeSettingTab extends PluginSettingTab {
   }
 
   async save(): Promise<void> {
-    this.plugin.logger.info(`saving settings (provider=${this.draft.provider})`);
-    this.plugin.settings = { ...this.draft };
-    await this.plugin.saveSettings();
+    await saveDraft(this.plugin, this.draft, this.connectionStatus);
     this.refreshActionsUI();
   }
 
   async checkConnection(): Promise<void> {
     this.checkId += 1;
     const id = this.checkId;
+    const testedSettings = { ...this.draft };
 
     this.plugin.logger.info(
-      `testing connection (provider=${this.draft.provider}, bucket=${this.draft.bucket})`,
+      `testing connection (provider=${testedSettings.provider}, bucket=${testedSettings.bucket})`,
     );
     this.connectionStatus = "checking";
     this.connectionMessage = "";
     this.refreshActionsUI();
 
-    const rawSecret = this.app.secretStorage.getSecret(this.draft.secretId);
+    const rawSecret = this.app.secretStorage.getSecret(testedSettings.secretId);
     let secretAccessKey = "";
     if (rawSecret !== null) {
       secretAccessKey = rawSecret;
     }
     if (secretAccessKey === "") {
-      this.plugin.logger.warn(`no secret found for ID "${this.draft.secretId}"`);
+      this.plugin.logger.warn(`no secret found for ID "${testedSettings.secretId}"`);
     }
 
-    const result = await testConnection(this.draft, secretAccessKey);
+    const result = await testConnection(testedSettings, secretAccessKey, obsidianTransport);
 
-    if (id !== this.checkId) {
+    if (!isCurrentConnectionResult(id, this.checkId, testedSettings, this.draft)) {
       return;
     }
 

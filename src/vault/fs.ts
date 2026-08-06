@@ -7,6 +7,7 @@ import { existsSync, readdirSync, statSync } from "node:fs";
 import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { DataAdapter, TFile, Vault } from "obsidian";
+import { normalizePath } from "./vault.ts";
 
 // nodeVault returns a Vault and DataAdapter both backed by the same temp directory root. Only the
 // subset of methods obsidian.ts actually calls is implemented, then cast to the full Obsidian
@@ -62,7 +63,8 @@ export function nodeVault(root: string): { vault: Vault; adapter: DataAdapter } 
       if (!existsSync(abs(root, path))) {
         return null;
       }
-      return { path } as unknown as TFile;
+      const s = statSync(abs(root, path));
+      return { path, stat: { size: s.size, mtime: s.mtimeMs } } as unknown as TFile;
     },
     readBinary: async (file: TFile): Promise<ArrayBuffer> => {
       const buf = await readFile(abs(root, file.path));
@@ -93,7 +95,7 @@ function walk(root: string, dir = ""): string[] {
       out.push(...walk(root, rel));
       continue;
     }
-    out.push(rel);
+    out.push(normalizePath(rel));
   }
   return out;
 }

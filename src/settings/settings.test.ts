@@ -1,17 +1,167 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  type ConnectionStatus,
+  canSave,
   DEFAULT_SETTINGS,
   draftForDisplay,
   endpointFor,
   type GeodeSettings,
   hasConnectionConfig,
   isAwsRegion,
+  isCurrentConnectionResult,
+  normalizePrefix,
   normalizeSettings,
+  prefixError,
   providerOptions,
   regionFor,
+  saveDraft,
   settingsEqual,
 } from "./settings.ts";
+
+const canSaveCases: {
+  name: string;
+  dirty: boolean;
+  connectionStatus: ConnectionStatus;
+  want: boolean;
+}[] = [
+  {
+    name: "dirty draft with no test result is saveable",
+    dirty: true,
+    connectionStatus: "unknown",
+    want: true,
+  },
+  {
+    name: "dirty draft after a successful test is saveable",
+    dirty: true,
+    connectionStatus: "ok",
+    want: true,
+  },
+  {
+    name: "queued save is blocked while a connection test is in flight",
+    dirty: true,
+    connectionStatus: "checking",
+    want: false,
+  },
+  {
+    name: "queued save is blocked when the connection test fails first",
+    dirty: true,
+    connectionStatus: "error",
+    want: false,
+  },
+  {
+    name: "clean draft with no test result is not saveable",
+    dirty: false,
+    connectionStatus: "unknown",
+    want: false,
+  },
+  {
+    name: "clean draft during a connection test is not saveable",
+    dirty: false,
+    connectionStatus: "checking",
+    want: false,
+  },
+  {
+    name: "clean draft after a successful test is not saveable",
+    dirty: false,
+    connectionStatus: "ok",
+    want: false,
+  },
+  {
+    name: "clean draft after a failed test is not saveable",
+    dirty: false,
+    connectionStatus: "error",
+    want: false,
+  },
+];
+
+for (const { name, dirty, connectionStatus, want } of canSaveCases) {
+  test(`canSave: ${name}`, () => {
+    assert.strictEqual(canSave(dirty, connectionStatus), want);
+  });
+}
+
+test("canSave: editing after a failed test restores unknown-state eligibility", () => {
+  assert.strictEqual(canSave(true, "checking"), false);
+  assert.strictEqual(canSave(true, "error"), false);
+  assert.strictEqual(canSave(true, "unknown"), true);
+});
+
+test("isCurrentConnectionResult: an edit invalidates an in-flight result", () => {
+  const testedSettings = { ...DEFAULT_SETTINGS, bucket: "before-edit" };
+  const currentSettings = { ...testedSettings, bucket: "after-edit" };
+
+  assert.strictEqual(isCurrentConnectionResult(1, 1, testedSettings, currentSettings), false);
+  assert.strictEqual(canSave(true, "unknown"), true);
+});
+
+test("isCurrentConnectionResult: only the latest unchanged draft accepts a result", () => {
+  const testedSettings = { ...DEFAULT_SETTINGS, bucket: "unchanged" };
+
+  assert.strictEqual(isCurrentConnectionResult(2, 2, testedSettings, testedSettings), true);
+  assert.strictEqual(isCurrentConnectionResult(1, 2, testedSettings, testedSettings), false);
+});
+
+for (const connectionStatus of ["checking", "error"] as const) {
+  test(`saveDraft: ${connectionStatus} result blocks a queued save`, async () => {
+    const savedSettings = { ...DEFAULT_SETTINGS, bucket: "saved" };
+    let logCalls = 0;
+    let saveCalls = 0;
+    const target = {
+      logger: {
+        info: () => {
+          logCalls += 1;
+        },
+      },
+      settings: savedSettings,
+      saveSettings: async () => {
+        saveCalls += 1;
+      },
+    };
+
+    await saveDraft(target, { ...savedSettings, bucket: "draft" }, connectionStatus);
+
+    assert.deepStrictEqual(target.settings, savedSettings);
+    assert.strictEqual(logCalls, 0);
+    assert.strictEqual(saveCalls, 0);
+  });
+}
+
+for (const connectionStatus of ["unknown", "ok"] as const) {
+  test(`saveDraft: ${connectionStatus} state persists a dirty draft`, async () => {
+    const savedSettings = { ...DEFAULT_SETTINGS, bucket: "saved" };
+    let saveCalls = 0;
+    const target = {
+      logger: { info: () => {} },
+      settings: savedSettings,
+      saveSettings: async () => {
+        saveCalls += 1;
+      },
+    };
+
+    await saveDraft(target, { ...savedSettings, bucket: "draft" }, connectionStatus);
+
+    assert.strictEqual(target.settings.bucket, "draft");
+    assert.strictEqual(saveCalls, 1);
+  });
+}
+
+test("saveDraft: clean unknown state does not persist", async () => {
+  const savedSettings = { ...DEFAULT_SETTINGS, bucket: "saved" };
+  let saveCalls = 0;
+  const target = {
+    logger: { info: () => {} },
+    settings: savedSettings,
+    saveSettings: async () => {
+      saveCalls += 1;
+    },
+  };
+
+  await saveDraft(target, { ...savedSettings }, "unknown");
+
+  assert.deepStrictEqual(target.settings, savedSettings);
+  assert.strictEqual(saveCalls, 0);
+});
 
 const normalizeCases: { name: string; input: unknown; want: GeodeSettings }[] = [
   {
@@ -84,6 +234,21 @@ const normalizeCases: { name: string; input: unknown; want: GeodeSettings }[] = 
     input: { secretId: "foo" },
     want: { ...DEFAULT_SETTINGS, secretId: "foo" },
   },
+  {
+    name: "prefix missing defaults to the bucket root",
+    input: {},
+    want: DEFAULT_SETTINGS,
+  },
+  {
+    name: "prefix non-string coerced to the bucket root",
+    input: { prefix: 42 },
+    want: DEFAULT_SETTINGS,
+  },
+  {
+    name: "prefix is stored exactly as typed, not canonicalized",
+    input: { prefix: "/vaults/personal/" },
+    want: { ...DEFAULT_SETTINGS, prefix: "/vaults/personal/" },
+  },
 ];
 
 for (const { name, input, want } of normalizeCases) {
@@ -111,6 +276,26 @@ const endpointCases: { name: string; input: GeodeSettings; want: string }[] = [
   {
     name: "custom",
     input: { ...DEFAULT_SETTINGS, provider: "custom", endpoint: "https://s3.example.com" },
+    want: "https://s3.example.com",
+  },
+  {
+    name: "custom with no scheme is prefixed with https",
+    input: { ...DEFAULT_SETTINGS, provider: "custom", endpoint: "s3.example.com" },
+    want: "https://s3.example.com",
+  },
+  {
+    name: "custom with uppercase scheme is left alone",
+    input: { ...DEFAULT_SETTINGS, provider: "custom", endpoint: "HTTP://s3.example.com" },
+    want: "HTTP://s3.example.com",
+  },
+  {
+    name: "custom with trailing slash is stripped",
+    input: { ...DEFAULT_SETTINGS, provider: "custom", endpoint: "https://s3.example.com/" },
+    want: "https://s3.example.com",
+  },
+  {
+    name: "custom with surrounding whitespace is trimmed",
+    input: { ...DEFAULT_SETTINGS, provider: "custom", endpoint: "  https://s3.example.com  " },
     want: "https://s3.example.com",
   },
   {
@@ -176,6 +361,80 @@ for (const { name, input, want } of regionCases) {
   });
 }
 
+const normalizePrefixCases: { name: string; input: string; want: string }[] = [
+  { name: "empty is the bucket root", input: "", want: "" },
+  { name: "whitespace only is the bucket root", input: "   ", want: "" },
+  { name: "a plain path is left alone", input: "vaults/personal", want: "vaults/personal" },
+  { name: "a leading slash is dropped", input: "/vaults/personal", want: "vaults/personal" },
+  { name: "a trailing slash is dropped", input: "vaults/personal/", want: "vaults/personal" },
+  { name: "surrounding whitespace is dropped", input: "  vaults  ", want: "vaults" },
+  { name: "repeated slashes collapse", input: "vaults//personal", want: "vaults/personal" },
+  { name: "slashes alone are the bucket root", input: "///", want: "" },
+  { name: "a single segment survives", input: "vaults", want: "vaults" },
+  { name: "interior spaces are content, not padding", input: "my vaults", want: "my vaults" },
+];
+
+for (const { name, input, want } of normalizePrefixCases) {
+  test(`normalizePrefix: ${name}`, () => {
+    assert.strictEqual(normalizePrefix(input), want);
+  });
+}
+
+test("normalizePrefix: canonicalizing an already canonical prefix changes nothing", () => {
+  // The prefix is canonicalized at every point of use rather than on save, so it runs over its own
+  // output constantly; a second pass that moved it would make the key an object lives at depend on
+  // how many times the value had been round tripped.
+  for (const { input } of normalizePrefixCases) {
+    const once = normalizePrefix(input);
+
+    assert.strictEqual(normalizePrefix(once), once, input);
+  }
+});
+
+const prefixErrorCases: { name: string; input: string; want: string }[] = [
+  { name: "empty is fine", input: "", want: "" },
+  { name: "a plain path is fine", input: "vaults/personal", want: "" },
+  { name: "slashes normalizePrefix absorbs are fine", input: "//vaults//", want: "" },
+  { name: "a dot inside a name is fine", input: "vaults/v1.2", want: "" },
+  { name: "a leading dot is fine", input: ".vaults", want: "" },
+  {
+    name: "a backslash is refused",
+    input: "vaults\\personal",
+    want: "Prefix separates folders with /, not \\",
+  },
+  {
+    name: "a newline is refused",
+    input: "vaults\npersonal",
+    want: "Prefix can't contain control characters",
+  },
+  {
+    name: "a tab is refused",
+    input: "vaults\tpersonal",
+    want: "Prefix can't contain control characters",
+  },
+  {
+    name: "a relative parent segment is refused",
+    input: "vaults/../personal",
+    want: "Prefix can't use . or .. as a folder",
+  },
+  {
+    name: "a relative current segment is refused",
+    input: "vaults/./personal",
+    want: "Prefix can't use . or .. as a folder",
+  },
+  {
+    name: "a lone parent segment is refused",
+    input: "..",
+    want: "Prefix can't use . or .. as a folder",
+  },
+];
+
+for (const { name, input, want } of prefixErrorCases) {
+  test(`prefixError: ${name}`, () => {
+    assert.strictEqual(prefixError(input), want);
+  });
+}
+
 test("providerOptions: production excludes the custom provider", () => {
   assert.deepStrictEqual(providerOptions(false), {
     r2: "Cloudflare R2",
@@ -208,6 +467,12 @@ const settingsEqualCases: { name: string; a: GeodeSettings; b: GeodeSettings; wa
     name: "different provider is not equal",
     a: DEFAULT_SETTINGS,
     b: { ...DEFAULT_SETTINGS, provider: "custom" },
+    want: false,
+  },
+  {
+    name: "different prefix is not equal",
+    a: DEFAULT_SETTINGS,
+    b: { ...DEFAULT_SETTINGS, prefix: "vaults/personal" },
     want: false,
   },
   {

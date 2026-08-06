@@ -92,10 +92,26 @@ With `npm run dev` running:
      "mc alias set local http://minio:9000 geodedev geodedev && mc ls local/geode-dev"
    ```
 
+   Object keys are content addressed (`.geode/blobs/<sha256>`), not vault paths, so this listing
+   won't show your note names; `.geode/manifest.json` is what maps a path to the blob holding its
+   content, and `.geode/sentinel.json` is a small marker written once on a bucket's first sync,
+   proving it has been synced before independent of whether the manifest itself currently exists
+   (see `resolveVaultIdentity` in `src/sync/plan.ts`).
+
+   Setting the optional Prefix moves all three under that folder
+   (`vaults/personal/.geode/manifest.json`), so several vaults can share one bucket without seeing
+   each other. Only `createS3Client` knows about it: every key above this line is relative to the
+   configured prefix, and every listed key comes back relative to it too, so nothing in `src/sync`
+   ever has to ask where the vault sits. A prefix is part of what `fingerprintSettings` identifies,
+   so changing it invalidates `state.json` the same way changing the bucket does, and the next sync
+   starts clean against the new folder rather than diffing your vault against a stranger's.
+
 Obsidian's plugin data file (`data.json`), geode's own vault state file (`state.json`), and its
 log file (`geode.log`), all of which land at the repo root because the dev vault symlinks the
-whole repo in as the plugin folder, are gitignored and should never be committed. The MinIO
-container's data lives in a Docker volume, not a repo folder — `npm run dev:s3:reset` clears it.
+whole repo in as the plugin folder, are gitignored and should never be committed. `state.json`
+also carries a `vaultId`, the identity of the bucket this device last trusted, so it can tell a
+bucket it has genuinely never seen from one that now looks wrong. The MinIO container's data
+lives in a Docker volume, not a repo folder — `npm run dev:s3:reset` clears it.
 
 ## Windows
 
@@ -135,3 +151,25 @@ and the public API should not be considered stable; we aim to avoid churn, but e
 
 The version number is duplicated in `package.json` and `manifest.json`; bump both together for
 every release. The README's version badge reads `package.json`, and Obsidian reads `manifest.json`.
+
+## Releasing
+
+Releases are cut by pushing a tag; a workflow does the mechanical work and leaves you a draft to
+launch. The steps:
+
+1. Bump `package.json` and `manifest.json` to the new version (they must agree, `check-versions`
+   enforces it), open a PR, merge to `main`.
+2. Tag the merged commit and push it, no `v` prefix: `git tag 0.1.0 && git push origin 0.1.0`.
+   A `-beta.N` suffix marks a pre-release, e.g. `0.1.0-beta.2`.
+3. The tag push triggers [`release.yml`](./.github/workflows/release.yml), which rebuilds the
+   artifacts from the tagged commit (validating the tag against `manifest.json` and secret-scanning
+   the exact bytes), signs them with keyless [build provenance](https://docs.github.com/actions/security-guides/using-artifact-attestations-to-establish-provenance-for-builds),
+   and creates a **draft** GitHub release with the assets, a per-asset signed provenance bundle
+   (`<asset>.sigstore.json`), and generated notes as a skeleton attached. A `-beta.N` tag is
+   marked pre-release automatically.
+4. Open the draft, rewrite the generated notes into real release notes, then publish. Editing notes
+   and publishing is metadata only, so it never invalidates the signature over the asset bytes.
+
+There is no long-lived signing key: provenance is signed keylessly against the workflow's GitHub
+identity and recorded in a public transparency log. See [SECURITY.md](./SECURITY.md) for how anyone
+verifies a downloaded release.

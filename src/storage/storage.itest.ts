@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DEFAULT_SETTINGS, type GeodeSettings } from "../settings/settings.ts";
-import { createS3Client, testConnection } from "./storage.ts";
+import { createS3Client, fetchTransport, testConnection } from "./storage.ts";
 
 const SECRET_ACCESS_KEY = "geodedev";
 
@@ -19,13 +19,13 @@ const liveSettings: GeodeSettings = {
 };
 
 test("testConnection: succeeds against a real bucket", async () => {
-  const result = await testConnection(liveSettings, SECRET_ACCESS_KEY);
+  const result = await testConnection(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
   assert.equal(result.ok, true);
   assert.equal(result.status, "ok");
 });
 
 test("putObject then getObject round trips the same bytes", async () => {
-  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
   const body = new TextEncoder().encode("hello geode");
 
   const putResult = await client.putObject("notes/hello.md", body);
@@ -39,7 +39,7 @@ test("putObject then getObject round trips the same bytes", async () => {
 });
 
 test("getObject returns the object's etag for a later conditional put", async () => {
-  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
   await client.putObject("etag-test/note.md", new TextEncoder().encode("v1"));
 
   const getResult = await client.getObject("etag-test/note.md");
@@ -48,7 +48,7 @@ test("getObject returns the object's etag for a later conditional put", async ()
 });
 
 test("putObject ifAbsent creates a missing key but is rejected once the key exists", async () => {
-  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
   const key = `conditional-test/absent-${Date.now()}.md`;
 
   const first = await client.putObject(key, new TextEncoder().encode("v1"), { kind: "ifAbsent" });
@@ -62,7 +62,7 @@ test("putObject ifAbsent creates a missing key but is rejected once the key exis
 });
 
 test("putObject ifMatch succeeds with the current etag and is rejected once it goes stale", async () => {
-  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
   const key = "conditional-test/match.md";
   try {
     await client.putObject(key, new TextEncoder().encode("v1"));
@@ -93,7 +93,7 @@ test("putObject ifMatch succeeds with the current etag and is rejected once it g
 });
 
 test("getObject on a missing key fails without a body", async () => {
-  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
   const result = await client.getObject("does/not/exist.md");
   assert.equal(result.ok, false);
   assert.equal(result.status, "not_found");
@@ -101,7 +101,7 @@ test("getObject on a missing key fails without a body", async () => {
 });
 
 test("deleteObject removes an object", async () => {
-  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
   await client.putObject("notes/to-delete.md", new TextEncoder().encode("bye"));
 
   const deleteResult = await client.deleteObject("notes/to-delete.md");
@@ -113,55 +113,40 @@ test("deleteObject removes an object", async () => {
   assert.equal(getResult.status, "not_found");
 });
 
-test("copyObject duplicates the bytes under a new key, leaving the source intact", async () => {
-  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
-  const body = new TextEncoder().encode("copy me");
-  await client.putObject("copy-test/source.md", body);
+test("headObject reports ok for an existing key without returning a body", async () => {
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
+  const key = "head-test/exists.md";
+  await client.putObject(key, new TextEncoder().encode("present"));
 
-  const copyResult = await client.copyObject("copy-test/source.md", "copy-test/dest.md");
-  assert.equal(copyResult.ok, true);
-  assert.equal(copyResult.status, "ok");
-
-  const dest = await client.getObject("copy-test/dest.md");
-  assert.equal(dest.ok, true);
-  assert.deepEqual(dest.body, body);
-  const source = await client.getObject("copy-test/source.md");
-  assert.equal(source.ok, true);
-
-  await client.deleteObject("copy-test/source.md");
-  await client.deleteObject("copy-test/dest.md");
-});
-
-test("copyObject round-trips a source key with SigV4-sensitive characters", async () => {
-  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
-  const key = "copy-test/Don't stop! (really).md";
-  const body = new TextEncoder().encode("tricky source");
-  await client.putObject(key, body);
-
-  const copyResult = await client.copyObject(key, "copy-test/tricky-dest.md");
-  assert.equal(copyResult.ok, true);
-
-  const dest = await client.getObject("copy-test/tricky-dest.md");
-  assert.equal(dest.ok, true);
-  assert.deepEqual(dest.body, body);
+  const headResult = await client.headObject(key);
+  assert.equal(headResult.ok, true);
+  assert.equal(headResult.status, "ok");
+  assert.notEqual(headResult.etag, null);
 
   await client.deleteObject(key);
-  await client.deleteObject("copy-test/tricky-dest.md");
 });
 
-test("copyObject of a missing source fails with not_found, never a phantom empty object", async () => {
-  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
+test("headObject on a missing key fails with not_found", async () => {
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
 
-  const copyResult = await client.copyObject("copy-test/does-not-exist.md", "copy-test/nope.md");
-  assert.equal(copyResult.ok, false);
-  assert.equal(copyResult.status, "not_found");
+  const headResult = await client.headObject("head-test/does-not-exist.md");
+  assert.equal(headResult.ok, false);
+  assert.equal(headResult.status, "not_found");
+});
 
-  const dest = await client.getObject("copy-test/nope.md");
-  assert.equal(dest.ok, false);
+test("headObject round-trips a key with SigV4-sensitive characters", async () => {
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
+  const key = "head-test/Don't stop! (really).md";
+  await client.putObject(key, new TextEncoder().encode("tricky key"));
+
+  const headResult = await client.headObject(key);
+  assert.equal(headResult.ok, true);
+
+  await client.deleteObject(key);
 });
 
 test("listObjects returns only keys under the given prefix", async () => {
-  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
   await client.putObject("list-test/a.md", new TextEncoder().encode("a"));
   await client.putObject("list-test/b.md", new TextEncoder().encode("b"));
   await client.putObject("list-test-other/c.md", new TextEncoder().encode("c"));
@@ -178,7 +163,7 @@ test("listObjects returns only keys under the given prefix", async () => {
 });
 
 test("listObjects with no prefix returns everything", async () => {
-  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
   await client.putObject("unprefixed.md", new TextEncoder().encode("x"));
 
   const result = await client.listObjects();
@@ -195,7 +180,7 @@ test("listObjects with no prefix returns everything", async () => {
 });
 
 test("listObjects pages past the 1,000 key response cap", async () => {
-  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
   const prefix = "paging-test/";
   const total = 1001;
 
@@ -228,7 +213,7 @@ test("listObjects pages past the 1,000 key response cap", async () => {
 });
 
 test("putObject/getObject round-trips a key containing a space and ampersand", async () => {
-  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
   const body = new TextEncoder().encode("special chars");
 
   const putResult = await client.putObject("encode-test/Foo & Bar.md", body);
@@ -240,7 +225,7 @@ test("putObject/getObject round-trips a key containing a space and ampersand", a
 });
 
 test("putObject/getObject round-trips a key with SigV4-sensitive characters ! ' ( ) *", async () => {
-  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
   const body = new TextEncoder().encode("sigv4 edge");
   const key = "encode-test/Don't forget! (draft) *.md";
 
@@ -266,7 +251,7 @@ test("putObject/getObject round-trips a key with SigV4-sensitive characters ! ' 
 });
 
 test("putObject/getObject round-trips a key containing a hash and percent", async () => {
-  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY);
+  const client = createS3Client(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
   const body = new TextEncoder().encode("edge cases");
 
   const putResult = await client.putObject("encode-test/100% #special.md", body);
@@ -275,4 +260,72 @@ test("putObject/getObject round-trips a key containing a hash and percent", asyn
   const getResult = await client.getObject("encode-test/100% #special.md");
   assert.equal(getResult.ok, true);
   assert.deepEqual(getResult.body, body);
+});
+
+// prefixedSettings point a client at a folder inside the same shared bucket, written the untidy way
+// a user would type it so the round trip proves canonicalization happens at the point of use.
+const prefixedSettings: GeodeSettings = {
+  ...liveSettings,
+  prefix: "/vaults/personal/",
+};
+
+test("a prefixed client round-trips against a real server and hides the prefix", async () => {
+  const client = createS3Client(prefixedSettings, SECRET_ACCESS_KEY, fetchTransport);
+  const root = createS3Client(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
+  const key = "prefix-test/note.md";
+  const body = new TextEncoder().encode("inside a folder");
+
+  try {
+    assert.equal((await client.putObject(key, body)).ok, true);
+    assert.deepEqual((await client.getObject(key)).body, body);
+    assert.equal((await client.headObject(key)).ok, true);
+
+    // What the bucket really holds: the object sits under the prefix and nothing lands beside it
+    // at the root, so two vaults can share one bucket without ever seeing each other.
+    assert.equal((await root.getObject(`vaults/personal/${key}`)).ok, true);
+    assert.equal((await root.getObject(key)).status, "not_found");
+  } finally {
+    await client.deleteObject(key);
+  }
+});
+
+test("a prefixed client lists keys relative to its own root", async () => {
+  const client = createS3Client(prefixedSettings, SECRET_ACCESS_KEY, fetchTransport);
+  const body = new TextEncoder().encode("x");
+
+  try {
+    await client.putObject("prefix-list/a.md", body);
+    await client.putObject("prefix-list/b.md", body);
+
+    const result = await client.listObjects("prefix-list/");
+    assert.equal(result.ok, true);
+    const keys: string[] = [];
+    for (const object of result.objects) {
+      keys.push(object.key);
+    }
+    keys.sort();
+    assert.deepEqual(keys, ["prefix-list/a.md", "prefix-list/b.md"]);
+  } finally {
+    await client.deleteObject("prefix-list/a.md");
+    await client.deleteObject("prefix-list/b.md");
+  }
+});
+
+test("a prefixed client cannot see an object sitting at the bucket root", async () => {
+  // The isolation sync depends on when two vaults share a bucket: a listing that leaked a
+  // neighbour's key would be read as content this vault cannot explain and fail its first sync.
+  const client = createS3Client(prefixedSettings, SECRET_ACCESS_KEY, fetchTransport);
+  const root = createS3Client(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
+  const key = "prefix-isolation/neighbour.md";
+
+  try {
+    await root.putObject(key, new TextEncoder().encode("not mine"));
+
+    assert.equal((await client.getObject(key)).status, "not_found");
+    const result = await client.listObjects("prefix-isolation/");
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.objects, []);
+  } finally {
+    await root.deleteObject(key);
+  }
 });

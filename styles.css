@@ -164,6 +164,10 @@
   color: var(--text-error);
 }
 
+.geode-status-bar.is-paused {
+  color: var(--text-faint);
+}
+
 .geode-status-bar.is-syncing .svg-icon {
   animation: geode-status-spin 1s linear infinite;
 }

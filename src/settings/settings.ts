@@ -6,9 +6,13 @@ export const DEFAULT_SETTINGS: GeodeSettings = {
   endpoint: "",
   region: "",
   bucket: "",
+  prefix: "",
   accessKeyId: "",
   secretId: "",
 };
+
+// ConnectionStatus is the current in-memory state of a Test Connection check.
+export type ConnectionStatus = "unknown" | "checking" | "ok" | "error";
 
 // Provider identifies a supported S3 compatible storage configuration.
 export type Provider = "r2" | "s3" | "custom";
@@ -21,13 +25,40 @@ export type GeodeSettings = {
   endpoint: string;
   region: string;
   bucket: string;
+  // prefix is the folder inside the bucket the vault lives under, empty for the bucket root
+  // (#154). Stored exactly as typed and canonicalized at the point of use by normalizePrefix, the
+  // same way endpoint and region are, so a trailing slash never reads back as an unsaved change.
+  //
+  // A value normalizeSettings loads is never checked against prefixError, and is deliberately kept
+  // even when unusable: blanking it would silently repoint a vault at the bucket root, and showing
+  // an empty field gives a user nothing to correct. createS3Client is what refuses to act on one,
+  // so an unusable prefix always fails loudly and always survives long enough to be fixed.
+  prefix: string;
   accessKeyId: string;
   // secretId is a SecretStorage reference name, not the secret value itself. Obsidian's
-  // SecretComponent picker lets a user pick or create a secret under any name of their choosing;
+  // SecretComponent picker lets a user pick or create a secret name of their choosing;
   // it does not support forcing new entries onto a fixed ID, so we have to remember whichever
   // one they picked.
   secretId: string;
 };
+
+// SaveTarget is the narrow persistence surface needed to save a settings draft.
+export type SaveTarget = {
+  logger: {
+    info(message: string): void;
+  };
+  settings: GeodeSettings;
+  saveSettings(): Promise<void>;
+};
+
+// canSave reports whether the current draft may be persisted.
+export function canSave(dirty: boolean, connectionStatus: ConnectionStatus): boolean {
+  if (!dirty) {
+    return false;
+  }
+
+  return connectionStatus === "unknown" || connectionStatus === "ok";
+}
 
 // draftForDisplay returns the draft a settings tab should show for a given render.
 // When auto is true (Obsidian is opening the tab), the draft is re-seeded from saved
@@ -45,6 +76,29 @@ export function draftForDisplay(
   return currentDraft;
 }
 
+// normalizeEndpoint ensures the endpoint has an explicit scheme and no trailing slash.
+export function normalizeEndpoint(endpoint: string): string {
+  let normalized = endpoint.trim();
+  if (!normalized) {
+    return "";
+  }
+
+  // Require an explicit scheme to prevent generic network errors
+  const hasScheme =
+    normalized.toLowerCase().startsWith("http://") ||
+    normalized.toLowerCase().startsWith("https://");
+  if (!hasScheme) {
+    normalized = `https://${normalized}`;
+  }
+
+  // Strip trailing slashes to prevent double-slash SigV4 canonical path issues
+  while (normalized.endsWith("/")) {
+    normalized = normalized.slice(0, -1);
+  }
+
+  return normalized;
+}
+
 // endpointFor returns the storage endpoint URL to use for the given settings.
 // The Amazon S3 endpoint interpolates the region into the URL authority, so a region carrying
 // authority delimiters (`x@attacker.example:443#`) would silently redirect signed vault requests
@@ -60,7 +114,7 @@ export function endpointFor(settings: GeodeSettings): string {
     return `https://s3.${settings.region}.amazonaws.com`;
   }
 
-  return settings.endpoint;
+  return normalizeEndpoint(settings.endpoint);
 }
 
 // hasConnectionConfig reports whether settings have enough filled in to attempt a connection.
@@ -75,6 +129,36 @@ export function hasConnectionConfig(settings: GeodeSettings): boolean {
     return isAwsRegion(settings.region);
   }
   return settings.endpoint !== "" && settings.region !== "";
+}
+
+// isCurrentConnectionResult reports whether a completed test still describes the current draft.
+export function isCurrentConnectionResult(
+  checkId: number,
+  currentCheckId: number,
+  testedSettings: GeodeSettings,
+  currentSettings: GeodeSettings,
+): boolean {
+  if (checkId !== currentCheckId) {
+    return false;
+  }
+
+  return settingsEqual(testedSettings, currentSettings);
+}
+
+// normalizePrefix returns the canonical bucket key prefix for a raw settings value: surrounding
+// whitespace gone, and empty segments dropped, so "/vaults/personal/", "vaults//personal" and
+// "vaults/personal" all address the same place. Forgiving about slashes on purpose; what it cannot
+// make sense of is left for prefixError to refuse rather than quietly reinterpreted.
+export function normalizePrefix(raw: string): string {
+  const segments: string[] = [];
+  for (const segment of raw.trim().split("/")) {
+    if (segment === "") {
+      continue;
+    }
+    segments.push(segment);
+  }
+
+  return segments.join("/");
 }
 
 // isAwsRegion reports whether region looks like an AWS region identifier ("us-east-1",
@@ -100,9 +184,38 @@ export function normalizeSettings(raw: unknown): GeodeSettings {
     endpoint: stringOr(source.endpoint, DEFAULT_SETTINGS.endpoint),
     region: stringOr(source.region, DEFAULT_SETTINGS.region),
     bucket: stringOr(source.bucket, DEFAULT_SETTINGS.bucket),
+    prefix: stringOr(source.prefix, DEFAULT_SETTINGS.prefix),
     accessKeyId: stringOr(source.accessKeyId, DEFAULT_SETTINGS.accessKeyId),
     secretId: stringOr(source.secretId, DEFAULT_SETTINGS.secretId),
   };
+}
+
+// prefixError returns a short message describing why raw cannot be used as a bucket prefix, or ""
+// when it can, so an unusable value is caught while a user is typing it rather than as a baffling
+// provider error on the next sync. Only what normalizePrefix cannot canonicalize is refused: it
+// already absorbs surrounding and repeated slashes, so what reaches here is a typo rather than a
+// formatting preference. Relative segments are refused instead of resolved because the URL a
+// request is signed against collapses them itself, so "notes/../vault" would sync somewhere other
+// than what was typed, and control characters because they cannot survive a URL intact.
+export function prefixError(raw: string): string {
+  const prefix = normalizePrefix(raw);
+  if (prefix === "") {
+    return "";
+  }
+  if (prefix.includes("\\")) {
+    return "Prefix separates folders with /, not \\";
+  }
+  if (hasControlCharacter(prefix)) {
+    return "Prefix can't contain control characters";
+  }
+
+  for (const segment of prefix.split("/")) {
+    if (segment === "." || segment === "..") {
+      return "Prefix can't use . or .. as a folder";
+    }
+  }
+
+  return "";
 }
 
 // providerOr returns a known provider, defaulting unknown values to "r2".
@@ -134,6 +247,21 @@ export function regionFor(settings: GeodeSettings): string {
   return settings.region;
 }
 
+// saveDraft persists a copy of draft when the current connection state allows it.
+export async function saveDraft(
+  target: SaveTarget,
+  draft: GeodeSettings,
+  connectionStatus: ConnectionStatus,
+): Promise<void> {
+  if (!canSave(!settingsEqual(draft, target.settings), connectionStatus)) {
+    return;
+  }
+
+  target.logger.info(`saving settings (provider=${draft.provider})`);
+  target.settings = { ...draft };
+  await target.saveSettings();
+}
+
 // settingsEqual reports whether two settings values are identical field for field. Used to
 // derive whether a draft has unsaved changes by comparing it to the last saved settings, rather
 // than tracking a dirty flag that can't self-correct when an edit is reverted by hand.
@@ -144,9 +272,26 @@ export function settingsEqual(a: GeodeSettings, b: GeodeSettings): boolean {
     a.endpoint === b.endpoint &&
     a.region === b.region &&
     a.bucket === b.bucket &&
+    a.prefix === b.prefix &&
     a.accessKeyId === b.accessKeyId &&
     a.secretId === b.secretId
   );
+}
+
+// hasControlCharacter reports whether value holds any C0 or DEL character, none of which can be
+// carried through a request URL as itself.
+function hasControlCharacter(value: string): boolean {
+  for (const char of value) {
+    const code = char.codePointAt(0);
+    if (code === undefined) {
+      continue;
+    }
+    if (code < 0x20 || code === 0x7f) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 // stringOr returns v if it is a string, otherwise fallback.
