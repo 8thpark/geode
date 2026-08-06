@@ -55,6 +55,7 @@ export const TICK_MS = 5_000;
 // DEFAULT_STATE is the complete zero value: nothing pending, nothing failed, nothing synced yet,
 // and a window assumed unfocused until the plugin says otherwise.
 export const DEFAULT_STATE: State = {
+  blurredAt: 0,
   failures: 0,
   focusedAt: 0,
   lastEventAt: 0,
@@ -75,10 +76,26 @@ export type Due = { due: false } | { due: true; trigger: Trigger };
 // listening; noteResumed is how a halt ends.
 export type PassResult = "ok" | "retry" | "stop";
 
+// Readiness is everything outside the scheduler that decides whether automatic sync may run at
+// all, which is a different question from whether a pass is due. Passed in as plain answers rather
+// than read from settings here, so this module stays free of every other package.
+export type Readiness = {
+  // configured is whether storage is filled in and usable.
+  configured: boolean;
+  // paused is whether the user switched automatic sync off on this device.
+  paused: boolean;
+  // syncedBefore is whether a sync has ever completed against the configured bucket.
+  syncedBefore: boolean;
+};
+
 // State is everything the scheduler needs to make its decision. Every field is a millisecond
 // timestamp or a flag, so the whole thing is comparable, copyable, and inspectable in a log line.
 // Zero means "never" throughout, which is safe because no real clock reading is ever zero.
 export type State = {
+  // blurredAt is when the window last lost focus, and zero if it never has. It is what makes the
+  // length of an absence knowable: without it the only measure to hand is the age of the last
+  // pass, and an hour of unbroken work in a focused window would read as an hour spent away.
+  blurredAt: number;
   // failures counts consecutive failed passes, and resets to zero on any success.
   failures: number;
   // focusedAt is when the window last gained focus, and zero for as long as it does not have it,
@@ -100,7 +117,21 @@ export type State = {
 // Trigger names why a pass ran, for the log and for the caller's own branching. due() returns the
 // automatic ones; "manual" is the caller's own name for a pass a user asked for, which bypasses
 // every rule here, including a halt.
-export type Trigger = "startup" | "local" | "poll" | "focus" | "manual";
+export type Trigger = "startup" | "local" | "poll" | "focus" | "retry" | "manual";
+
+// armed reports whether automatic sync may run at all on this device. Kept here rather than in the
+// plugin so the answer is one testable expression rather than a stack of early returns on a class,
+// and taken as plain booleans so this module never learns what a setting is.
+export function armed(readiness: Readiness): boolean {
+  if (readiness.paused) {
+    return false;
+  }
+  if (!readiness.syncedBefore) {
+    return false;
+  }
+
+  return readiness.configured;
+}
 
 // due reports whether a pass should start at now, and which trigger asked for it. The order of the
 // checks is the priority order: local work outranks polling because pushing an edit we already
@@ -110,8 +141,18 @@ export function due(state: State, now: number): Due {
   if (state.syncing || state.stopped) {
     return { due: false };
   }
-  if (state.failures > 0 && now - state.lastPassAt < backoffFor(state.failures)) {
-    return { due: false };
+  // A failed pass is its own reason to run again, ahead of every other rule and regardless of
+  // focus. Without this a failure would have to hope some other trigger came along: notePassStarted
+  // clears the pending local work the pass was covering, so a push that fails on an unfocused
+  // window has nothing left to fire it, and the edits would sit there until the user happened to
+  // click back into Obsidian. Silence with unsynced work behind it is the one failure this whole
+  // design exists to avoid.
+  if (state.failures > 0) {
+    if (now - state.lastPassAt < backoffFor(state.failures)) {
+      return { due: false };
+    }
+
+    return { due: true, trigger: "retry" };
   }
   // Nothing has ever synced in this session, so catch up on whatever the other devices did while
   // this one was closed. This is the startup sync: it needs no timer of its own, since the first
@@ -128,7 +169,7 @@ export function due(state: State, now: number): Due {
   if (state.focusedAt === 0) {
     return { due: false };
   }
-  if (state.focusedAt > state.lastPassAt && now - state.lastPassAt >= FOCUS_MIN_GAP_MS) {
+  if (returnedFromAway(state)) {
     return { due: true, trigger: "focus" };
   }
   if (now - state.lastPassAt >= POLL_INTERVAL_MS) {
@@ -142,7 +183,7 @@ export function due(state: State, now: number): Due {
 // setting a second flag, so "not focused" and "focused at no particular time" cannot disagree.
 export function noteFocus(state: State, focused: boolean, now: number): State {
   if (!focused) {
-    return { ...state, focusedAt: 0 };
+    return { ...state, focusedAt: 0, blurredAt: now };
   }
 
   return { ...state, focusedAt: now };
@@ -224,4 +265,20 @@ function localSettled(state: State, now: number): boolean {
   }
 
   return now - state.pendingSince >= LOCAL_MAX_WAIT_MS;
+}
+
+// returnedFromAway reports whether the window has come back from an absence long enough to be
+// worth a sync, and has not already synced since coming back. The absence is measured from when
+// focus was actually lost, never from the age of the last pass: an hour of unbroken work in a
+// focused window is not an absence, and measuring it that way would turn every two second switch
+// to another app into a full pass. A window that has never been away has no absence to measure.
+function returnedFromAway(state: State): boolean {
+  if (state.focusedAt <= state.lastPassAt) {
+    return false;
+  }
+  if (state.blurredAt === 0) {
+    return false;
+  }
+
+  return state.focusedAt - state.blurredAt >= FOCUS_MIN_GAP_MS;
 }

@@ -5,6 +5,7 @@ import { createLogSink } from "./log/adapter";
 import { createLogBus, createLogger, type LogBus, type Logger, type LogSink } from "./log/log";
 import { GeodeLogView, LOG_VIEW_TYPE } from "./log/view";
 import {
+  armed,
   DEFAULT_STATE,
   due,
   noteFocus,
@@ -299,14 +300,13 @@ export default class GeodePlugin extends Plugin {
     setTooltip(this.statusBarEl, tooltipFor(status, detail));
   }
 
-  // tick asks the scheduler, every TICK_MS, whether a pass is due. Every gate that is about
-  // whether a pass may run at all lives here, and every gate about whether it is time for one
-  // lives in the scheduler: configuration is the plugin's business, timing is not.
+  // tick asks the scheduler, every TICK_MS, whether a pass is due. Both questions it asks are
+  // answered in schedule.ts; all this contributes is reading the settings that armed needs, since
+  // knowing what a setting looks like is the one thing the scheduler is kept away from.
   private tick(): void {
-    if (this.paused || !this.syncedBefore) {
-      return;
-    }
-    if (!hasConnectionConfig(this.settings) || prefixError(this.settings.prefix) !== "") {
+    const configured =
+      hasConnectionConfig(this.settings) && prefixError(this.settings.prefix) === "";
+    if (!armed({ configured, paused: this.paused, syncedBefore: this.syncedBefore })) {
       return;
     }
     const decision = due(this.schedule, Date.now());
