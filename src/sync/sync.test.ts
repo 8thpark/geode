@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import type { ResultStatus } from "../storage/storage.ts";
 import { encodeSnapshot, hashBytes, type Snapshot } from "../vault/vault.ts";
 import type { LocalWriter } from "./execute.ts";
 import {
@@ -21,9 +22,11 @@ import {
 } from "./plan.ts";
 import {
   adoptLiveStats,
+  faultFor,
   readRemoteManifest,
   readSentinel,
   revertFailedPaths,
+  type SyncFault,
   syncOnce,
   unexplainedBlobs,
 } from "./sync.ts";
@@ -34,6 +37,47 @@ import {
 async function hashOf(text: string): Promise<string> {
   return hashBytes(new TextEncoder().encode(text));
 }
+
+test("faultFor: trying again is worth something, or it never will be, and a race is neither", () => {
+  const cases: { status: ResultStatus; want: SyncFault }[] = [
+    // The compare-and-swap doing its job. Nothing failed, nothing is lost, and the manifest the
+    // loser needs to reconcile against is now sitting there fresh.
+    { status: "conflict", want: "raced" },
+    // The provider saying we are wrong rather than unlucky. No number of retries argues with it.
+    { status: "auth", want: "permanent" },
+    { status: "client", want: "permanent" },
+    // Worth another go, including 429 and 5xx, which statusForHttp already folds into server.
+    { status: "server", want: "transient" },
+    { status: "network", want: "transient" },
+    // Never reaches here as a failure, since a 404 on the manifest is a first sync rather than an
+    // error, but transient is the harmless answer if one ever does.
+    { status: "not_found", want: "transient" },
+  ];
+
+  for (const c of cases) {
+    assert.equal(faultFor(c.status), c.want, c.status);
+  }
+});
+
+test("syncOnce: a rejected access key halts rather than being retried forever (#93)", async () => {
+  // The gap this closed: every failed pass used to report a bare message, so nothing above could
+  // tell a rotated key from a dropped connection, and a 403 was retried on a timer indefinitely.
+  const { storage } = fakeStorage();
+  storage.getObject = async () => ({
+    ok: false,
+    status: "auth",
+    message: "Storage rejected the read (403)",
+    body: null,
+    etag: null,
+  });
+  const reader = fakeReader({ "a.md": "alpha" });
+  const { writer } = fakeLocalWriter();
+
+  const outcome = await syncOnce(empty, reader, writer, storage, 1);
+
+  assert.ok(!outcome.ok);
+  assert.equal(outcome.fault, "permanent");
+});
 
 test("readRemoteManifest: a 404 is treated as an empty snapshot", async () => {
   const { storage } = fakeStorage();
@@ -64,7 +108,11 @@ test("readRemoteManifest: a manifest without an etag is refused, not synced unsa
 
   const result = await readRemoteManifest(storage);
 
-  assert.deepEqual(result, { ok: false, message: "remote manifest has no etag" });
+  assert.deepEqual(result, {
+    ok: false,
+    fault: "permanent",
+    message: "remote manifest has no etag",
+  });
 });
 
 test("readRemoteManifest: corrupt JSON is reported as a failure, not an empty snapshot", async () => {
@@ -72,7 +120,11 @@ test("readRemoteManifest: corrupt JSON is reported as a failure, not an empty sn
 
   const result = await readRemoteManifest(storage);
 
-  assert.deepEqual(result, { ok: false, message: "remote manifest is corrupt" });
+  assert.deepEqual(result, {
+    ok: false,
+    fault: "permanent",
+    message: "remote manifest is corrupt",
+  });
 });
 
 test("readRemoteManifest: a manifest with no envelope is corrupt, and one from a newer suite needs an update", async () => {
@@ -83,6 +135,7 @@ test("readRemoteManifest: a manifest with no envelope is corrupt, and one from a
 
   assert.deepEqual(await readRemoteManifest(bare.storage), {
     ok: false,
+    fault: "permanent",
     message: "remote manifest is corrupt",
   });
 
@@ -93,6 +146,7 @@ test("readRemoteManifest: a manifest with no envelope is corrupt, and one from a
 
   assert.deepEqual(await readRemoteManifest(encrypted.storage), {
     ok: false,
+    fault: "permanent",
     message: "remote manifest is a format this version of geode can't read",
   });
 });
@@ -106,7 +160,11 @@ test("readRemoteManifest: JSON of the wrong shape is corrupt, not a snapshot wit
 
     const result = await readRemoteManifest(storage);
 
-    assert.deepEqual(result, { ok: false, message: "remote manifest is corrupt" }, body);
+    assert.deepEqual(
+      result,
+      { ok: false, fault: "permanent", message: "remote manifest is corrupt" },
+      body,
+    );
   }
 });
 
@@ -121,6 +179,7 @@ test("readRemoteManifest: a pre-marker manifest with no version field is refused
 
   assert.deepEqual(result, {
     ok: false,
+    fault: "permanent",
     message: "remote manifest is a format this version of geode can't read",
   });
 });
@@ -135,6 +194,7 @@ test("readRemoteManifest: a manifest from a format version this build doesn't kn
 
   assert.deepEqual(result, {
     ok: false,
+    fault: "permanent",
     message: "remote manifest is a format this version of geode can't read",
   });
 });
@@ -152,6 +212,7 @@ test("readRemoteManifest: a manifest entry with a traversal path refuses the pas
 
   assert.deepEqual(result, {
     ok: false,
+    fault: "permanent",
     message: "remote manifest contains a path unsafe to write",
   });
 });
@@ -172,6 +233,7 @@ test("readRemoteManifest: two paths differing only by case refuse the pass (#94)
 
   assert.deepEqual(result, {
     ok: false,
+    fault: "permanent",
     message: "remote manifest contains two paths that differ only by case",
   });
 });
@@ -188,7 +250,11 @@ test("readRemoteManifest: a non 404 failure is reported, never guessed at as emp
 
   const result = await readRemoteManifest(storage);
 
-  assert.deepEqual(result, { ok: false, message: "Storage rejected the read (500)" });
+  assert.deepEqual(result, {
+    ok: false,
+    fault: "transient",
+    message: "Storage rejected the read (500)",
+  });
 });
 
 test("readSentinel: a 404 is reported as sentinel: null, not a failure", async () => {
@@ -213,7 +279,11 @@ test("readSentinel: corrupt JSON is reported as a failure, not an absent sentine
 
   const result = await readSentinel(storage);
 
-  assert.deepEqual(result, { ok: false, message: "remote sentinel is corrupt" });
+  assert.deepEqual(result, {
+    ok: false,
+    fault: "permanent",
+    message: "remote sentinel is corrupt",
+  });
 });
 
 test("readSentinel: an unknown format version refuses the pass", async () => {
@@ -224,6 +294,7 @@ test("readSentinel: an unknown format version refuses the pass", async () => {
 
   assert.deepEqual(result, {
     ok: false,
+    fault: "permanent",
     message: "remote sentinel is a format this version of geode can't read",
   });
 });
@@ -279,6 +350,7 @@ test("syncOnce: a manifest format this build doesn't know halts the pass before 
 
   assert.deepEqual(outcome, {
     ok: false,
+    fault: "permanent",
     message: "remote manifest is a format this version of geode can't read",
     failures: [],
     snapshot: null,
@@ -424,6 +496,7 @@ test("syncOnce: a device pointed at a different vault's sentinel refuses (#183)"
 
   assert.deepEqual(outcome, {
     ok: false,
+    fault: "permanent",
     message: "this bucket belongs to a different vault than the one last synced here",
     failures: [],
     snapshot: null,
@@ -564,6 +637,7 @@ test("syncOnce: a failed bucket listing on a first sync is reported, never guess
 
   assert.deepEqual(outcome, {
     ok: false,
+    fault: "transient",
     message: "Storage rejected the list (500)",
     failures: [],
     snapshot: null,
@@ -614,6 +688,7 @@ test("syncOnce: a manifest overwritten by another device mid sync fails the pass
 
   assert.deepEqual(outcome, {
     ok: false,
+    fault: "raced",
     message: "another device synced at the same time; sync again",
     failures: [],
     snapshot: null,
@@ -669,6 +744,7 @@ test("syncOnce: retry adopts an identical orphaned upload with a HEAD, not anoth
 
   assert.deepEqual(first, {
     ok: false,
+    fault: "raced",
     message: "another device synced at the same time; sync again",
     failures: [],
     snapshot: null,

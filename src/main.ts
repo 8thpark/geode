@@ -29,7 +29,7 @@ import {
 import { GeodeSettingTab } from "./settings/tab";
 import { obsidianTransport } from "./storage/obsidian";
 import { createS3Client, probeConditionalWrites } from "./storage/storage";
-import { syncOnce } from "./sync/sync";
+import { type SyncFault, syncOnce } from "./sync/sync";
 import {
   createObsidianLocalWriter,
   createObsidianReader,
@@ -99,6 +99,21 @@ function iconFor(status: SyncStatus): string {
     return "cloud-off";
   }
   return "cloud";
+}
+
+// passResultFor maps how a pass failed onto what the scheduler should do about it. The two
+// vocabularies are kept apart deliberately: sync says what went wrong without knowing there is a
+// timer, the scheduler decides when to try again without knowing what a bucket is, and this line
+// is the whole of what either needs from the other.
+function passResultFor(fault: SyncFault): PassResult {
+  if (fault === "raced") {
+    return "raced";
+  }
+  if (fault === "permanent") {
+    return "stop";
+  }
+
+  return "retry";
 }
 
 // tooltipFor returns the status bar hover text for status. detail is folded into the error case.
@@ -427,7 +442,8 @@ export default class GeodePlugin extends Plugin {
       }
       this.logger.error(`sync: ${outcome.message}`);
       this.setSyncStatus("error", outcome.message);
-      return "retry";
+
+      return passResultFor(outcome.fault);
     }
 
     await stateStore.write(outcome.snapshot);
