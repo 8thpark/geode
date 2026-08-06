@@ -234,6 +234,23 @@ test("notePassFinished: losing a race retries soon and never counts towards givi
   assert.deepEqual(due(state, 1_000 + RACE_RETRY_MS), { due: true, trigger: "retry" });
 });
 
+test("notePassFinished: a race breaks a failure streak, since it proves the round trip works", () => {
+  // A raced pass reached the provider, read the manifest, moved the files, and lost only the final
+  // compare-and-swap, so the network and the credentials are demonstrably fine. Merely holding the
+  // count instead of clearing it would charge the next unrelated blip a doubled delay for a streak
+  // that a working round trip had already broken, and a long enough interleaving of blips and
+  // races would reach the half hour cap without ever failing twice in a row.
+  let state = notePassFinished(DEFAULT_STATE, "retry", 1_000);
+  assert.equal(state.failures, 1);
+
+  state = notePassFinished(state, "raced", 2_000);
+  assert.equal(state.failures, 0);
+
+  state = notePassFinished(state, "retry", 3_000);
+  assert.equal(state.failures, 1);
+  assert.equal(state.retryAfter, 3_000 + BACKOFF_BASE_MS);
+});
+
 test("noteResumed: clears a halt and any pending retry, and nothing else does", () => {
   let state = notePassFinished(DEFAULT_STATE, "stop", 100);
   // A halt survives anything that is not a deliberate resume, so a stopped scheduler cannot drift

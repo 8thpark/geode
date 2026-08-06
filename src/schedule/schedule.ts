@@ -220,8 +220,15 @@ export function notePassFinished(state: State, result: PassResult, now: number):
   // nothing is lost by it, and the loser's next pass reconciles both sides. Counting it would let
   // an ordinary two device vault escalate itself into a half hour backoff over passes where
   // everything worked exactly as designed.
+  //
+  // The streak resets rather than merely holding. A raced pass reached the provider, read the
+  // manifest, moved the files, and lost only the final compare-and-swap, which is proof that the
+  // network is up and the credentials are good: precisely what an earlier transient failure left
+  // in doubt. Carrying that failure past this point would let an unlucky interleaving of a dropped
+  // connection, a race, and another dropped connection charge the second one a four minute delay
+  // for a streak that a working round trip had already broken.
   if (result === "raced") {
-    return { ...finished, retryAfter: now + RACE_RETRY_MS };
+    return { ...finished, failures: 0, retryAfter: now + RACE_RETRY_MS };
   }
   const failures = state.failures + 1;
   if (result === "stop") {
