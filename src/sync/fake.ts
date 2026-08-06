@@ -15,11 +15,8 @@ import { DRIFT_MESSAGE, type LocalWriter } from "./execute.ts";
 export const empty: Snapshot = { files: [] };
 
 // fakeLocalWriter returns a LocalWriter backed by an in-memory map, and the map itself so tests
-// can assert on the result. Staged content is held aside and only reaches files on commit, the same
-// seam the real writer has, so a test asserting nothing landed on disk is really asserting the
-// destination was never touched rather than that a write happened to be skipped. A "create" write
-// refuses an occupied destination exactly as the real writer's adapter stat does, so a test can
-// drive the case the real one exists for: a path recreated after a conflict's rename vacated it.
+// can assert on the result. Staged content only reaches files on commit, the same seam the real
+// writer has, and a "create" write refuses an occupied destination the same way it does.
 export function fakeLocalWriter(): { writer: LocalWriter; files: Map<string, string> } {
   const files = new Map<string, string>();
   const staged = new Map<string, string>();
@@ -59,9 +56,8 @@ export function fakeLocalWriter(): { writer: LocalWriter; files: Map<string, str
 }
 
 // fakeReader returns a Reader backed by an in-memory map of path to content. mtimes carries the
-// modification time of any path a test needs one for, defaulting to 1: a test simulating a mid sync
-// edit sets both maps, exactly as a real editor save moves both content and mtime, which is what
-// lets a same length rewrite still read as a change.
+// modification time of any path a test needs one for, defaulting to 1, so a test simulating a mid
+// sync edit can move both content and mtime the way a real editor save does.
 export function fakeReader(
   files: Record<string, string>,
   mtimes: Record<string, number> = {},
@@ -191,7 +187,7 @@ export function fakeStorage(objects: Record<string, string> = {}): {
   return { storage, objects: store };
 }
 
-// file builds a FileState for path with the given hash, using the hash length as a stand-in size.
+// file builds a FileState for path with the given hash, using the hash length as a stand in size.
 // The blob address matches the hash, as it does for every unencrypted vault.
 export function file(path: string, hash: string): FileState {
   return { path, size: hash.length, mtime: 1, hash, blob: hash };
@@ -203,9 +199,8 @@ export function snapshot(...files: FileState[]): Snapshot {
 }
 
 // unwrapped is the inverse of wrapped, for a test that wants to look inside an object a sync
-// wrote. A body that is not a geode object at all throws rather than returning a result to
-// inspect: the test asked for the payload of something it expected sync to have written, and
-// there is nothing sensible for it to assert on if that isn't what it got.
+// wrote. It throws rather than returning a result on a body that isn't a geode object at all,
+// since there is nothing sensible left to assert on if that isn't what the test got.
 export function unwrapped(body: string): string {
   const opened = unwrapObject(new TextEncoder().encode(body));
   if (!opened.ok) {
@@ -216,9 +211,8 @@ export function unwrapped(body: string): string {
 }
 
 // wrapped returns what the bucket actually holds for content: the payload inside its object
-// envelope (#184). Tests seed and assert through it so a fixture is the object a real bucket would
-// hold rather than a bare payload sync would refuse to read. The envelope header is ASCII safe, so
-// it survives fakeStorage keeping bodies as strings.
+// envelope. Tests seed and assert through it so a fixture is the real shape sync would read, and
+// the envelope header stays ASCII safe so it survives fakeStorage keeping bodies as strings.
 export function wrapped(content: string): string {
   return new TextDecoder().decode(wrapObject(new TextEncoder().encode(content)));
 }

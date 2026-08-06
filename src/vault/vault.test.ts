@@ -16,7 +16,7 @@ import {
 } from "./vault.ts";
 
 // fakeReader returns a Reader backed by an in-memory map, and a counter of how many times
-// readFile was called — used to prove the stat gate skips rereading unchanged files.
+// readFile was called , used to prove the stat gate skips rereading unchanged files.
 function fakeReader(files: Record<string, { content: string; mtime: number }>): {
   reader: Reader;
   readCount: () => number;
@@ -178,10 +178,8 @@ test("decodeSnapshot: only the current version is accepted; version 1, missing, 
       want: { ok: true, snapshot: { files } },
     },
     {
-      // Version 1, plaintext path keyed storage, predates the marker (#91) and is version 1 by
-      // definition. Its JSON shape is close enough to be mistaken for a current one, and only
-      // the marker distinguishes them, so this build refuses it rather than misread its paths as
-      // content addressed keys.
+      // Version 1's JSON shape is close enough to be mistaken for a current one, and only the
+      // marker distinguishes them, so it is refused rather than misread.
       name: "a pre-marker snapshot with no version field",
       raw: JSON.stringify({ files }),
       want: { ok: false, reason: "unsupportedVersion" },
@@ -225,7 +223,7 @@ test("decodeSnapshot: only the current version is accepted; version 1, missing, 
     },
     {
       // isSnapshot only confirms files is an array; a crafted manifest can still put a traversal
-      // segment in an otherwise well formed entry (#132).
+      // segment in an otherwise well formed entry.
       name: "a traversal segment in an entry's path",
       raw: JSON.stringify({
         version: 3,
@@ -252,9 +250,8 @@ test("decodeSnapshot: only the current version is accepted; version 1, missing, 
       want: { ok: false, reason: "corrupt" },
     },
     {
-      // A version 3 entry names the blob its content lives at (#184); one without an address is
-      // an older shape wearing a current marker, and guessing an address for it would fetch
-      // `.geode/blobs/undefined`.
+      // A version 3 entry names the blob its content lives at, so one without an address is an
+      // older shape wearing a current marker.
       name: "an entry with no blob address",
       raw: JSON.stringify({ version: 3, files: [{ path: "a.md", size: 1, mtime: 2, hash: "h" }] }),
       want: { ok: false, reason: "corrupt" },
@@ -284,7 +281,7 @@ test("decodeSnapshot: only the current version is accepted; version 1, missing, 
     },
     {
       // Bucket keys are case sensitive but macOS, Windows, and Android default to case
-      // insensitive filesystems, so pulling both would silently let one overwrite the other (#94).
+      // insensitive filesystems, so pulling both would silently let one overwrite the other.
       name: "two paths differing only by case",
       raw: JSON.stringify({
         version: 3,
@@ -440,7 +437,7 @@ test("decodeSnapshot: a duplicate path is refused even when the content matches"
 });
 
 test("decodeSnapshot: NFC folding happens before the case fold, so both are caught (#134)", () => {
-  // Normalizing first is what makes the #94 case check mean what it says: on the raw bytes an NFD
+  // Normalizing first is what makes the case check mean what it says: on the raw bytes an NFD
   // "Café.md" and an NFC "café.md" fold to different lowercase strings and both slip through.
   const upper = { path: "CAFÉ.md", size: 5, mtime: 1, hash: "abc", blob: "abc" };
   const lower = { path: "café.md", size: 5, mtime: 1, hash: "def", blob: "def" };
