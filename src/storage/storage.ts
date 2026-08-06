@@ -1,5 +1,6 @@
 import { AwsClient } from "aws4fetch";
 import {
+  bucketFor,
   endpointFor,
   type GeodeSettings,
   normalizePrefix,
@@ -151,12 +152,12 @@ export function createS3Client(
   }
 
   const client = new AwsClient({
-    accessKeyId: settings.accessKeyId,
+    accessKeyId: settings.accessKeyId.trim(),
     secretAccessKey,
     region: regionFor(settings),
     service: "s3",
   });
-  const baseUrl = `${endpointFor(settings)}/${settings.bucket}`;
+  const baseUrl = `${endpointFor(settings)}/${bucketFor(settings)}`;
   const root = normalizePrefix(settings.prefix);
 
   return {
@@ -256,12 +257,12 @@ export async function testConnection(
   }
 
   const client = new AwsClient({
-    accessKeyId: settings.accessKeyId,
+    accessKeyId: settings.accessKeyId.trim(),
     secretAccessKey,
     region: regionFor(settings),
     service: "s3",
   });
-  const url = `${endpointFor(settings)}/${settings.bucket}`;
+  const url = `${endpointFor(settings)}/${bucketFor(settings)}`;
 
   let response: HttpResponse;
   try {
@@ -309,10 +310,10 @@ function conditionHeaders(condition: PutCondition | undefined): Record<string, s
 // need bucket, access key, and secret; R2 derives endpoint and region from the account ID, so
 // only custom needs them explicitly.
 function missingFieldFor(settings: GeodeSettings, secretAccessKey: string): string {
-  if (settings.bucket === "") {
+  if (bucketFor(settings) === "") {
     return "bucket";
   }
-  if (settings.accessKeyId === "") {
+  if (settings.accessKeyId.trim() === "") {
     return "access key ID";
   }
   if (secretAccessKey === "") {
