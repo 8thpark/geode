@@ -43,8 +43,9 @@ requirements, being secure, and delivering value to our users.
 
 ## Code Style
 
-It is critically important that you abide by all the rules set out in the `typescript-as-go` skill
-(`.agents/skills/typescript-as-go/SKILL.md`) when writing TypeScript, no exceptions.
+The `typescript-as-go` skill (`.agents/skills/typescript-as-go/SKILL.md`) is the source of truth for
+how TypeScript is written here, comments included. Abide by every rule in it, no exceptions, and
+enforce it on any code you write, change, or review.
 
 Additional rules for the project:
 
