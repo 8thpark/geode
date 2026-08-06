@@ -14,10 +14,13 @@ export const DEFAULT_SETTINGS: GeodeSettings = {
 // ConnectionStatus is the current in-memory state of a Test Connection check.
 export type ConnectionStatus = "unknown" | "checking" | "ok" | "error";
 
+// Provider identifies a supported S3 compatible storage configuration.
+export type Provider = "r2" | "s3" | "custom";
+
 // GeodeSettings is the persisted shape of a Geode plugin's user configuration.
 export type GeodeSettings = {
   version: number;
-  provider: "r2" | "custom";
+  provider: Provider;
   accountId: string;
   endpoint: string;
   region: string;
@@ -97,9 +100,18 @@ export function normalizeEndpoint(endpoint: string): string {
 }
 
 // endpointFor returns the storage endpoint URL to use for the given settings.
+// The Amazon S3 endpoint interpolates the region into the URL authority, so a region carrying
+// authority delimiters (`x@attacker.example:443#`) would silently redirect signed vault requests
+// to another host. An unrecognised region yields "" rather than a host we never meant to talk to.
 export function endpointFor(settings: GeodeSettings): string {
   if (settings.provider === "r2") {
     return `https://${settings.accountId}.r2.cloudflarestorage.com`;
+  }
+  if (settings.provider === "s3") {
+    if (!isAwsRegion(settings.region)) {
+      return "";
+    }
+    return `https://s3.${settings.region}.amazonaws.com`;
   }
 
   return normalizeEndpoint(settings.endpoint);
@@ -112,6 +124,9 @@ export function hasConnectionConfig(settings: GeodeSettings): boolean {
   }
   if (settings.provider === "r2") {
     return settings.accountId !== "";
+  }
+  if (settings.provider === "s3") {
+    return isAwsRegion(settings.region);
   }
   return settings.endpoint !== "" && settings.region !== "";
 }
@@ -144,6 +159,13 @@ export function normalizePrefix(raw: string): string {
   }
 
   return segments.join("/");
+}
+
+// isAwsRegion reports whether region looks like an AWS region identifier ("us-east-1",
+// "eu-west-2", "us-gov-west-1"). Only the restricted alphabet matters for safety: it admits no
+// character that can terminate or redirect a URL authority.
+export function isAwsRegion(region: string): boolean {
+  return /^[a-z]{2}(-[a-z]+){1,2}-\d{1,2}$/.test(region);
 }
 
 // normalizeSettings returns a complete GeodeSettings from whatever loadData produced,
@@ -196,12 +218,23 @@ export function prefixError(raw: string): string {
   return "";
 }
 
-// providerOr returns "custom" if v is "custom", otherwise "r2".
-export function providerOr(v: unknown): "r2" | "custom" {
-  if (v === "custom") {
-    return "custom";
+// providerOr returns a known provider, defaulting unknown values to "r2".
+export function providerOr(v: unknown): Provider {
+  if (v === "s3" || v === "custom") {
+    return v;
   }
   return "r2";
+}
+
+// providerOptions returns user-facing providers, including Custom only for local development.
+export function providerOptions(
+  localDev: boolean,
+): Record<Provider, string> | Record<"r2" | "s3", string> {
+  if (localDev) {
+    return { r2: "Cloudflare R2", s3: "Amazon S3", custom: "Custom" };
+  }
+
+  return { r2: "Cloudflare R2", s3: "Amazon S3" };
 }
 
 // regionFor returns the signing region to use for the given settings. R2 always signs with
