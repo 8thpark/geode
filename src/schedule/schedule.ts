@@ -19,6 +19,20 @@ export const BACKOFF_BASE_MS = 120_000;
 // rather than waiting for someone to notice and click.
 export const BACKOFF_MAX_MS = 1_800_000;
 
+// DEFAULT_STATE is the complete zero value: nothing pending, nothing failed, nothing synced yet,
+// and a window assumed unfocused until the plugin says otherwise.
+export const DEFAULT_STATE: State = {
+  blurredAt: 0,
+  failures: 0,
+  focusedAt: 0,
+  lastEventAt: 0,
+  lastPassAt: 0,
+  pendingSince: 0,
+  retryAfter: 0,
+  stopped: false,
+  syncing: false,
+};
+
 // FOCUS_MIN_GAP_MS is how long a window must have been away before regaining focus counts as a
 // reason to sync. Without a floor, alt tabbing would be a sync trigger.
 export const FOCUS_MIN_GAP_MS = 60_000;
@@ -47,34 +61,28 @@ export const PAUSE_KEY = "geode-sync-paused";
 // rule itself out with a single HEAD on the manifest (#93, step 5).
 export const POLL_INTERVAL_MS = 300_000;
 
+// RACE_RETRY_MS is how long to wait after losing the manifest compare-and-swap to another device.
+// Short, and nothing like a backoff, because nothing went wrong: the other device finished first,
+// this one's work is untouched, and the manifest it needed to reconcile against is now sitting
+// there fresh. Waiting out a two minute backoff would be waiting for nothing to change.
+export const RACE_RETRY_MS = 10_000;
+
 // TICK_MS is how often the plugin asks due() for a decision. Small enough that every delay here is
 // accurate to the second or so, cheap enough to be irrelevant: a tick with nothing to do is a
 // handful of integer comparisons.
 export const TICK_MS = 5_000;
 
-// DEFAULT_STATE is the complete zero value: nothing pending, nothing failed, nothing synced yet,
-// and a window assumed unfocused until the plugin says otherwise.
-export const DEFAULT_STATE: State = {
-  blurredAt: 0,
-  failures: 0,
-  focusedAt: 0,
-  lastEventAt: 0,
-  lastPassAt: 0,
-  pendingSince: 0,
-  stopped: false,
-  syncing: false,
-};
-
 // Due is the answer to "should a pass start right now": either no, or yes and what to call it.
 export type Due = { due: false } | { due: true; trigger: Trigger };
 
 // PassResult is how a finished pass bears on when the next one runs, which is all the scheduler
-// needs to know about it. "ok" clears any backoff, "retry" backs off and tries again, and "stop"
-// halts automatic passes entirely, for a failure no amount of retrying can fix (credentials, an
-// unusable configuration, a bucket written in a format this build cannot read). Retrying one of
-// those every few minutes for a week is not resilience, it is a machine that has stopped
-// listening; noteResumed is how a halt ends.
-export type PassResult = "ok" | "retry" | "stop";
+// needs to know about it. "ok" clears everything. "raced" lost the manifest compare-and-swap to
+// another device, and comes back quickly without counting as a failure at all. "retry" backs off
+// and tries again. "stop" halts automatic passes entirely, for a failure no amount of retrying can
+// fix (credentials, an unusable configuration, a bucket written in a format this build cannot
+// read); retrying one of those every few minutes for a week is not resilience, it is a machine
+// that has stopped listening, and noteResumed is how a halt ends.
+export type PassResult = "ok" | "raced" | "retry" | "stop";
 
 // Readiness is everything outside the scheduler that decides whether automatic sync may run at
 // all, which is a different question from whether a pass is due. Passed in as plain answers rather
@@ -96,7 +104,9 @@ export type State = {
   // length of an absence knowable: without it the only measure to hand is the age of the last
   // pass, and an hour of unbroken work in a focused window would read as an hour spent away.
   blurredAt: number;
-  // failures counts consecutive failed passes, and resets to zero on any success.
+  // failures counts consecutive failed passes, and resets to zero on any success. It exists only
+  // to decide how loudly to complain (#182 escalates at the third in a row); when to try again is
+  // retryAfter's job, so that one counter is never asked two questions at once.
   failures: number;
   // focusedAt is when the window last gained focus, and zero for as long as it does not have it,
   // so one field answers both "is it focused" and "since when".
@@ -108,6 +118,12 @@ export type State = {
   // pendingSince is when the oldest unsynced vault change arrived, zero when there are none, and
   // the clock the ceiling on waiting for quiet runs off.
   pendingSince: number;
+  // retryAfter is when a pass that did not succeed may be tried again, and zero when there is
+  // nothing waiting to be retried. Written where the failure is recorded rather than derived here
+  // from a counter, so a delay that varies by reason (ten seconds for a lost race, a doubling
+  // backoff for a real failure) is one timestamp to compare against instead of arithmetic every
+  // caller has to reproduce.
+  retryAfter: number;
   // stopped is set by a failure retrying cannot fix, and cleared only by noteResumed.
   stopped: boolean;
   // syncing is true while a pass is in flight, so a tick never starts a second one.
@@ -141,14 +157,14 @@ export function due(state: State, now: number): Due {
   if (state.syncing || state.stopped) {
     return { due: false };
   }
-  // A failed pass is its own reason to run again, ahead of every other rule and regardless of
-  // focus. Without this a failure would have to hope some other trigger came along: notePassStarted
-  // clears the pending local work the pass was covering, so a push that fails on an unfocused
-  // window has nothing left to fire it, and the edits would sit there until the user happened to
-  // click back into Obsidian. Silence with unsynced work behind it is the one failure this whole
-  // design exists to avoid.
-  if (state.failures > 0) {
-    if (now - state.lastPassAt < backoffFor(state.failures)) {
+  // A pass that did not succeed is its own reason to run again, ahead of every other rule and
+  // regardless of focus. Without this it would have to hope some other trigger came along:
+  // notePassStarted clears the pending local work the pass was covering, so a push that fails on an
+  // unfocused window has nothing left to fire it, and the edits would sit there until the user
+  // happened to click back into Obsidian. Silence with unsynced work behind it is the one outcome
+  // this whole design exists to avoid.
+  if (state.retryAfter !== 0) {
+    if (now < state.retryAfter) {
       return { due: false };
     }
 
@@ -189,25 +205,30 @@ export function noteFocus(state: State, focused: boolean, now: number): State {
   return { ...state, focusedAt: now };
 }
 
-// notePassFinished records a pass ending, whatever it ended as. lastPassAt advances on failure
-// too: it is what the backoff is measured from, so a pass that failed still has to have happened
-// at a time. Counting consecutive failures rather than total is what lets one success wipe the
-// slate, so a flaky train journey costs one slow retry rather than a permanently slow client.
+// notePassFinished records a pass ending, whatever it ended as, and decides there and then when
+// the next attempt may run. lastPassAt advances on a failure too, since a pass that failed still
+// has to have happened at a time for the poll and focus rules to measure from. Counting
+// consecutive failures rather than total is what lets one success wipe the slate, so a flaky train
+// journey costs one slow retry rather than a permanently slow client.
 export function notePassFinished(state: State, result: PassResult, now: number): State {
+  const finished = { ...state, syncing: false, lastPassAt: now };
   if (result === "ok") {
-    return { ...state, syncing: false, lastPassAt: now, failures: 0 };
+    return { ...finished, failures: 0, retryAfter: 0 };
   }
+  // Losing the race is not this device failing, and must never count towards giving up. Two
+  // devices syncing at overlapping times is ordinary once sync is automatic rather than clicked,
+  // nothing is lost by it, and the loser's next pass reconciles both sides. Counting it would let
+  // an ordinary two device vault escalate itself into a half hour backoff over passes where
+  // everything worked exactly as designed.
+  if (result === "raced") {
+    return { ...finished, retryAfter: now + RACE_RETRY_MS };
+  }
+  const failures = state.failures + 1;
   if (result === "stop") {
-    return {
-      ...state,
-      syncing: false,
-      lastPassAt: now,
-      failures: state.failures + 1,
-      stopped: true,
-    };
+    return { ...finished, failures, retryAfter: 0, stopped: true };
   }
 
-  return { ...state, syncing: false, lastPassAt: now, failures: state.failures + 1 };
+  return { ...finished, failures, retryAfter: now + backoffFor(failures) };
 }
 
 // notePassStarted records a pass beginning, and clears the pending local work it is about to
@@ -224,7 +245,7 @@ export function notePassStarted(state: State): State {
 // could plausibly fix whatever failed: settings saved, the network coming back, or a user asking
 // by hand. Nothing else clears stopped, which is the point of it.
 export function noteResumed(state: State): State {
-  return { ...state, failures: 0, stopped: false };
+  return { ...state, failures: 0, retryAfter: 0, stopped: false };
 }
 
 // noteVaultChange records a local file appearing, changing, moving, or going away. The first one

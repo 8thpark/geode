@@ -67,21 +67,27 @@ once, and the **Sync** command still works. Pause stops the timer, never the esc
 Nothing is lost by a failed sync. Local edits stay local, remote edits stay remote, and the next
 successful pass reconciles both. What changes is how soon that next pass is attempted.
 
-| What went wrong                              | What Geode does                       |
-| -------------------------------------------- | ------------------------------------- |
-| Network, timeout, provider error             | Retries, waiting longer each time     |
-| Another device synced at the same moment     | Retries; both devices' work survives  |
-| One file failed, the rest went               | Keeps the progress, retries that file |
-| Secret access key missing                    | Stops automatic sync until you fix it |
-| Provider does not support conditional writes | Stops automatic sync until you fix it |
+| What went wrong                                | What Geode does                        |
+| ---------------------------------------------- | -------------------------------------- |
+| Network, timeout, provider error               | Retries, waiting longer each time      |
+| One file failed, the rest went                 | Keeps the progress, retries that file  |
+| Another device synced at the same moment       | Retries in a few seconds                |
+| Access key rejected, or storage misconfigured  | Stops automatic sync until you fix it  |
+| Secret access key missing                      | Stops automatic sync until you fix it  |
+| Provider does not support conditional writes   | Stops automatic sync until you fix it  |
+| Bucket was written by a newer version of Geode | Stops automatic sync; update Geode     |
 
 The retry delay starts at 2 minutes and doubles with each consecutive failure, up to 30 minutes. A
 single success resets it, so an unreliable connection costs you one slow retry rather than a
 permanently slow client.
 
-The two cases that **stop** automatic sync do so because retrying cannot fix them, and retrying
-every few minutes for a week would only generate noise. Saving your settings, or syncing by hand,
-starts it again.
+**Two devices syncing at the same moment is not a failure.** One of them wins, the other notices
+and tries again seconds later, and both devices' work survives either way. It never counts towards
+the delay above, so a vault in constant use across two machines never slows itself down.
+
+**The cases that stop automatic sync** do so because retrying cannot fix them. Trying a rejected
+access key again every few minutes for a week is noise, not resilience. Saving your settings, or
+syncing by hand, starts it again.
 
 ## Why There Is No Interval Setting
 

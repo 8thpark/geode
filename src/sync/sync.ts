@@ -1,5 +1,5 @@
 import { unwrapObject, wrapObject } from "../storage/envelope.ts";
-import type { ObjectMeta, PutCondition, StorageClient } from "../storage/storage.ts";
+import type { ObjectMeta, PutCondition, ResultStatus, StorageClient } from "../storage/storage.ts";
 import {
   byPath,
   decodeSnapshot,
@@ -34,10 +34,24 @@ export type SyncOutcome =
   | { ok: true; snapshot: Snapshot; changeCount: number }
   | {
       ok: false;
+      fault: SyncFault;
       message: string;
       failures: SyncFailure[];
       snapshot: Snapshot | null;
     };
+
+// SyncFault says how a failed pass should be treated by whatever decides when to try another one.
+// A message alone cannot answer that, and reading one to guess is how "(404)" ended up being
+// sniffed out of error text (#90), so the answer is carried rather than inferred.
+//
+// "transient" is anything a later attempt could plausibly get past on its own: a dropped
+// connection, a provider having a bad minute, a file that was briefly busy. "raced" is losing the
+// manifest compare-and-swap to another device, which is not this device failing at all; nothing is
+// lost by it, both sides' work survives, and the next pass reconciles them, so it must never count
+// towards giving up. "permanent" is everything retrying cannot fix, where trying again every few
+// minutes for a week is noise rather than resilience: credentials that are wrong, a bucket
+// belonging to a different vault, a manifest written in a format this build cannot read.
+export type SyncFault = "transient" | "raced" | "permanent";
 
 // adoptLiveStats returns manifest with each entry swapped for the live vault's entry at the same
 // path wherever the content hashes match, so state.json carries local size and mtime and the next
@@ -58,6 +72,26 @@ export function adoptLiveStats(manifest: Snapshot, live: Snapshot): Snapshot {
   }
 
   return { files };
+}
+
+// faultFor maps how a storage operation failed onto how the pass carrying it should be treated.
+// The two vocabularies stay separate because they answer different questions: ResultStatus says
+// what the provider did, SyncFault says whether trying again is worth anything.
+//
+// A lost precondition is the whole point of the compare-and-swap working, so it is raced rather
+// than failed. Auth and client are the provider telling us we are wrong rather than unlucky, and
+// no number of retries argues with that. Everything else, including 5xx and 429, is worth another
+// go. "ok" and "not_found" never reach here as failures (a 404 on the manifest is a first sync,
+// not an error) and fall through to transient, which is the harmless answer if one ever does.
+export function faultFor(status: ResultStatus): SyncFault {
+  if (status === "conflict") {
+    return "raced";
+  }
+  if (status === "auth" || status === "client") {
+    return "permanent";
+  }
+
+  return "transient";
 }
 
 // readRemoteManifest fetches and parses the remote manifest. A confirmed 404 means no manifest
@@ -82,10 +116,13 @@ export async function readRemoteManifest(
 ): Promise<
   | { ok: true; snapshot: Snapshot; firstSync: true }
   | { ok: true; snapshot: Snapshot; firstSync: false; etag: string }
-  | { ok: false; message: string }
+  | { ok: false; fault: SyncFault; message: string }
 > {
   const fetched = await storage.getObject(MANIFEST_KEY);
 
+  // Every refusal below this point is permanent: the bytes in the bucket are not something this
+  // build can read, and reading them again in two minutes will not change that. What they need is
+  // a newer geode, or a human, never a retry.
   if (fetched.ok && fetched.body !== null) {
     // The envelope is read before the JSON inside it, and its two unsupported reasons report the
     // same thing an unknown manifest version does: this bucket was written by a build that knows
@@ -96,10 +133,11 @@ export async function readRemoteManifest(
     const opened = unwrapObject(fetched.body);
     if (!opened.ok) {
       if (opened.reason === "corrupt") {
-        return { ok: false, message: "remote manifest is corrupt" };
+        return { ok: false, fault: "permanent", message: "remote manifest is corrupt" };
       }
       return {
         ok: false,
+        fault: "permanent",
         message: "remote manifest is a format this version of geode can't read",
       };
     }
@@ -108,32 +146,39 @@ export async function readRemoteManifest(
       if (decoded.reason === "unsupportedVersion") {
         return {
           ok: false,
+          fault: "permanent",
           message: "remote manifest is a format this version of geode can't read",
         };
       }
       if (decoded.reason === "unsafePath") {
-        return { ok: false, message: "remote manifest contains a path unsafe to write" };
+        return {
+          ok: false,
+          fault: "permanent",
+          message: "remote manifest contains a path unsafe to write",
+        };
       }
       if (decoded.reason === "caseCollision") {
         return {
           ok: false,
+          fault: "permanent",
           message: "remote manifest contains two paths that differ only by case",
         };
       }
       if (decoded.reason === "duplicatePath") {
         return {
           ok: false,
+          fault: "permanent",
           message: "remote manifest names the same path twice",
         };
       }
-      return { ok: false, message: "remote manifest is corrupt" };
+      return { ok: false, fault: "permanent", message: "remote manifest is corrupt" };
     }
     // Every S3 compatible server returns an ETag on a successful read; without one (a stripping
     // proxy, a broken provider) the manifest upload can't be made conditional, and uploading it
     // unconditionally is exactly the concurrent clobber #83 fixed, so refuse rather than sync
     // unsafely.
     if (fetched.etag === null) {
-      return { ok: false, message: "remote manifest has no etag" };
+      return { ok: false, fault: "permanent", message: "remote manifest has no etag" };
     }
     return { ok: true, snapshot: decoded.snapshot, firstSync: false, etag: fetched.etag };
   }
@@ -141,7 +186,7 @@ export async function readRemoteManifest(
   if (fetched.status === "not_found") {
     return { ok: true, snapshot: { files: [] }, firstSync: true };
   }
-  return { ok: false, message: fetched.message };
+  return { ok: false, fault: faultFor(fetched.status), message: fetched.message };
 }
 
 // readSentinel fetches and parses the remote sentinel (#183). A confirmed 404 is reported as
@@ -150,17 +195,20 @@ export async function readRemoteManifest(
 // "this bucket has never had one" from "something is wrong reading it" apart.
 export async function readSentinel(
   storage: StorageClient,
-): Promise<{ ok: true; sentinel: Sentinel | null } | { ok: false; message: string }> {
+): Promise<
+  { ok: true; sentinel: Sentinel | null } | { ok: false; fault: SyncFault; message: string }
+> {
   const fetched = await storage.getObject(SENTINEL_KEY);
 
   if (fetched.ok && fetched.body !== null) {
     const opened = unwrapObject(fetched.body);
     if (!opened.ok) {
       if (opened.reason === "corrupt") {
-        return { ok: false, message: "remote sentinel is corrupt" };
+        return { ok: false, fault: "permanent", message: "remote sentinel is corrupt" };
       }
       return {
         ok: false,
+        fault: "permanent",
         message: "remote sentinel is a format this version of geode can't read",
       };
     }
@@ -169,10 +217,11 @@ export async function readSentinel(
       if (decoded.reason === "unsupportedVersion") {
         return {
           ok: false,
+          fault: "permanent",
           message: "remote sentinel is a format this version of geode can't read",
         };
       }
-      return { ok: false, message: "remote sentinel is corrupt" };
+      return { ok: false, fault: "permanent", message: "remote sentinel is corrupt" };
     }
     return { ok: true, sentinel: decoded.sentinel };
   }
@@ -180,7 +229,7 @@ export async function readSentinel(
   if (fetched.status === "not_found") {
     return { ok: true, sentinel: null };
   }
-  return { ok: false, message: fetched.message };
+  return { ok: false, fault: faultFor(fetched.status), message: fetched.message };
 }
 
 // revertFailedPaths returns snapshot with every failed action's path restored to the ancestor's
@@ -234,10 +283,22 @@ export async function syncOnce(
     readSentinel(storage),
   ]);
   if (!remote.ok) {
-    return { ok: false, message: remote.message, failures: [], snapshot: null };
+    return {
+      ok: false,
+      fault: remote.fault,
+      message: remote.message,
+      failures: [],
+      snapshot: null,
+    };
   }
   if (!sentinelResult.ok) {
-    return { ok: false, message: sentinelResult.message, failures: [], snapshot: null };
+    return {
+      ok: false,
+      fault: sentinelResult.fault,
+      message: sentinelResult.message,
+      failures: [],
+      snapshot: null,
+    };
   }
   const identity = resolveVaultIdentity(
     remote.firstSync,
@@ -246,7 +307,13 @@ export async function syncOnce(
     newVaultId,
   );
   if (!identity.ok) {
-    return { ok: false, message: identity.message, failures: [], snapshot: null };
+    return {
+      ok: false,
+      fault: "permanent",
+      message: identity.message,
+      failures: [],
+      snapshot: null,
+    };
   }
 
   // No remote manifest means no prior sync ever completed against this bucket, so previous (the
@@ -286,7 +353,13 @@ export async function syncOnce(
   if (remote.firstSync) {
     const listed = await storage.listObjects(BLOB_PREFIX);
     if (!listed.ok) {
-      return { ok: false, message: listed.message, failures: [], snapshot: null };
+      return {
+        ok: false,
+        fault: faultFor(listed.status),
+        message: listed.message,
+        failures: [],
+        snapshot: null,
+      };
     }
     for (const key of unexplainedBlobs(listed.objects, local)) {
       strandedFailures.push({ path: key, message: "in the bucket but not in the local vault" });
@@ -368,6 +441,7 @@ export async function syncOnce(
       if (uploaded.status === "conflict") {
         return {
           ok: false,
+          fault: "raced",
           message: "another device synced at the same time; sync again",
           failures: executed.failures,
           snapshot: null,
@@ -375,6 +449,7 @@ export async function syncOnce(
       }
       return {
         ok: false,
+        fault: faultFor(uploaded.status),
         message: uploaded.message,
         failures: executed.failures,
         snapshot: null,
@@ -398,6 +473,7 @@ export async function syncOnce(
     if (!sentinelUploaded.ok) {
       return {
         ok: false,
+        fault: faultFor(sentinelUploaded.status),
         message: "could not write the vault sentinel; sync again",
         failures: executed.failures,
         snapshot: null,
@@ -411,9 +487,16 @@ export async function syncOnce(
   // otherwise, for a path a stranded blob doesn't have, so there is nothing for revertFailedPaths
   // to revert; it is folded in here purely so the pass reports itself failed and names what it
   // could not explain, rather than returning ok on a first sync that left content unreferenced.
+  //
+  // Transient, because a per file failure is overwhelmingly an I/O error or a mid sync drift, both
+  // of which the next pass resolves on its own, and because the rest of the pass succeeded: the
+  // manifest went up, so a file that keeps failing costs a retry rather than the whole vault. A
+  // stranded blob is the one member of this set retrying cannot fix, but it only ever arises on a
+  // first sync, which is never automatic, so nothing is backing off over it either way.
   if (executed.failed.length > 0 || strandedFailures.length > 0) {
     return {
       ok: false,
+      fault: "transient",
       message: `${executed.failed.length + strandedFailures.length} file(s) failed to sync`,
       failures: [...executed.failures, ...strandedFailures],
       snapshot: revertFailedPaths(final, ancestor, executed.failed),

@@ -16,6 +16,7 @@ import {
   noteResumed,
   noteVaultChange,
   POLL_INTERVAL_MS,
+  RACE_RETRY_MS,
   type State,
 } from "./schedule.ts";
 
@@ -111,17 +112,13 @@ test("due: each rule fires on its own terms, and the order between them holds", 
       want: { due: false },
     },
     {
-      name: "a backoff outranks local work, so a failing vault is not retried every quiet period",
-      state: idle({
-        failures: 1,
-        lastPassAt: NOW - BACKOFF_BASE_MS + 1,
-        ...pending(NOW - LOCAL_QUIET_MS, NOW - LOCAL_QUIET_MS),
-      }),
+      name: "a pending retry outranks local work, so a failing vault is not tried every quiet period",
+      state: idle({ retryAfter: NOW + 1, ...pending(NOW - LOCAL_QUIET_MS, NOW - LOCAL_QUIET_MS) }),
       want: { due: false },
     },
     {
-      name: "the retry runs the moment the backoff expires",
-      state: idle({ failures: 1, lastPassAt: NOW - BACKOFF_BASE_MS }),
+      name: "the retry runs the moment its delay expires",
+      state: idle({ retryAfter: NOW }),
       want: { due: true, trigger: "retry" },
     },
     {
@@ -129,22 +126,7 @@ test("due: each rule fires on its own terms, and the order between them holds", 
       // cleared by notePassStarted, and an unfocused window has neither a poll nor a focus event
       // to fall back on, so without a retry of its own the edits would sit there unsynced.
       name: "a failed pass retries even with the window unfocused and nothing pending",
-      state: idle({ failures: 1, focusedAt: 0, lastPassAt: NOW - BACKOFF_BASE_MS }),
-      want: { due: true, trigger: "retry" },
-    },
-    {
-      name: "three consecutive failures wait four times the base delay, not one",
-      state: idle({ failures: 3, lastPassAt: NOW - BACKOFF_BASE_MS * 4 + 1 }),
-      want: { due: false },
-    },
-    {
-      name: "and run once that longer delay expires",
-      state: idle({ failures: 3, lastPassAt: NOW - BACKOFF_BASE_MS * 4 }),
-      want: { due: true, trigger: "retry" },
-    },
-    {
-      name: "a long offline stretch stops doubling at the cap rather than growing forever",
-      state: idle({ failures: 20, lastPassAt: NOW - BACKOFF_MAX_MS }),
+      state: idle({ retryAfter: NOW, focusedAt: 0 }),
       want: { due: true, trigger: "retry" },
     },
   ];
@@ -202,20 +184,57 @@ test("notePassFinished: a success wipes the slate, a failure counts, a terminal 
   const failed = notePassFinished(notePassFinished(DEFAULT_STATE, "retry", 100), "retry", 200);
   assert.equal(failed.failures, 2);
   assert.equal(failed.stopped, false);
-  // lastPassAt advances on a failure too: it is what the backoff is measured from, so a pass that
-  // failed still has to have happened at a time.
+  // lastPassAt advances on a failure too, since the poll and focus rules measure from it: a pass
+  // that failed still has to have happened at a time.
   assert.equal(failed.lastPassAt, 200);
 
   const recovered = notePassFinished(failed, "ok", 300);
   assert.equal(recovered.failures, 0);
+  assert.equal(recovered.retryAfter, 0);
   assert.equal(recovered.syncing, false);
 
   const halted = notePassFinished(failed, "stop", 300);
   assert.equal(halted.stopped, true);
+  // A halt is not a slow retry; nothing is waiting, and no amount of time changes the answer.
+  assert.equal(halted.retryAfter, 0);
   assert.deepEqual(due(halted, 300 + BACKOFF_MAX_MS * 10), { due: false });
 });
 
-test("noteResumed: clears a halt and the accumulated backoff, and nothing else does", () => {
+test("notePassFinished: the retry delay doubles with each consecutive failure, up to the cap", () => {
+  let state = notePassFinished(DEFAULT_STATE, "retry", 1_000);
+  assert.equal(state.retryAfter, 1_000 + BACKOFF_BASE_MS);
+
+  state = notePassFinished(state, "retry", 2_000);
+  assert.equal(state.retryAfter, 2_000 + BACKOFF_BASE_MS * 2);
+
+  state = notePassFinished(state, "retry", 3_000);
+  assert.equal(state.retryAfter, 3_000 + BACKOFF_BASE_MS * 4);
+
+  // A long stretch offline stops doubling rather than growing into a delay nothing would ever
+  // reach, so a laptop reopened after lunch still catches up on its own.
+  let long = DEFAULT_STATE;
+  for (let i = 0; i < 20; i++) {
+    long = notePassFinished(long, "retry", 0);
+  }
+  assert.equal(long.retryAfter, BACKOFF_MAX_MS);
+});
+
+test("notePassFinished: losing a race retries soon and never counts towards giving up", () => {
+  // Two devices syncing at overlapping times is ordinary once sync runs on a timer rather than a
+  // click, and the loser has lost nothing: its work is intact and the manifest it needs to
+  // reconcile against is now sitting there fresh. Counting these would let an entirely healthy
+  // two device vault escalate itself into a half hour backoff.
+  let state = DEFAULT_STATE;
+  for (let i = 0; i < 10; i++) {
+    state = notePassFinished(state, "raced", 1_000);
+  }
+
+  assert.equal(state.failures, 0);
+  assert.equal(state.retryAfter, 1_000 + RACE_RETRY_MS);
+  assert.deepEqual(due(state, 1_000 + RACE_RETRY_MS), { due: true, trigger: "retry" });
+});
+
+test("noteResumed: clears a halt and any pending retry, and nothing else does", () => {
   let state = notePassFinished(DEFAULT_STATE, "stop", 100);
   // A halt survives anything that is not a deliberate resume, so a stopped scheduler cannot drift
   // back into retrying credentials that are still wrong.
@@ -226,6 +245,7 @@ test("noteResumed: clears a halt and the accumulated backoff, and nothing else d
   const resumed = noteResumed(state);
   assert.equal(resumed.stopped, false);
   assert.equal(resumed.failures, 0);
+  assert.equal(resumed.retryAfter, 0);
 });
 
 test("noteFocus: losing focus records when, so the absence can be measured on the way back", () => {
