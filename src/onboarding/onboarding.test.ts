@@ -12,6 +12,10 @@ import {
   previewFor,
   type RemoteRead,
   readRemote,
+  stageForCheck,
+  stageForFailedCheck,
+  stageForFailedSync,
+  stageForSync,
 } from "./onboarding.ts";
 
 // VAULT_ID is the identity a seeded bucket claims; nothing depends on the value beyond two tests
@@ -155,6 +159,45 @@ test("doneLead: reports what the pass moved, without making a count read as a pl
   assert.match(doneLead(0), /Nothing needed moving/);
   assert.equal(doneLead(1), "Synced. 1 change applied.");
   assert.equal(doneLead(2), "Synced. 2 changes applied.");
+});
+
+test("stageForCheck: a completed read moves the dialog on to what it would do", () => {
+  assert.deepEqual(stageForCheck(["a.md"], { kind: "fresh" }), {
+    kind: "preview",
+    preview: { kind: "push", upload: 1 },
+  });
+});
+
+test("stageForFailedCheck: a thrown read still lands somewhere with a way out", () => {
+  const cases: { name: string; err: unknown; want: string }[] = [
+    { name: "an error is shown as what it says", err: new Error("disk gone"), want: "disk gone" },
+    { name: "an empty message is no message at all", err: new Error(""), want: "unexpected error" },
+    { name: "a thrown string carries nothing to show", err: "nope", want: "unexpected error" },
+  ];
+
+  for (const c of cases) {
+    assert.deepEqual(
+      stageForFailedCheck(c.err),
+      { kind: "preview", preview: { kind: "unreachable", message: c.want } },
+      c.name,
+    );
+  }
+});
+
+test("stageForSync: a reported pass ends the dialog on what it did, or on what went wrong", () => {
+  assert.deepEqual(stageForSync({ ok: true, changeCount: 3 }), { kind: "done", changeCount: 3 });
+  assert.deepEqual(stageForSync({ ok: false, message: "bucket gone" }), {
+    kind: "failed",
+    message: "bucket gone",
+  });
+});
+
+test("stageForFailedSync: a pass that throws past its report is still a failed pass", () => {
+  assert.deepEqual(stageForFailedSync(new Error("boom")), { kind: "failed", message: "boom" });
+  assert.deepEqual(stageForFailedSync(undefined), {
+    kind: "failed",
+    message: "unexpected error",
+  });
 });
 
 test("readRemote: a bucket with no manifest is fresh", async () => {

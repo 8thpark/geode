@@ -36,6 +36,14 @@ export type RemoteRead =
   | { kind: "blocked"; message: string }
   | { kind: "unreachable"; message: string };
 
+// Stage is where the dialog has got to, and is the only state it holds.
+export type Stage =
+  | { kind: "checking" }
+  | { kind: "preview"; preview: Preview }
+  | { kind: "syncing" }
+  | { kind: "done"; changeCount: number }
+  | { kind: "failed"; message: string };
+
 // SyncReport is what one pass tells a caller that has to say more about it than the status bar's
 // icon can.
 export type SyncReport = { ok: true; changeCount: number } | { ok: false; message: string };
@@ -193,6 +201,32 @@ export async function readRemote(
   return { kind: "vault", paths };
 }
 
+// stageForCheck returns where the dialog lands once it knows what both sides hold.
+export function stageForCheck(localPaths: string[], remote: RemoteRead): Stage {
+  return { kind: "preview", preview: previewFor(localPaths, remote) };
+}
+
+// stageForFailedCheck returns where the dialog lands when a preview read throws instead of
+// returning a result, which is another way of not knowing and so is offered the same retry.
+export function stageForFailedCheck(err: unknown): Stage {
+  return { kind: "preview", preview: { kind: "unreachable", message: messageFrom(err) } };
+}
+
+// stageForFailedSync returns where the dialog lands when a pass throws past the report it was
+// supposed to return.
+export function stageForFailedSync(err: unknown): Stage {
+  return { kind: "failed", message: messageFrom(err) };
+}
+
+// stageForSync returns where the dialog lands once a pass has reported.
+export function stageForSync(report: SyncReport): Stage {
+  if (!report.ok) {
+    return { kind: "failed", message: report.message };
+  }
+
+  return { kind: "done", changeCount: report.changeCount };
+}
+
 // files renders a file count with its noun, since a dialog read once should not make anyone parse
 // "file(s)".
 function files(count: number): string {
@@ -201,6 +235,16 @@ function files(count: number): string {
   }
 
   return `${count} files`;
+}
+
+// messageFrom returns what a thrown value can be shown as, since nothing stops a rejection
+// carrying something that is not an Error.
+function messageFrom(err: unknown): string {
+  if (err instanceof Error && err.message !== "") {
+    return err.message;
+  }
+
+  return "unexpected error";
 }
 
 // refusal maps a failed read onto the two things the dialog can offer: something to go and fix, or

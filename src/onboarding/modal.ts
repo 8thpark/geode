@@ -5,9 +5,13 @@ import {
   DONE_STEPS,
   doneLead,
   type Preview,
-  previewFor,
   type RemoteRead,
+  type Stage,
   type SyncReport,
+  stageForCheck,
+  stageForFailedCheck,
+  stageForFailedSync,
+  stageForSync,
 } from "./onboarding.ts";
 
 // Actions is everything the dialog needs from the plugin, and the whole of what it knows about
@@ -26,14 +30,6 @@ type Control = {
   close: () => void;
   sync: () => void;
 };
-
-// Stage is where the dialog has got to, and is the only state it holds.
-type Stage =
-  | { kind: "checking" }
-  | { kind: "preview"; preview: Preview }
-  | { kind: "syncing" }
-  | { kind: "done"; changeCount: number }
-  | { kind: "failed"; message: string };
 
 // renderCount draws one labelled number of the counts row.
 function renderCount(row: HTMLElement, label: string, value: number): void {
@@ -182,23 +178,27 @@ export class GeodeOnboardingModal extends Modal {
     void this.checkAsync();
   }
 
+  // Both steps report failure as a value, so a rejection here is something neither expected. It
+  // still has to land somewhere the dialog offers a way out of, or setup stops at "Checking...".
   private async checkAsync(): Promise<void> {
-    const [paths, remote] = await Promise.all([
-      this.actions.localPaths(),
-      this.actions.readRemote(),
-    ]);
-    this.setStage({ kind: "preview", preview: previewFor(paths, remote) });
+    try {
+      const [paths, remote] = await Promise.all([
+        this.actions.localPaths(),
+        this.actions.readRemote(),
+      ]);
+      this.setStage(stageForCheck(paths, remote));
+    } catch (err) {
+      this.setStage(stageForFailedCheck(err));
+    }
   }
 
   private async run(): Promise<void> {
     this.setStage({ kind: "syncing" });
-    const report = await this.actions.sync();
-    if (!report.ok) {
-      this.setStage({ kind: "failed", message: report.message });
-      return;
+    try {
+      this.setStage(stageForSync(await this.actions.sync()));
+    } catch (err) {
+      this.setStage(stageForFailedSync(err));
     }
-
-    this.setStage({ kind: "done", changeCount: report.changeCount });
   }
 
   private setStage(stage: Stage): void {
