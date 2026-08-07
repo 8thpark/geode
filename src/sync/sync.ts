@@ -10,6 +10,7 @@ import {
   takeSnapshot,
 } from "../vault/vault.ts";
 import { executeSyncPlan, type LocalWriter, type SyncFailure } from "./execute.ts";
+import { type MassChange, massChangeApproved, massChangeFor, massChangeHalts } from "./guard.ts";
 import {
   BLOB_PREFIX,
   decodeSentinel,
@@ -28,6 +29,17 @@ import {
 // worth keeping rather than always null.
 export type SyncOutcome =
   | { ok: true; snapshot: Snapshot; changeCount: number }
+  // A blocked pass executed nothing, so it has no progress to persist and nothing to retry: it is
+  // waiting on an answer only a person can give. restated marks one asked a second time.
+  | {
+      ok: false;
+      fault: "blocked";
+      change: MassChange;
+      restated: boolean;
+      message: string;
+      failures: SyncFailure[];
+      snapshot: null;
+    }
   | {
       ok: false;
       fault: SyncFault;
@@ -220,6 +232,7 @@ export async function syncOnce(
   now: number,
   newVaultId: () => string = () => crypto.randomUUID(),
   deviceId = "",
+  confirmed: MassChange | null = null,
 ): Promise<SyncOutcome> {
   const [remote, sentinelResult] = await Promise.all([
     readRemoteManifest(storage),
@@ -297,6 +310,31 @@ export async function syncOnce(
     manifestEtag = remote.etag;
   }
   const actions = planSync(ancestor, local, remoteView);
+
+  // The guard sits between planning and doing, the last point at which refusing costs nothing:
+  // one truncated listing or one bad manifest should never quietly gut a vault.
+  const change = massChangeFor(actions, local, ancestor.files.length);
+  const approved = massChangeApproved(confirmed, change);
+  if (massChangeHalts(change) && !approved) {
+    // An answer covers the plan it was given, never the next one: a confirmation that no longer
+    // describes what this pass would do is asked again rather than spent on it.
+    const restated = confirmed !== null;
+    let message = `this sync would delete or replace ${change.paths.length} files; confirm it first`;
+    if (restated) {
+      message = "this sync is no longer the one you confirmed; confirm it again";
+    }
+
+    return {
+      ok: false,
+      fault: "blocked",
+      change,
+      restated,
+      message,
+      failures: [],
+      snapshot: null,
+    };
+  }
+
   const executed = await executeSyncPlan(
     actions,
     local,

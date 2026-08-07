@@ -15,6 +15,7 @@ for the promise that no edit is ever lost.
 - [The Scheduler](#the-scheduler)
 - [What A Pass Does](#what-a-pass-does)
 - [Planning](#planning)
+- [The Mass Change Guard](#the-mass-change-guard)
 - [Executing](#executing)
 - [Conflicts](#conflicts)
 - [Vault Identity](#vault-identity)
@@ -59,6 +60,9 @@ one, automatic sync waits. Automatic sync also stays off while storage is not fu
 You are not left to find that first pass yourself. Saving a connection opens a dialog that reads the
 bucket, tells you what a first sync would upload, download, or merge, and runs it when you say so;
 see [the first sync dialog](technical_plugin.md#the-first-sync-dialog).
+
+**A sync that would destroy a large share of the vault is also always something you ask for**, first
+pass or hundredth; see [the mass change guard](#the-mass-change-guard).
 
 ### Pausing
 
@@ -132,16 +136,17 @@ One pass, in order:
 3. Read the remote manifest, and its ETag
 4. Resolve vault identity, refusing if this bucket is not the one this device synced before
 5. Plan the reconciliation from three snapshots
-6. Execute every action, collecting per file failures rather than stopping at the first
-7. Upload a manifest describing what the bucket now holds, conditional on that ETag still being
+6. Stop and ask if the plan would destroy a large share of the vault, unless it already has
+7. Execute every action, collecting per file failures rather than stopping at the first
+8. Upload a manifest describing what the bucket now holds, conditional on that ETag still being
    current, or on the manifest still being absent for a first sync
-8. Return the new snapshot for the caller to persist as `state.json`
+9. Return the new snapshot for the caller to persist as `state.json`
 
 The caller owns persistence. The previous snapshot is passed in and the new one handed back rather
 than read or written internally, so a pass stays pure over its inputs and tests can drive it with
 their own store.
 
-A pass that planned nothing and found a manifest already describing exactly that skips step 7.
+A pass that planned nothing and found a manifest already describing exactly that skips step 8.
 Writing it anyway is not merely a wasted request: every manifest upload is a compare and swap, so a
 device with nothing to say is a device that can lose a race it had no reason to enter and report
 "another device synced at the same time" over a vault nobody touched. Under manual sync that costs
@@ -174,6 +179,63 @@ Every pushed entry is recorded at the hash of the bytes that actually reached th
 pre-push snapshot hash and not at the owning action's success. A conflict's copy push can succeed
 while the same action's restore fails, and the copy still has to reach the manifest or it sits in
 the bucket forever, invisible to every other device.
+
+### The Mass Change Guard
+
+Between planning and executing sits the last point at which refusing costs nothing. A plan is
+counted before a byte moves, and a pass that would destroy a large share of the vault stops and asks
+instead of running.
+
+Destroying means one of three things, and nothing else counts:
+
+| Action                                       | Destructive? | Why                                     |
+| -------------------------------------------- | ------------ | --------------------------------------- |
+| A file deleted locally                       | Yes          | Goes to the trash, but it does go       |
+| A file here replaced by the remote version    | Yes          | The version in the vault is not kept    |
+| A file deleted from the bucket               | Yes          | The manifest stops listing it           |
+| A file added on either side                  | No           | Nothing is being replaced               |
+| A conflict copy                              | No           | Both versions survive, under two names  |
+
+The threshold is a share of the tracked files, clamped at both ends:
+
+```
+halt if destructive > clamp(tracked * 0.2, 10, 50)
+```
+
+Three bands fall out of that. Under 50 tracked files the floor of 10 binds, so deleting a handful of
+notes never prompts. Between 50 and 250 the share binds. Above 250 the ceiling of 50 binds, because
+a fifth of a ten thousand file vault is two thousand files and nobody should lose two thousand files
+without being asked.
+
+Neither end works alone. A share on its own waves through thousands in a large vault; a count on its
+own can never fire in a vault smaller than the count itself, which is exactly where a new user is.
+The floor is there because a guard people learn to dismiss guards nothing.
+
+Tracked is the ancestor's file count, so a first sync has a tracked count of zero. That is safe by
+construction rather than by special case: every action in a bootstrap is an addition, and a device
+pulling a vault into an empty folder is adding too, so neither can reach the floor.
+
+Halting executes nothing. No file is written, no manifest goes up, no sentinel is written, and
+`state.json` does not advance, so cancelling leaves a pass that can simply be planned again. The
+confirmation runs a fresh pass rather than resuming the halted one: the plan is rebuilt from a
+re-read of the bucket, which is both simpler than holding an ETag open across a human's attention
+span and safer, since the compare and swap is never left waiting on someone finding their reading
+glasses.
+
+An answer covers the plan it was given and no other. The confirmation carries the destructive set
+that was on the screen, and the fresh pass runs only if what it now plans is exactly that set, path
+for path and fate for fate. Anything else is a plan nobody has seen, so it is asked again rather
+than executed under an old yes. That matters because the vault and the bucket both keep moving
+between the dialog opening and someone answering it: without the binding, a "yes" to 12 deletions
+could be spent on 400.
+
+The comparison is by set rather than by order, since planning follows snapshot order and a re-read
+of the bucket is under no obligation to repeat it. A fresh plan that no longer trips the guard at
+all simply runs, confirmed or not; there is nothing left to ask about.
+
+Under automatic sync the halt is a full stop rather than a prompt on a timer. The scheduler treats
+it exactly like a permanent failure, so an unanswered dialog is asked once, not once every five
+minutes.
 
 ### Executing
 
@@ -342,6 +404,7 @@ successful pass reconciles both. What changes is how soon that next pass is atte
 | Secret access key missing                      | Stops automatic sync until you fix it |
 | Provider does not support conditional writes   | Stops automatic sync until you fix it |
 | Bucket was written by a newer version of Geode | Stops automatic sync; update Geode    |
+| The pass would destroy a large share of the vault | Stops automatic sync until you answer |
 
 A failed pass carries how it should be treated rather than leaving a caller to read the message and
 guess, which is how a bare "(404)" once ended up being sniffed out of error text.
@@ -352,6 +415,8 @@ guess, which is how a bare "(404)" once ended up being sniffed out of error text
   failing at all. Nothing is lost, both sides' work survives, and the next pass reconciles them.
 - **Permanent** is everything retrying cannot fix: credentials that are wrong, a bucket belonging to
   a different vault, a manifest written in a format this build cannot read.
+- **Blocked** is not a failure at all: the pass was refused by the mass change guard and is waiting
+  on an answer. Nothing ran, so there is no progress to keep and nothing to retry.
 
 A permanent failure halts automatic sync, and only two things lift that halt: syncing manually, and
 saving settings. Both are someone acting on the problem it is about. A network reconnect is neither.
