@@ -13,6 +13,7 @@ import {
   noteFocus,
   notePassFinished,
   notePassStarted,
+  noteReconnected,
   noteResumed,
   noteVaultChange,
   POLL_INTERVAL_MS,
@@ -238,6 +239,37 @@ test("notePassFinished: a race breaks a failure streak, since it proves the roun
   state = notePassFinished(state, "retry", 3_000);
   assert.equal(state.failures, 1);
   assert.equal(state.retryAfter, 3_000 + BACKOFF_BASE_MS);
+});
+
+test("noteReconnected: ends a backoff early, keeping the streak that sized it", () => {
+  let state = notePassFinished(notePassFinished(DEFAULT_STATE, "retry", 100), "retry", 200);
+  assert.equal(state.retryAfter, 200 + BACKOFF_BASE_MS * 2);
+
+  state = noteReconnected(state, 300);
+  assert.deepEqual(due(state, 300), { due: true, trigger: "retry" });
+  // The streak survives, so a reconnect that fixed nothing cannot flap the retry delay back down to
+  // the base every time an interface returns.
+  assert.equal(state.failures, 2);
+
+  state = notePassFinished(state, "retry", 300);
+  assert.equal(state.retryAfter, 300 + BACKOFF_BASE_MS * 4);
+});
+
+test("noteReconnected: with nothing waiting, there is nothing to bring forward", () => {
+  // A retry already due is not pushed back to the moment the network returned, and a state with no
+  // retry pending is not handed one it never earned.
+  const overdue = notePassFinished(DEFAULT_STATE, "retry", 100);
+  assert.deepEqual(noteReconnected(overdue, overdue.retryAfter + 1), overdue);
+  assert.deepEqual(noteReconnected(DEFAULT_STATE, 100), DEFAULT_STATE);
+});
+
+test("noteReconnected: a halt survives, since a network returning fixes nothing it stopped for", () => {
+  // Rejected credentials and a bucket belonging to another vault are exactly as wrong after a
+  // reconnect, so resuming here would re-fail on every flap for as long as the vault is open.
+  const halted = notePassFinished(DEFAULT_STATE, "stop", 100);
+
+  assert.deepEqual(noteReconnected(halted, 200), halted);
+  assert.deepEqual(due(noteReconnected(halted, 200), 100 + BACKOFF_MAX_MS * 10), { due: false });
 });
 
 test("noteResumed: clears a halt and any pending retry, and nothing else does", () => {

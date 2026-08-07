@@ -11,6 +11,7 @@ import {
   noteFocus,
   notePassFinished,
   notePassStarted,
+  noteReconnected,
   noteResumed,
   noteVaultChange,
   PAUSE_KEY,
@@ -237,7 +238,7 @@ export default class GeodePlugin extends Plugin {
       // Reconnecting only ends a backoff whose premise has visibly expired, and is never proof
       // anything works. Nothing gates on navigator.onLine, which reports far less than it seems.
       this.registerDomEvent(window, "online", () => {
-        this.schedule = noteResumed(this.schedule);
+        this.schedule = noteReconnected(this.schedule, Date.now());
       });
 
       this.registerInterval(window.setInterval(() => this.tick(), TICK_MS));

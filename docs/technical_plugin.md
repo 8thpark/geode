@@ -90,7 +90,10 @@ A manual pass ignores a pause and clears any halt. The escape hatch has to work 
 especially the one where the automatic path has given up.
 
 Coming back online ends a backoff early, but is not treated as proof anything works, only as reason
-enough to stop waiting out a backoff whose premise has visibly expired. Nothing gates on
+enough to stop waiting out a backoff whose premise has visibly expired. It pulls a waiting retry
+forward and stops there: the failure streak keeps its size, so a flapping interface cannot reset the
+delay to the base over and over, and a halt survives untouched, since wrong credentials and a bucket
+belonging to another vault are exactly as wrong after a reconnect. Nothing gates on
 `navigator.onLine`, which reports being on a network rather than being able to reach anything:
 trusting it would turn one wrong answer into a sync that silently never runs.
 

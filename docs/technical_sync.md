@@ -349,6 +349,11 @@ guess, which is how a bare "(404)" once ended up being sniffed out of error text
 - **Permanent** is everything retrying cannot fix: credentials that are wrong, a bucket belonging to
   a different vault, a manifest written in a format this build cannot read.
 
+A permanent failure halts automatic sync, and only two things lift that halt: syncing manually, and
+saving settings. Both are someone acting on the problem it is about. A network reconnect is neither.
+It says an interface came back, never that the provider is reachable or the credentials are good, so
+it brings a waiting retry forward and leaves the halt exactly where it is.
+
 A raced pass resets the failure streak rather than merely holding it. It reached the provider, read
 the manifest, moved the files, and lost only the final compare and swap, which proves the network is
 up and the credentials are good. Carrying an earlier failure past that point would let an unlucky
