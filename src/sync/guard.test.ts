@@ -6,6 +6,7 @@ import {
   DESTRUCTIVE_FLOOR,
   destructiveLabel,
   type MassChange,
+  massChangeApproved,
   massChangeCopy,
   massChangeFor,
   massChangeHalts,
@@ -143,6 +144,7 @@ test("massChangeHalts: a wiped remote trips in a vault of any size above the flo
 test("massChangeCopy: names every side the pass would touch", () => {
   const copy = massChangeCopy(
     change({ localDeletes: 214, localOverwrites: 37, remoteDeletes: 3, tracked: 900 }),
+    false,
   );
 
   assert.equal(
@@ -154,7 +156,7 @@ test("massChangeCopy: names every side the pass would touch", () => {
 });
 
 test("massChangeCopy: a single side reads as one clause", () => {
-  const copy = massChangeCopy(change({ localDeletes: 1, tracked: 4 }));
+  const copy = massChangeCopy(change({ localDeletes: 1, tracked: 4 }), false);
 
   assert.equal(
     copy.lead,
@@ -164,7 +166,7 @@ test("massChangeCopy: a single side reads as one clause", () => {
 });
 
 test("massChangeCopy: two sides read as one clause joined by and", () => {
-  const copy = massChangeCopy(change({ localDeletes: 2, remoteDeletes: 4, tracked: 40 }));
+  const copy = massChangeCopy(change({ localDeletes: 2, remoteDeletes: 4, tracked: 40 }), false);
 
   assert.equal(
     copy.lead,
@@ -174,10 +176,10 @@ test("massChangeCopy: two sides read as one clause joined by and", () => {
 });
 
 test("massChangeCopy: the note says what is recoverable, per side", () => {
-  const both = massChangeCopy(change({ localDeletes: 2, localOverwrites: 2, tracked: 20 }));
-  const overwrites = massChangeCopy(change({ localOverwrites: 2, tracked: 20 }));
-  const deleted = massChangeCopy(change({ localDeletes: 2, tracked: 20 }));
-  const remote = massChangeCopy(change({ remoteDeletes: 2, tracked: 20 }));
+  const both = massChangeCopy(change({ localDeletes: 2, localOverwrites: 2, tracked: 20 }), false);
+  const overwrites = massChangeCopy(change({ localOverwrites: 2, tracked: 20 }), false);
+  const deleted = massChangeCopy(change({ localDeletes: 2, tracked: 20 }), false);
+  const remote = massChangeCopy(change({ remoteDeletes: 2, tracked: 20 }), false);
 
   assert.equal(
     both.note,
@@ -198,11 +200,79 @@ test("massChangeCopy: the note says what is recoverable, per side", () => {
 });
 
 test("massChangeCopy: the halt is stated, since a cancelled prompt stops automatic sync", () => {
-  const copy = massChangeCopy(change({ localDeletes: 11, tracked: 20 }));
+  const copy = massChangeCopy(change({ localDeletes: 11, tracked: 20 }), false);
 
   assert.equal(
     copy.halted,
     "Nothing has changed yet, and automatic sync stays off until you answer this.",
+  );
+});
+
+test("massChangeApproved: an answer covers the plan it was shown, whatever order it comes back in", () => {
+  const shown = change({
+    localDeletes: 0,
+    paths: [
+      { kind: "localDelete", path: "a.md" },
+      { kind: "localOverwrite", path: "b.md" },
+      { kind: "remoteDelete", path: "c.md" },
+    ],
+  });
+  const reordered = change({
+    paths: [
+      { kind: "remoteDelete", path: "c.md" },
+      { kind: "localDelete", path: "a.md" },
+      { kind: "localOverwrite", path: "b.md" },
+    ],
+  });
+
+  assert.equal(massChangeApproved(shown, reordered), true);
+});
+
+test("massChangeApproved: nothing is approved without an answer", () => {
+  assert.equal(massChangeApproved(null, change({ localDeletes: 11, tracked: 20 })), false);
+});
+
+test("massChangeApproved: a plan that is not the one shown is not covered by the answer", () => {
+  const shown = change({
+    paths: [
+      { kind: "localDelete", path: "a.md" },
+      { kind: "localDelete", path: "b.md" },
+    ],
+  });
+  // One path swapped, one path added, and one path facing a different fate: each is a plan nobody
+  // has actually seen, so none of them may run on the answer given to the one above.
+  const swapped = change({
+    paths: [
+      { kind: "localDelete", path: "a.md" },
+      { kind: "localDelete", path: "c.md" },
+    ],
+  });
+  const extra = change({
+    paths: [
+      { kind: "localDelete", path: "a.md" },
+      { kind: "localDelete", path: "b.md" },
+      { kind: "localDelete", path: "c.md" },
+    ],
+  });
+  const rekinded = change({
+    paths: [
+      { kind: "localDelete", path: "a.md" },
+      { kind: "localOverwrite", path: "b.md" },
+    ],
+  });
+
+  assert.equal(massChangeApproved(shown, swapped), false);
+  assert.equal(massChangeApproved(shown, extra), false);
+  assert.equal(massChangeApproved(shown, rekinded), false);
+});
+
+test("massChangeCopy: a second asking says so, since the same dialog twice reads as a bug", () => {
+  const copy = massChangeCopy(change({ localDeletes: 12, tracked: 20 }), true);
+
+  assert.equal(
+    copy.lead,
+    "Something changed since you confirmed, so this is not the sync you agreed to. It would now " +
+      "delete 12 files from this vault.",
   );
 });
 

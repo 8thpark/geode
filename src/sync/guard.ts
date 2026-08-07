@@ -46,9 +46,34 @@ export function destructiveLabel(kind: DestructiveKind): string {
   return "remove from bucket";
 }
 
+// massChangeApproved reports whether a fresh plan is the one that was confirmed. Nothing is taken
+// on trust from the answer alone: what ran has to be what was on the screen.
+export function massChangeApproved(confirmed: MassChange | null, change: MassChange): boolean {
+  if (confirmed === null) {
+    return false;
+  }
+  if (confirmed.paths.length !== change.paths.length) {
+    return false;
+  }
+
+  // Keyed rather than compared in order: planSync's output follows snapshot order, which a
+  // re-read of the bucket is under no obligation to repeat.
+  const keys = new Set<string>();
+  for (const entry of confirmed.paths) {
+    keys.add(`${entry.kind}:${entry.path}`);
+  }
+  for (const entry of change.paths) {
+    if (!keys.has(`${entry.kind}:${entry.path}`)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 // massChangeCopy returns what the dialog says about a halted pass, kept here rather than in the
-// modal so the wording of every branch is pinned by a test.
-export function massChangeCopy(change: MassChange): MassChangeCopy {
+// modal so the wording of every branch is pinned by a test. restated marks a second asking.
+export function massChangeCopy(change: MassChange, restated: boolean): MassChangeCopy {
   const parts: string[] = [];
   if (change.localDeletes > 0) {
     parts.push(`delete ${files(change.localDeletes)} from this vault`);
@@ -60,9 +85,14 @@ export function massChangeCopy(change: MassChange): MassChangeCopy {
     parts.push(`remove ${files(change.remoteDeletes)} from your bucket`);
   }
 
-  const lead =
+  let lead =
     `Syncing now would ${phrase(parts)}. That is more of this vault than Geode will ` +
     "change without asking.";
+  if (restated) {
+    lead =
+      "Something changed since you confirmed, so this is not the sync you agreed to. It would " +
+      `now ${phrase(parts)}.`;
+  }
 
   return {
     halted: "Nothing has changed yet, and automatic sync stays off until you answer this.",

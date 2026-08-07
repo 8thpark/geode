@@ -13,11 +13,11 @@ type Control = {
 
 // render draws what the pass would destroy and the two answers to it, always as a full redraw of
 // the dialog rather than a DOM mutation, the same posture the log view takes.
-function render(el: HTMLElement, change: MassChange, control: Control): void {
+function render(el: HTMLElement, change: MassChange, restated: boolean, control: Control): void {
   el.empty();
   el.addClass("geode-mass-change");
 
-  const copy = massChangeCopy(change);
+  const copy = massChangeCopy(change, restated);
   el.createEl("p", { text: copy.lead });
   el.createEl("p", { cls: "geode-mass-change-note", text: copy.note });
   renderPaths(el, change);
@@ -63,18 +63,28 @@ function renderPaths(el: HTMLElement, change: MassChange): void {
 // docs/technical_sync.md for what counts as large and why the answer is never assumed.
 export class GeodeMassChangeModal extends Modal {
   private change: MassChange;
-  private confirm: () => void;
+  private confirm: (change: MassChange) => void;
   private confirmed = false;
+  private restated: boolean;
 
-  constructor(app: App, change: MassChange, confirm: () => void) {
+  constructor(
+    app: App,
+    change: MassChange,
+    restated: boolean,
+    confirm: (change: MassChange) => void,
+  ) {
     super(app);
     this.change = change;
     this.confirm = confirm;
+    this.restated = restated;
   }
 
   onOpen(): void {
     this.titleEl.setText("This sync would change a lot of files");
-    render(this.contentEl, this.change, {
+    if (this.restated) {
+      this.titleEl.setText("This sync changed since you confirmed it");
+    }
+    render(this.contentEl, this.change, this.restated, {
       cancel: () => this.close(),
       confirm: () => {
         this.confirmed = true;
@@ -88,7 +98,9 @@ export class GeodeMassChangeModal extends Modal {
   onClose(): void {
     this.contentEl.empty();
     if (this.confirmed) {
-      this.confirm();
+      // The plan that was on the screen travels with the answer, so the pass it authorises is the
+      // one it described and no other.
+      this.confirm(this.change);
     }
   }
 }

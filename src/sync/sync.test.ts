@@ -13,12 +13,14 @@ import {
   unwrapped,
   wrapped,
 } from "./fake.ts";
+import { massChangeFor } from "./guard.ts";
 import {
   blobKeyFor,
   conflictCopyPath,
   encodeSentinel,
   MANIFEST_KEY,
   SENTINEL_KEY,
+  type SyncAction,
 } from "./plan.ts";
 import {
   adoptLiveStats,
@@ -36,6 +38,17 @@ import {
 // content actually lives under.
 async function hashOf(text: string): Promise<string> {
   return hashBytes(new TextEncoder().encode(text));
+}
+
+// deletesOf returns the plan a wiped remote produces for entries, for building the answer a
+// confirmation dialog would have been given.
+function deletesOf(entries: FileState[]): SyncAction[] {
+  const actions: SyncAction[] = [];
+  for (const entry of entries) {
+    actions.push({ kind: "pullDelete", path: entry.path });
+  }
+
+  return actions;
 }
 
 // vaultOf builds a vault of count files as both snapshot entries and the live content behind them,
@@ -587,6 +600,7 @@ test("syncOnce: a remote that lost most of a vault halts before deleting anythin
     assert.equal(outcome.change.localDeletes, 12);
     assert.equal(outcome.change.tracked, 12);
     assert.equal(outcome.change.paths.length, 12);
+    assert.equal(outcome.restated, false);
   }
   assert.equal(outcome.snapshot, null);
   assert.equal(files.size, 12);
@@ -594,7 +608,7 @@ test("syncOnce: a remote that lost most of a vault halts before deleting anythin
   assert.equal(objects.size, 1);
 });
 
-test("syncOnce: the same pass runs in full once it has been confirmed", async () => {
+test("syncOnce: the confirmed pass runs in full when it is still the plan that was confirmed", async () => {
   const vault = await vaultOf(12);
   const reader = fakeReader(vault.content);
   const { writer, files } = fakeLocalWriter();
@@ -602,6 +616,7 @@ test("syncOnce: the same pass runs in full once it has been confirmed", async ()
     files.set(path, vault.content[path]);
   }
   const { storage } = fakeStorage({ [MANIFEST_KEY]: wrapped(encodeSnapshot(empty)) });
+  const confirmed = massChangeFor(deletesOf(vault.entries), snapshot(...vault.entries), 12);
 
   const outcome = await syncOnce(
     snapshot(...vault.entries),
@@ -611,11 +626,45 @@ test("syncOnce: the same pass runs in full once it has been confirmed", async ()
     1,
     () => "vault-1",
     "",
-    true,
+    confirmed,
   );
 
   assert.equal(outcome.ok, true);
   assert.equal(files.size, 0);
+});
+
+test("syncOnce: a confirmation is spent on the plan it was given and no other", async () => {
+  // The vault moved on between the dialog and the answer, so what would run is not what was on
+  // the screen. The pass is asked again rather than executing an unseen plan under an old yes.
+  const vault = await vaultOf(12);
+  const reader = fakeReader(vault.content);
+  const { writer, files } = fakeLocalWriter();
+  for (const path of Object.keys(vault.content)) {
+    files.set(path, vault.content[path]);
+  }
+  const { storage, objects } = fakeStorage({ [MANIFEST_KEY]: wrapped(encodeSnapshot(empty)) });
+  const stale = await vaultOf(12);
+  stale.entries[0] = { ...stale.entries[0], path: "somewhere-else.md" };
+  const confirmed = massChangeFor(deletesOf(stale.entries), snapshot(...stale.entries), 12);
+
+  const outcome = await syncOnce(
+    snapshot(...vault.entries),
+    reader,
+    writer,
+    storage,
+    1,
+    () => "vault-1",
+    "",
+    confirmed,
+  );
+
+  assert.ok(!outcome.ok);
+  assert.equal(outcome.fault, "blocked");
+  if (outcome.fault === "blocked") {
+    assert.equal(outcome.restated, true);
+  }
+  assert.equal(files.size, 12);
+  assert.equal(objects.size, 1);
 });
 
 test("syncOnce: a first sync pushing a whole vault is never mistaken for a mass deletion", async () => {

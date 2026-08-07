@@ -32,6 +32,7 @@ import {
 import { GeodeSettingTab } from "./settings/tab";
 import { obsidianTransport } from "./storage/obsidian";
 import { createS3Client, probeConditionalWrites } from "./storage/storage";
+import type { MassChange } from "./sync/guard";
 import { GeodeMassChangeModal } from "./sync/modal";
 import { type SyncFault, syncOnce } from "./sync/sync";
 import {
@@ -411,7 +412,10 @@ export default class GeodePlugin extends Plugin {
 
   // syncNow runs one pass, refusing to start a second while one is running. A manual pass ignores
   // a pause and clears any halt, since the escape hatch has to work in every state.
-  async syncNow(trigger: Trigger = "manual", allowMassChange = false): Promise<SyncReport> {
+  async syncNow(
+    trigger: Trigger = "manual",
+    confirmed: MassChange | null = null,
+  ): Promise<SyncReport> {
     if (this.schedule.syncing) {
       return { ok: false, message: "a sync is already running" };
     }
@@ -445,7 +449,7 @@ export default class GeodePlugin extends Plugin {
       result: "retry",
     };
     try {
-      outcome = await this.runSync(dir, trigger, allowMassChange);
+      outcome = await this.runSync(dir, trigger, confirmed);
     } catch (err) {
       let message = "unexpected error";
       if (err instanceof Error) {
@@ -466,7 +470,7 @@ export default class GeodePlugin extends Plugin {
   private async runSync(
     dir: string,
     trigger: Trigger,
-    allowMassChange: boolean,
+    confirmed: MassChange | null,
   ): Promise<PassOutcome> {
     const secretAccessKey = this.app.secretStorage.getSecret(this.settings.secretId);
     if (secretAccessKey === null || secretAccessKey === "") {
@@ -510,13 +514,13 @@ export default class GeodePlugin extends Plugin {
       Date.now(),
       () => crypto.randomUUID(),
       this.deviceId,
-      allowMassChange,
+      confirmed,
     );
     if (!outcome.ok && outcome.fault === "blocked") {
       this.logger.warn(`sync: ${outcome.message}`);
       this.setSyncStatus("error", outcome.message);
-      new GeodeMassChangeModal(this.app, outcome.change, () => {
-        void this.syncNow("manual", true);
+      new GeodeMassChangeModal(this.app, outcome.change, outcome.restated, (confirmed) => {
+        void this.syncNow("manual", confirmed);
       }).open();
 
       return { report: { ok: false, message: outcome.message }, result: "stop" };

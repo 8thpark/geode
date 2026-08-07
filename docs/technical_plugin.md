@@ -128,6 +128,12 @@ pass only runs when someone reached for the button that says so. Confirming runs
 pass, which is also what lifts the halt, so the escape hatch and the answer are the same mechanism
 rather than two that can disagree.
 
+The answer carries the plan it was given back with it, and the fresh pass checks that it is still
+planning exactly that (see [the guard](technical_sync.md#the-mass-change-guard)). When it is not,
+the dialog opens again, and says so: a second identical looking prompt with no explanation reads as
+a bug, and someone who has already clicked through one is exactly the person who will click through
+the next without reading it.
+
 ### Guards
 
 Three pieces of state the plugin holds, each preventing a specific failure.

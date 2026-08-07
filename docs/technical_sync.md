@@ -222,6 +222,17 @@ re-read of the bucket, which is both simpler than holding an ETag open across a 
 span and safer, since the compare and swap is never left waiting on someone finding their reading
 glasses.
 
+An answer covers the plan it was given and no other. The confirmation carries the destructive set
+that was on the screen, and the fresh pass runs only if what it now plans is exactly that set, path
+for path and fate for fate. Anything else is a plan nobody has seen, so it is asked again rather
+than executed under an old yes. That matters because the vault and the bucket both keep moving
+between the dialog opening and someone answering it: without the binding, a "yes" to 12 deletions
+could be spent on 400.
+
+The comparison is by set rather than by order, since planning follows snapshot order and a re-read
+of the bucket is under no obligation to repeat it. A fresh plan that no longer trips the guard at
+all simply runs, confirmed or not; there is nothing left to ask about.
+
 Under automatic sync the halt is a full stop rather than a prompt on a timer. The scheduler treats
 it exactly like a permanent failure, so an unanswered dialog is asked once, not once every five
 minutes.
