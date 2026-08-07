@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ResultStatus } from "../storage/storage.ts";
-import { encodeSnapshot, hashBytes, type Snapshot } from "../vault/vault.ts";
+import { encodeSnapshot, type FileState, hashBytes, type Snapshot } from "../vault/vault.ts";
 import type { LocalWriter } from "./execute.ts";
 import {
   empty,
@@ -36,6 +36,24 @@ import {
 // content actually lives under.
 async function hashOf(text: string): Promise<string> {
   return hashBytes(new TextEncoder().encode(text));
+}
+
+// vaultOf builds a vault of count files as both snapshot entries and the live content behind them,
+// for the cases where what matters is how many files a pass would touch.
+async function vaultOf(
+  count: number,
+): Promise<{ content: Record<string, string>; entries: FileState[] }> {
+  const content: Record<string, string> = {};
+  const entries: FileState[] = [];
+  for (let i = 0; i < count; i++) {
+    const path = `note-${i}.md`;
+    const text = `note ${i}`;
+    const hash = await hashOf(text);
+    content[path] = text;
+    entries.push({ path, size: text.length, mtime: 1, hash, blob: hash });
+  }
+
+  return { content, entries };
 }
 
 test("faultFor: trying again is worth something, or it never will be, and a race is neither", () => {
@@ -548,6 +566,69 @@ test("syncOnce: a present but empty manifest still trusts the ancestor and pulls
 
   assert.equal(outcome.ok, true);
   assert.equal(files.has("a.md"), false);
+});
+
+test("syncOnce: a remote that lost most of a vault halts before deleting anything", async () => {
+  // A manifest that looks wiped plans as "delete every local file", which is the one pass that
+  // must never run unasked: it stops instead, leaving both sides exactly as they were.
+  const vault = await vaultOf(12);
+  const reader = fakeReader(vault.content);
+  const { writer, files } = fakeLocalWriter();
+  for (const path of Object.keys(vault.content)) {
+    files.set(path, vault.content[path]);
+  }
+  const { storage, objects } = fakeStorage({ [MANIFEST_KEY]: wrapped(encodeSnapshot(empty)) });
+
+  const outcome = await syncOnce(snapshot(...vault.entries), reader, writer, storage, 1);
+
+  assert.ok(!outcome.ok);
+  assert.equal(outcome.fault, "blocked");
+  if (outcome.fault === "blocked") {
+    assert.equal(outcome.change.localDeletes, 12);
+    assert.equal(outcome.change.tracked, 12);
+    assert.equal(outcome.change.paths.length, 12);
+  }
+  assert.equal(outcome.snapshot, null);
+  assert.equal(files.size, 12);
+  // Only the seeded manifest: no blob, no sentinel, and no manifest of its own went up.
+  assert.equal(objects.size, 1);
+});
+
+test("syncOnce: the same pass runs in full once it has been confirmed", async () => {
+  const vault = await vaultOf(12);
+  const reader = fakeReader(vault.content);
+  const { writer, files } = fakeLocalWriter();
+  for (const path of Object.keys(vault.content)) {
+    files.set(path, vault.content[path]);
+  }
+  const { storage } = fakeStorage({ [MANIFEST_KEY]: wrapped(encodeSnapshot(empty)) });
+
+  const outcome = await syncOnce(
+    snapshot(...vault.entries),
+    reader,
+    writer,
+    storage,
+    1,
+    () => "vault-1",
+    "",
+    true,
+  );
+
+  assert.equal(outcome.ok, true);
+  assert.equal(files.size, 0);
+});
+
+test("syncOnce: a first sync pushing a whole vault is never mistaken for a mass deletion", async () => {
+  // Every action here is an addition, so a bootstrap of any size must sail through the guard the
+  // wiped remote above trips.
+  const vault = await vaultOf(200);
+  const reader = fakeReader(vault.content);
+  const { writer } = fakeLocalWriter();
+  const { storage } = fakeStorage();
+
+  const outcome = await syncOnce(empty, reader, writer, storage, 1);
+
+  assert.equal(outcome.ok, true);
 });
 
 test("syncOnce: a missing manifest with unexplained blobs reports and proceeds, rather than deadlocking every future sync", async () => {

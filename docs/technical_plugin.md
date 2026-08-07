@@ -13,6 +13,7 @@ of Geode testable without a running app.
 - [The Adapters](#the-adapters)
 - [What The Plugin Owns](#what-the-plugin-owns)
 - [The First Sync Dialog](#the-first-sync-dialog)
+- [The Mass Change Dialog](#the-mass-change-dialog)
 - [Guards](#guards)
 - [Writing Files Safely](#writing-files-safely)
 - [Deleting Files](#deleting-files)
@@ -104,6 +105,28 @@ The dialog is offered while, and only while, a first sync is still ahead of this
 connection with no completed pass behind it. That is also what gates the **Set up sync** command, so
 dismissing the dialog is never a dead end and a vault that is already set up is never offered a
 setup step.
+
+### The Mass Change Dialog
+
+When a pass is refused by the [mass change guard](technical_sync.md#the-mass-change-guard), the
+plugin opens the only other dialog Geode has. It is the same shape as the first sync one, and for
+the same reason: something irreversible is about to happen, and the only person who can say whether
+it is right is not the one who planned it.
+
+Four things have to be on the screen, because a bare count cannot be answered:
+
+1. What the pass would do, per side, in files rather than actions
+2. Which part of it is recoverable, since a deleted file goes to the trash and a replaced one does
+   not, and nobody would guess that
+3. The files themselves, collapsed, first twenty and a count of the rest; seeing "all my daily
+   notes" rather than "the folder I deleted on my phone" is what makes the question answerable
+4. That nothing has changed yet and automatic sync stays off until it is answered, or someone
+   cancels, notices sync is dead an hour later, and reports it as a bug
+
+Cancel is the emphasised button and dismissing the dialog any other way counts as a cancel, so the
+pass only runs when someone reached for the button that says so. Confirming runs a fresh manual
+pass, which is also what lifts the halt, so the escape hatch and the answer are the same mechanism
+rather than two that can disagree.
 
 ### Guards
 

@@ -241,3 +241,55 @@
 .geode-onboarding-buttons button {
   cursor: pointer;
 }
+
+.geode-mass-change p {
+  margin: 0 0 1em;
+}
+
+.geode-mass-change-note {
+  color: var(--text-warning);
+}
+
+.geode-mass-change-paths {
+  margin: 0 0 1em;
+}
+
+.geode-mass-change-paths summary {
+  cursor: pointer;
+  color: var(--text-muted);
+}
+
+.geode-mass-change-paths ul {
+  margin: 0.5em 0 0;
+  padding-left: 1.25em;
+  max-height: 12em;
+  overflow-y: auto;
+  font-size: var(--font-ui-smaller);
+}
+
+.geode-mass-change-paths li {
+  margin-bottom: 0.2em;
+}
+
+.geode-mass-change-verb {
+  display: inline-block;
+  min-width: 8em;
+  color: var(--text-muted);
+}
+
+.geode-mass-change-more {
+  margin: 0.5em 0 0;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.geode-mass-change-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5em;
+  justify-content: flex-end;
+}
+
+.geode-mass-change-buttons button {
+  cursor: pointer;
+}

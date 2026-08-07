@@ -10,6 +10,7 @@ import {
   takeSnapshot,
 } from "../vault/vault.ts";
 import { executeSyncPlan, type LocalWriter, type SyncFailure } from "./execute.ts";
+import { type MassChange, massChangeFor, massChangeHalts } from "./guard.ts";
 import {
   BLOB_PREFIX,
   decodeSentinel,
@@ -28,6 +29,16 @@ import {
 // worth keeping rather than always null.
 export type SyncOutcome =
   | { ok: true; snapshot: Snapshot; changeCount: number }
+  // A blocked pass executed nothing, so it has no progress to persist and nothing to retry: it is
+  // waiting on an answer only a person can give.
+  | {
+      ok: false;
+      fault: "blocked";
+      change: MassChange;
+      message: string;
+      failures: SyncFailure[];
+      snapshot: null;
+    }
   | {
       ok: false;
       fault: SyncFault;
@@ -220,6 +231,7 @@ export async function syncOnce(
   now: number,
   newVaultId: () => string = () => crypto.randomUUID(),
   deviceId = "",
+  allowMassChange = false,
 ): Promise<SyncOutcome> {
   const [remote, sentinelResult] = await Promise.all([
     readRemoteManifest(storage),
@@ -297,6 +309,21 @@ export async function syncOnce(
     manifestEtag = remote.etag;
   }
   const actions = planSync(ancestor, local, remoteView);
+
+  // The guard sits between planning and doing, the last point at which refusing costs nothing:
+  // one truncated listing or one bad manifest should never quietly gut a vault.
+  const change = massChangeFor(actions, local, ancestor.files.length);
+  if (!allowMassChange && massChangeHalts(change)) {
+    return {
+      ok: false,
+      fault: "blocked",
+      change,
+      message: `this sync would delete or replace ${change.paths.length} files; confirm it first`,
+      failures: [],
+      snapshot: null,
+    };
+  }
+
   const executed = await executeSyncPlan(
     actions,
     local,
