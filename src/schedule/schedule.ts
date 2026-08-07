@@ -188,6 +188,20 @@ export function notePassStarted(state: State): State {
   return { ...state, syncing: true, pendingSince: 0, lastEventAt: 0 };
 }
 
+// noteReconnected pulls a waiting retry forward to now, the network being the one premise a backoff
+// waits out. The failure streak survives, since a reconnect proves nothing works, and so does a
+// halt, since an interface returning is not a fixed credential.
+export function noteReconnected(state: State, now: number): State {
+  if (state.stopped) {
+    return state;
+  }
+  if (state.retryAfter === 0 || state.retryAfter <= now) {
+    return state;
+  }
+
+  return { ...state, retryAfter: now };
+}
+
 // noteResumed clears a halt and any backoff; nothing else clears stopped, which is the point of it.
 export function noteResumed(state: State): State {
   return { ...state, failures: 0, retryAfter: 0, stopped: false };
