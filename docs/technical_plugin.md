@@ -12,6 +12,7 @@ of Geode testable without a running app.
 - [The Layering Rule](#the-layering-rule)
 - [The Adapters](#the-adapters)
 - [What The Plugin Owns](#what-the-plugin-owns)
+- [The First Sync Dialog](#the-first-sync-dialog)
 - [Guards](#guards)
 - [Writing Files Safely](#writing-files-safely)
 - [Deleting Files](#deleting-files)
@@ -67,6 +68,42 @@ bytes already on disk, so without this a pull can land on a path whose editor st
 content and the next autosave silently overwrites the pulled bytes with content sync never saw. The
 residual race is only whatever someone types between that flush and the read, rather than however
 long has passed since Obsidian's debounce last fired.
+
+### The First Sync Dialog
+
+Saving a connection is the moment someone has said what they want and nothing has happened yet.
+Because the first pass is never started for you (see [Sync](technical_sync.md)), that moment would
+otherwise end in silence, so saving opens a dialog that reads the bucket, says what a first sync
+would do, and offers to run it.
+
+It reads before it asks. The manifest and the sentinel answer whether a vault already lives there,
+and the vault's own file list answers what is on this device. Nothing is written, and no file is
+hashed: the counts come from comparing paths, which is why the merge case says "where a file
+differs" rather than claiming to know that any file does.
+
+| The bucket says       | This vault is | The dialog offers                                     |
+| --------------------- | ------------- | ----------------------------------------------------- |
+| No vault here yet     | Anything      | Upload everything, and this vault becomes the original |
+| A vault already lives here | Empty    | Download everything, nothing local is touched         |
+| A vault already lives here | Not empty | A merge, with upload, download, and overlap counts   |
+| Something to go and fix | Anything    | The reason, and a way back to settings                 |
+| Nothing, it can't be read | Anything  | The error, and another go                             |
+
+Once a pass finishes the same dialog reports what moved and, for the first and only time, explains
+how Geode behaves from then on: automatic syncing, the status bar icon, and the log view. Said
+before a sync has ever run, that is noise; said the moment one has landed, it is the answer to
+"what now". A failed pass keeps someone in the dialog with the message, the logs, and a retry,
+rather than handing them back a status bar icon that can only say something went wrong.
+
+There is deliberately no "overwrite the bucket" or "discard local and fetch" option. Plugins that
+offer that pair are where their users lose notes, and a destructive choice presented during setup is
+the one moment nobody has the context to answer it. Merging with conflict copies is the only path,
+which is the same promise the rest of sync makes.
+
+The dialog is offered while, and only while, a first sync is still ahead of this device: a usable
+connection with no completed pass behind it. That is also what gates the **Set up sync** command, so
+dismissing the dialog is never a dead end and a vault that is already set up is never offered a
+setup step.
 
 ### Guards
 

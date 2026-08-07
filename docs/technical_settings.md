@@ -107,3 +107,7 @@ under concurrency, which is exactly what green-lighting it on the HEAD alone wou
 
 Saving is gated on the result, so a draft that failed its test cannot be saved and left to fail at
 sync time instead.
+
+Saving a connection this device has never synced through closes the settings window and opens the
+first sync dialog, since a working connection and no sync yet is a half finished setup rather than a
+finished one; see [Plugin](technical_plugin.md#the-first-sync-dialog).

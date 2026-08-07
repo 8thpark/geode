@@ -56,6 +56,10 @@ in the table above takes over.
 The same applies if you point Geode at a different bucket: until a sync completes against the new
 one, automatic sync waits. Automatic sync also stays off while storage is not fully configured.
 
+You are not left to find that first pass yourself. Saving a connection opens a dialog that reads the
+bucket, tells you what a first sync would upload, download, or merge, and runs it when you say so;
+see [the first sync dialog](technical_plugin.md#the-first-sync-dialog).
+
 ### Pausing
 
 Two commands in the palette, **Pause automatic sync** and **Resume automatic sync**.
