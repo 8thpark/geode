@@ -126,7 +126,8 @@ function tooltipFor(status: SyncStatus, detail: string): string {
   return "Geode: click to sync";
 }
 
-// GeodePlugin is the Obsidian plugin entry point that owns settings load and save.
+// GeodePlugin is the Obsidian plugin entry point that owns settings load and save; see
+// docs/technical_plugin.md for the layering rule every adapter here follows.
 export default class GeodePlugin extends Plugin {
   settings: GeodeSettings = DEFAULT_SETTINGS;
   // deviceId names this machine in conflict copies and logs, held in vault scoped localStorage

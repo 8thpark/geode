@@ -154,8 +154,8 @@ test("manifestAfterSync: a pushDelete removes the entry", () => {
 });
 
 test("manifestAfterSync: a failed pushDelete leaves the entry standing", () => {
-  // A pushDelete that never completed (the trash copy or the delete itself failed) must not be
-  // taken as evidence the object is gone: it may still be sitting there untouched.
+  // A pushDelete that never completed must not be taken as evidence the object is gone: it may
+  // still be sitting there untouched.
   const remote = snapshot(file("a.md", "h1"));
 
   const result = manifestAfterSync(remote, [], []);

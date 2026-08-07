@@ -26,7 +26,8 @@ import {
 // DEBUG_LABEL_WIDTH is the column width debug info labels are padded to, so values line up.
 const DEBUG_LABEL_WIDTH = 12;
 
-// renderSettingsTab draws every section into containerEl from the tab's current draft state.
+// renderSettingsTab draws every section into containerEl from the tab's current draft state; see
+// docs/technical_settings.md for the draft and dirty model.
 export function renderSettingsTab(tab: GeodeSettingTab, containerEl: HTMLElement): void {
   renderHeader(containerEl);
   renderStorageSection(tab, containerEl);

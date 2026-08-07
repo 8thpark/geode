@@ -115,7 +115,7 @@ export function armed(readiness: Readiness): boolean {
 }
 
 // due reports whether a pass should start at now and which trigger asked for it; the checks below
-// run in priority order.
+// run in priority order, which docs/technical_sync.md explains along with every constant here.
 export function due(state: State, now: number): Due {
   if (state.syncing || state.stopped) {
     return { due: false };

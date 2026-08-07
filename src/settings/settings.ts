@@ -14,7 +14,8 @@ export const DEFAULT_SETTINGS: GeodeSettings = {
 // ConnectionStatus is the current in-memory state of a Test Connection check.
 export type ConnectionStatus = "unknown" | "checking" | "ok" | "error";
 
-// GeodeSettings is the persisted shape of a Geode plugin's user configuration.
+// GeodeSettings is the persisted shape of a Geode plugin's user configuration; see
+// docs/technical_settings.md for why each field is normalized where it is used rather than saved.
 export type GeodeSettings = {
   version: number;
   provider: "r2" | "custom";

@@ -19,6 +19,13 @@ function violations(path) {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
 
+    // Block comments are banned outright rather than measured, since the rules call for "//" and a
+    // block would otherwise smuggle unlimited prose and issue references past every check below.
+    if (line.startsWith("/*")) {
+      found.push({ line: i + 1, message: "block comment, use // instead" });
+      continue;
+    }
+
     if (!line.startsWith("//")) {
       if (blockLength > MAX_BLOCK_LINES) {
         found.push({

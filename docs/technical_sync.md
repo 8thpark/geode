@@ -92,6 +92,10 @@ correctness argument rests on.
 | `BACKOFF_BASE_MS`  | 2m     | The first retry is the one most likely to fail the same way       |
 | `BACKOFF_MAX_MS`   | 30m    | Long enough to stop hammering, short enough to catch up    |
 
+Five minutes is the conservative opening value for polling, and it is meant to come down. Every
+poll is a full pass today; once a pass can rule itself out with a single HEAD on the manifest, the
+interval can shorten without costing anything.
+
 The order the rules are checked in is the priority order. A failed pass is its own reason to run
 again, ahead of everything and regardless of focus: starting a pass clears the pending local work it
 covers, so a push that fails on an unfocused window would otherwise have nothing left to fire it and
@@ -125,7 +129,8 @@ One pass, in order:
 4. Resolve vault identity, refusing if this bucket is not the one this device synced before
 5. Plan the reconciliation from three snapshots
 6. Execute every action, collecting per file failures rather than stopping at the first
-7. Upload a manifest describing what the bucket now holds, conditional on that ETag
+7. Upload a manifest describing what the bucket now holds, conditional on that ETag still being
+   current, or on the manifest still being absent for a first sync
 8. Return the new snapshot for the caller to persist as `state.json`
 
 The caller owns persistence. The previous snapshot is passed in and the new one handed back rather
@@ -241,6 +246,11 @@ names, and the blob is left exactly where it is, reachable for as long as any re
 still names its address. Nothing touches the bucket, so nothing can fail, and there is no live
 object at a shared key for another device to clobber.
 
+An earlier version copied a deleted file's blob to a bucket side trash location to buy a recovery
+window. That was removed deliberately: content addressing already makes a delete non destructive,
+so the trash copy was a second mechanism guaranteeing something the first one already guaranteed.
+Anyone proposing a server side recycle bin should know it was built once and taken out again.
+
 ### Conflicts
 
 A conflict is a path that changed on both sides to different content. Neither edit is ever silently
@@ -276,9 +286,9 @@ differing content.
 Two objects tell a device whether a bucket is the one it thinks it is.
 
 - **The manifest** proves a sync has completed. Its absence usually means a fresh bucket.
-- **The sentinel**, written once on the pass that completes a bucket's first sync and never
-  rewritten, proves a bucket has been synced before independently of whether the manifest currently
-  exists.
+- **The sentinel** proves a bucket has been synced before, independently of whether the manifest
+  currently exists. It is written on the pass that completes a bucket's first sync, and on any
+  later pass that finds it missing, which is how a bucket that lost one heals itself.
 
 The sentinel exists because a manifest can go missing for a bad reason: a lifecycle rule, a manual
 deletion, a typo in a configured prefix. Once a sentinel exists, whether the manifest happens to be

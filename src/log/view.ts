@@ -30,7 +30,7 @@ function renderRow(list: HTMLElement, entry: LogEntry): void {
 }
 
 // GeodeLogView renders the persisted log, most recent first, always as a straight redraw of what
-// the sink holds rather than a DOM mutation.
+// the sink holds rather than a DOM mutation; see docs/technical_logging.md.
 export class GeodeLogView extends ItemView {
   private sink: LogSink;
   private bus: LogBus;

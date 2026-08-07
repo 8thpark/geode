@@ -7,8 +7,8 @@ export const DEVICE_ID_KEY = "geode-device-id";
 const DEVICE_SUFFIX_ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz";
 
 // deviceIdFrom returns the identifier naming this device: a recognisable platform label and a
-// random suffix. Both halves are generated, never typed, so neither can be an unsafe path
-// segment.
+// random suffix, both generated rather than typed so neither can be an unsafe path segment. See
+// docs/technical_device.md.
 export function deviceIdFrom(label: string, suffix: string): string {
   if (label === "") {
     return suffix;

@@ -67,8 +67,8 @@ type ActionResult = {
 type LocalCheck = { ok: true; seen: FileStat } | { ok: false; failure: SyncFailure };
 
 // executeSyncPlan carries out every action against the local vault and the remote bucket, and
-// reports what completed and what failed rather than stopping at the first failure; now is passed
-// in so a conflict's copy name stays deterministic under test.
+// reports what completed and what failed rather than stopping at the first failure. The ordering
+// every destructive write depends on is set out in docs/technical_sync.md.
 export async function executeSyncPlan(
   actions: SyncAction[],
   local: Snapshot,
@@ -283,6 +283,7 @@ async function executeAction(
 
   if (action.kind === "pushDelete") {
     // A deletion is purely a manifest change, so it never touches the bucket and can never fail.
+    // The blob is left where it is, reachable while any retained manifest still names its address.
     return successfulAction();
   }
 

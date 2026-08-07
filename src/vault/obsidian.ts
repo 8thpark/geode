@@ -14,6 +14,7 @@ import {
 
 // createObsidianLocalWriter returns a LocalWriter that applies pulled remote changes through the
 // low level data adapter rather than the Vault API, since a newly pulled path has no TFile yet.
+// docs/technical_plugin.md covers staging, atomic installs, and the rename aside fallback.
 export function createObsidianLocalWriter(adapter: DataAdapter): LocalWriter {
   return {
     stageFile: async (path, data, mode) => {

@@ -135,7 +135,7 @@ export function manifestAfterSync(
 }
 
 // planSync compares what changed locally and remotely since previous, the common ancestor, and
-// decides what to push, pull, or flag as a genuine conflict.
+// decides what to push, pull, or flag as a genuine conflict; see docs/technical_sync.md.
 export function planSync(previous: Snapshot, local: Snapshot, remote: Snapshot): SyncAction[] {
   const localChanges = diffSnapshots(previous, local);
   const remoteChanges = diffSnapshots(previous, remote);

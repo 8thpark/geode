@@ -100,7 +100,7 @@ export type ResultStatus =
 
 // StorageClient reads, writes, deletes, and lists objects, taking and returning plain data so a
 // future WebDAV or Dropbox client can satisfy the same shape. Every key is relative to the client's
-// own root.
+// own root; see docs/technical_storage.md.
 export type StorageClient = {
   putObject: (key: string, body: Uint8Array, condition?: PutCondition) => Promise<PutResult>;
   getObject: (key: string, expectedBytes?: number) => Promise<GetResult>;
