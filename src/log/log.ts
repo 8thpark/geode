@@ -78,11 +78,8 @@ export function createLogger(sink: LogSink, minLevel: LogLevel, onEntry?: LogLis
     }
     consoleFor(level)(`geode: ${message}`);
     const entry: LogEntry = { time: Date.now(), level, message };
-    // Fire and forget: the Logger API is synchronous, so append can't be awaited. Notify listeners
-    // only once the append has persisted, so a listener that re-reads the sink is guaranteed to
-    // see this entry rather than racing the write. A failed persist is reported to the console
-    // rather than left as an unhandled rejection, and never logged back into sink, which would
-    // recurse if the sink itself is what's failing.
+    // The Logger API is synchronous, so this cannot be awaited. Listeners fire only once the
+    // append has persisted, and a failed persist goes to the console rather than back into sink.
     sink
       .append(entry)
       .then(() => notify(onEntry, entry))

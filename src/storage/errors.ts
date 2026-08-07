@@ -1,10 +1,7 @@
 import type { ResultStatus } from "./storage.ts";
 
-// messageFor turns an error thrown while dispatching a request into an actionable message. Such an
-// error means the request never reached the server, so the raw text ("Failed to fetch",
-// "net::ERR_NAME_NOT_RESOLVED") names a symptom, not a fix; the guidance points at the usual causes
-// while keeping the raw detail for the logs. The plugin dispatches through requestUrl, so a CORS
-// block is no longer among those causes (#156).
+// messageFor turns a dispatch error into an actionable message, since such an error means the
+// request never reached the server and its raw text names a symptom rather than a fix.
 export function messageFor(err: unknown): string {
   const detail = detailFor(err);
   if (detail === "") {
@@ -29,11 +26,8 @@ function detailFor(err: unknown): string {
   return "";
 }
 
-// statusForHttp maps HTTP 400 to the non-retryable client status and preserves known domain
-// statuses; unrecognised codes, including 5xx and 429, fall through to retryable server status.
-// 409 joins 412 as "conflict": real Amazon S3 returns 409 (rather than 412) when a conditional
-// write loses a race against another in-flight write to the same key, so both codes mean the
-// same thing to a caller: another writer won, retry the compare-and-swap.
+// statusForHttp maps an HTTP code onto a result status, treating anything unrecognised as
+// retryable. 409 joins 412 as a conflict, since Amazon S3 returns it for a lost conditional write.
 export function statusForHttp(code: number): ResultStatus {
   if (code === 400) {
     return "client";

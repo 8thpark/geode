@@ -35,11 +35,8 @@ function fakeAdapter(seed: Record<string, string> = {}): DataAdapter {
   return adapter as unknown as DataAdapter;
 }
 
-// WriterBehavior configures the failure modes a fake writer adapter simulates: renameOverwrites
-// false mimics a filesystem whose rename refuses to replace an existing destination (as mobile
-// can), stagedRenameFails mimics a rename that fails whenever the staged temp file is the source
-// (a lock on the staged bytes, a permissions error), and writeBinaryFails mimics an interrupted
-// or failed write of the staged bytes.
+// WriterBehavior configures the failure modes a fake writer adapter simulates: a rename that
+// refuses to overwrite, a rename that fails on the staged source, and an interrupted write.
 type WriterBehavior = {
   renameOverwrites: boolean;
   stagedRenameFails: boolean;
@@ -167,10 +164,8 @@ test("createObsidianLocalWriter: overwriting an existing file replaces it throug
 });
 
 test("createObsidianLocalWriter: a create write onto an occupied destination refuses, never touching what is there", async () => {
-  // A conflict's restore stages its bytes for a path its own rename vacated moments earlier, so a
-  // file at that path was created in the window since and holds content no conflict copy
-  // preserved. The commit must refuse rather than rename over it, and must refuse before the
-  // rename, not after: the destination's own bytes are never in play.
+  // A file at a path a conflict's own rename just vacated was created in the window since, so the
+  // commit must refuse before the rename rather than after it.
   const { adapter, files, ops } = fakeWriterAdapter(
     { renameOverwrites: true, stagedRenameFails: false, writeBinaryFails: false },
     { "a.md": "recreated mid sync" },
@@ -222,9 +217,8 @@ test("createObsidianLocalWriter: an adapter whose rename refuses to overwrite re
 });
 
 test("createObsidianLocalWriter: a rename that keeps failing for another reason restores the destination", async () => {
-  // The review edge case on #88: the first rename did not fail because the destination exists,
-  // it fails for a reason (a lock, permissions) the retry hits too. The destination must come
-  // through with its old content intact, never deleted on a wrong guess about why rename failed.
+  // The rename failed for a reason the retry hits too, not because the destination exists, so the
+  // old content must survive rather than be deleted on a wrong guess.
   const { adapter, files, ops } = fakeWriterAdapter(
     { renameOverwrites: false, stagedRenameFails: true, writeBinaryFails: false },
     { "a.md": "old content" },
@@ -245,8 +239,8 @@ test("createObsidianLocalWriter: a rename that keeps failing for another reason 
 });
 
 test("createObsidianLocalWriter: a failed write of the staged bytes leaves the destination untouched", async () => {
-  // The scenario from #88: the write is interrupted partway. Staging means the destination still
-  // holds its previous content in full, so the next snapshot sees no phantom local edit to push.
+  // The write is interrupted partway. Staging means the destination still holds its previous
+  // content in full, so the next snapshot sees no phantom local edit to push.
   const { adapter, files } = fakeWriterAdapter(
     { renameOverwrites: true, stagedRenameFails: false, writeBinaryFails: true },
     { "a.md": "old content" },
@@ -293,10 +287,8 @@ test("createObsidianLocalWriter: discarding a staged write twice is not an error
   await assert.doesNotReject(staged.discard());
 });
 
-// fakeDeleteAdapter returns a DataAdapter for exercising deleteFile: trashSystemAvailable mimics an
-// OS whose system trash works (true) or is unavailable, as on mobile or a headless host (false),
-// and ops logs every trash/remove call so a test can assert a file is only ever trashed, never
-// hard removed.
+// fakeDeleteAdapter returns a DataAdapter for exercising deleteFile, with a system trash that
+// works or does not, and an op log so a test can assert a file is only ever trashed.
 function fakeDeleteAdapter(
   trashSystemAvailable: boolean,
   seed: Record<string, string> = {},
@@ -476,9 +468,8 @@ test("createObsidianStore: rotating credentials keeps state, it does not change 
 });
 
 test("createObsidianStore: a pre-marker state file with no version field and no fingerprint reads back as empty", async () => {
-  // State written by a build before the format version marker existed (#91) is version 1 by
-  // definition; an upgrader's ancestor must survive the upgrade, not silently reset.
-  // With fingerprinting added, it does NOT survive unless it has a fingerprint matching current. So it reads back as empty.
+  // State written before the version marker existed is version 1 by definition, and without a
+  // matching fingerprint it reads back as empty rather than surviving the upgrade.
   const files = [{ path: "a.md", size: 1, mtime: 2, hash: "h", blob: "h" }];
   const store = createObsidianStore(
     fakeAdapter({ [STATE_PATH]: JSON.stringify({ files }) }),

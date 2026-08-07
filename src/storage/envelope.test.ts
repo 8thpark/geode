@@ -64,9 +64,8 @@ test("unwrapObject: an unknown version or suite needs a newer build, anything el
       want: { ok: false, reason: "unsupportedVersion" },
     },
     {
-      // The reservation this whole envelope exists for (#184): the vault is encrypted and this
-      // build has no idea how to read it, which it must say rather than hand ciphertext on as
-      // though it were content.
+      // The reservation the envelope exists for: an encrypted vault this build cannot read, which
+      // it must say rather than hand ciphertext on as content.
       name: "a suite this build does not know",
       body: bodyOf([0x47, 0x45, 0x4f, 0x44, 0x01, 0x01], "ciphertext"),
       want: { ok: false, reason: "unsupportedSuite" },

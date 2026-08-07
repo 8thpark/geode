@@ -13,9 +13,9 @@ import {
 } from "./fake.ts";
 import { blobKeyFor, conflictCopyPath, MANIFEST_KEY, type SyncAction } from "./plan.ts";
 
-// hashOf returns the real content hash of text, for building local snapshots whose entries
-// executeSyncPlan's drift check can verify against a fake reader's live bytes, and for keying a
-// fakeStorage seed at the blob key content actually lives under.
+// hashOf returns the real content hash of text, for local snapshots the drift check can verify
+// against a fake reader's live bytes, and for keying a fakeStorage seed at the blob key content
+// actually lives under.
 async function hashOf(text: string): Promise<string> {
   return hashBytes(new TextEncoder().encode(text));
 }
@@ -43,9 +43,8 @@ test("executeSyncPlan: push reads the local file and puts its blob remotely", as
 
 test("executeSyncPlan: a push records the bytes it actually uploaded, not the pre push snapshot's hash", async () => {
   // a.md was edited again after the local snapshot this pass planned from, but before the push
-  // read its bytes: the race that used to leave the manifest naming the stale snapshot hash while
-  // the bucket held the newer content, which every other device's verifyFetch then rejected until
-  // this device happened to sync again.
+  // read its bytes; the manifest must record the hash of what was actually pushed, not the
+  // snapshot's stale one.
   const reader = fakeReader({ "a.md": "edited after snapshot" });
   const local = snapshot(file("a.md", await hashOf("as snapshotted")));
   const { writer } = fakeLocalWriter();
@@ -184,10 +183,9 @@ test("executeSyncPlan: pull overwrites a local file that still matches the snaps
 });
 
 test("executeSyncPlan: pull onto a file edited after the snapshot is refused and the edit survives", async () => {
-  // Reproduces #86. The pull was planned from a snapshot in which a.md was unchanged, but the
-  // user edited it before the plan reached this action. Overwriting it now would silently discard
-  // that edit, so the action must fail instead (the next sync replans it as a conflict) and the
-  // rest of the plan must still run.
+  // The pull was planned from a snapshot in which a.md was unchanged, but the user edited it
+  // before the plan reached this action; overwriting it now would silently discard that edit, so
+  // the action must fail and the rest of the plan must still run.
   const reader = fakeReader({ "a.md": "edited after snapshot" });
   const { writer, files } = fakeLocalWriter();
   files.set("a.md", "edited after snapshot");
@@ -215,9 +213,9 @@ test("executeSyncPlan: pull onto a file edited after the snapshot is refused and
 });
 
 test("executeSyncPlan: pull onto a file created after the snapshot is refused", async () => {
-  // The snapshot saw nothing at this path (the pull was planned for a remote-only file), but the
-  // user created a file there before the plan reached this action. Writing the remote version
-  // over it would discard a file the plan never knew existed.
+  // The snapshot saw nothing at this path (the pull was planned for a remote only file), but the
+  // user created one there before the plan reached this action, so writing the remote version over
+  // it would discard content the plan never knew existed.
   const reader = fakeReader({ "a.md": "created after snapshot" });
   const { writer, files } = fakeLocalWriter();
   files.set("a.md", "created after snapshot");
@@ -276,9 +274,8 @@ test("executeSyncPlan: pullDelete removes a local file that still matches the sn
 });
 
 test("executeSyncPlan: pullDelete of a file edited after the snapshot is refused and the edit survives", async () => {
-  // Reproduces #86 for the delete side: the remote deletion was planned against a snapshot in
-  // which a.md was unchanged, but the user edited it in the window since. Deleting it now would
-  // silently discard the edit; the next sync replans this as a conflict instead.
+  // The remote deletion was planned against a snapshot in which a.md was unchanged, but the user
+  // edited it in the window since, so deleting it now would silently discard that edit.
   const reader = fakeReader({ "a.md": "edited after snapshot" });
   const { writer, files } = fakeLocalWriter();
   files.set("a.md", "edited after snapshot");
@@ -301,9 +298,8 @@ test("executeSyncPlan: pullDelete of a file edited after the snapshot is refused
 });
 
 test("executeSyncPlan: pullDelete of a file that exists but cannot be read is refused, never treated as absent", async () => {
-  // A read failing on a file that is still present (a permission error, say) must not read as
-  // "nothing to discard": the delete could succeed against content the drift check never
-  // verified. The action must fail with the read's own error and leave the file alone.
+  // A read failing on a file that is still present must not read as "nothing to discard", since the
+  // delete could then succeed against content the drift check never verified.
   const reader = fakeReader({ "a.md": "hello" });
   reader.readFile = async () => {
     throw new Error("EACCES: permission denied");
@@ -417,12 +413,9 @@ test("executeSyncPlan: a conflict with nothing local to preserve just pulls the 
 });
 
 test("executeSyncPlan: a conflict restore onto a path recreated after the snapshot is refused", async () => {
-  // The snapshot saw this path as locally deleted, so the plan decided the remote edit could be
-  // restored with nothing to preserve. The user then recreated the file before the plan reached
-  // this action; overwriting it now would discard content the plan never saw (#86). No remote
-  // snapshot is supplied either, so the fetch this branch attempts first refuses on its own
-  // account (a plan with no manifest entry to restore from is already inconsistent); either way
-  // the recreated file is never touched.
+  // The snapshot saw this path as locally deleted, so the plan restores the remote edit with
+  // nothing to preserve; the user recreated the file before the plan reached this action, and no
+  // remote snapshot is supplied either, so the fetch refuses before that recreated file is touched.
   const reader = fakeReader({ "a.md": "recreated after snapshot" });
   const { writer, files } = fakeLocalWriter();
   files.set("a.md", "recreated after snapshot");
@@ -445,8 +438,8 @@ test("executeSyncPlan: a conflict restore onto a path recreated after the snapsh
 });
 
 test("executeSyncPlan: a conflict restore onto a path recreated after the snapshot is refused even with a real remote entry", async () => {
-  // The same scenario as above but with a real remote entry present, so the fetch succeeds and the
-  // recreated local file is what checkLocalDrift, run last, must catch.
+  // Same scenario as above with a real remote entry present, so the fetch succeeds and it is
+  // checkLocalDrift that must catch the recreated local file.
   const reader = fakeReader({ "a.md": "recreated after snapshot" });
   const { writer, files } = fakeLocalWriter();
   files.set("a.md", "recreated after snapshot");
@@ -472,11 +465,9 @@ test("executeSyncPlan: a conflict restore onto a path recreated after the snapsh
 });
 
 test("executeSyncPlan: a conflict restore onto a path recreated after its own rename is refused, and the recreated file survives", async () => {
-  // The window the "create" commit exists for. Between the rename that vacates the path and the
-  // commit that lands the remote version on it sit a blob push, a fetch and a staged write: ample
-  // room for the user, or another plugin, to create a note at the same path. That file is not the
-  // local edit the conflict copy preserved, no snapshot describes it, and nothing anywhere else
-  // holds its content, so the restore must refuse rather than replace it and report success.
+  // The window the "create" commit exists for: between the rename that vacates the path and the
+  // commit landing the remote version, ample room exists for a note to appear at the same path,
+  // one the restore must refuse rather than silently replace.
   const reader = fakeReader({ "a.md": "local edit" });
   const { writer, files } = fakeLocalWriter();
   files.set("a.md", "local edit");
@@ -505,9 +496,9 @@ test("executeSyncPlan: a conflict restore onto a path recreated after its own re
   ]);
   assert.deepEqual(completed, []);
   assert.equal(files.get("a.md"), "recreated mid sync");
-  // Neither of the other two versions is lost either: the local edit is still under its copy name
-  // and in the bucket, and the remote version was never on this device to begin with. The next
-  // sync sees the recreated file as a local change and replans the path as an ordinary conflict.
+  // Neither of the other two versions is lost: the local edit is still under its copy name and in
+  // the bucket, and the next sync sees the recreated file as a local change and replans it as an
+  // ordinary conflict.
   const copyHash = await hashOf("local edit");
   assert.equal(files.get(conflictCopyPath("a.md", now)), "local edit");
   assert.equal(objects.get(blobKeyFor(copyHash)), wrapped("local edit"));
@@ -524,9 +515,8 @@ test("executeSyncPlan: a conflict restore onto a path recreated after its own re
 
 test("executeSyncPlan: a conflict restore is refused by its commit even when the recreated file is too new for the reader to see", async () => {
   // checkLocalDrift reads through Obsidian's file index, which lags a file by however long the
-  // index takes to notice it; the writer's own stat does not. A file already on disk but not yet
-  // indexed must still stop the restore, which is exactly what the "create" commit is for and
-  // what a Reader based check could never manage on its own.
+  // index takes to notice it, so a file already on disk but not yet indexed needs the writer's own
+  // "create" commit check to stop the restore.
   const reader = fakeReader({});
   const { writer, files } = fakeLocalWriter();
   files.set("a.md", "created but not yet indexed");
@@ -552,9 +542,9 @@ test("executeSyncPlan: a conflict restore is refused by its commit even when the
 });
 
 test("executeSyncPlan: an ordinary pull still replaces the file its plan decided to move on from", async () => {
-  // The counterpart to the restore's "create": a pull's whole job is to install over the path's
-  // previous content, which checkLocalDrift has just confirmed is what the snapshot saw. Refusing
-  // an occupied destination here would break every update of an existing note.
+  // The counterpart to the restore's "create": a pull's whole job is to install over content
+  // checkLocalDrift already confirmed matches the snapshot, so refusing an occupied destination
+  // here would break every update of an existing note.
   const reader = fakeReader({ "a.md": "as snapshotted" });
   const local = snapshot(file("a.md", await hashOf("as snapshotted")));
   const { writer, files } = fakeLocalWriter();
@@ -673,7 +663,7 @@ test("executeSyncPlan: a failed push is reported and doesn't stop the rest of th
   assert.equal(objects.get(blobKeyFor(worldHash)), wrapped("world"));
   assert.equal(files.size, 0);
   // The pass reports exactly which actions completed and which didn't, so syncOnce can record
-  // b.md's progress in the manifest while leaving a.md pending for the next pass (#87).
+  // b.md's progress in the manifest while leaving a.md pending for the next pass.
   assert.deepEqual(completed, [{ kind: "push", path: "b.md" }]);
   assert.deepEqual(failed, [{ kind: "push", path: "a.md" }]);
 });
@@ -836,9 +826,8 @@ test("executeSyncPlan: pull with hash mismatch is refused and nothing is written
 });
 
 test("executeSyncPlan: pull of a blob that isn't a geode object is refused, never written as content", async () => {
-  // Whatever is at this key, it did not come from a geode that wrote an envelope (#184): another
-  // tool's object, or a truncated one. Handing its bytes on as the file's content would write
-  // whatever it happens to be straight into the vault.
+  // Whatever is at this key carries no envelope, so it is another tool's object or a truncated
+  // one. Handing its bytes on would write them straight into the vault.
   const reader = fakeReader({});
   const { writer, files } = fakeLocalWriter();
   const hash = await hashOf("hello");
@@ -915,11 +904,8 @@ test("executeSyncPlan: pull with truncated body is refused and nothing is writte
 });
 
 test("executeSyncPlan: pull refuses when the manifest has moved on, rather than writing stale content", async () => {
-  // A blob fetched by its own hash always reads back exactly that content, so unlike a plaintext
-  // path keyed read it can never itself notice a newer manifest having since pointed the path at
-  // a different hash. Passing an etag that no longer matches the manifest's current one simulates
-  // another device having completed a whole sync in the window between this pass reading the
-  // manifest and this pull committing its write.
+  // A stale etag simulates another device completing a whole sync between this pass reading the
+  // manifest and this pull committing.
   const reader = fakeReader({});
   const { writer, files } = fakeLocalWriter();
   const hash = await hashOf("hello");
@@ -973,12 +959,8 @@ test("executeSyncPlan: pull proceeds when the manifest etag still matches what t
 });
 
 test("executeSyncPlan: a pull whose local file is edited while its payload stages is refused, and the edit survives", async () => {
-  // The window this closes. Staging the payload used to happen after checkLocalDrift, inside the
-  // single writeFile call, so an edit landing during that write, which on a large attachment is
-  // nearly the whole pull, was checked for before it existed and then silently overwritten. Worse
-  // than a lost race elsewhere: the action reports success, so its path advances in state.json at
-  // the pulled hash and no later pass can tell the edit ever happened. Staging first is what puts
-  // the edit in front of the check rather than behind it.
+  // The window staging closes: on a large attachment the payload write is nearly the whole pull,
+  // so an edit landing inside it would be checked for before it existed and then overwritten.
   const readerFiles: Record<string, string> = { "a.md": "as snapshotted" };
   const reader = fakeReader(readerFiles);
   const local = snapshot(file("a.md", await hashOf("as snapshotted")));
@@ -1021,13 +1003,7 @@ test("executeSyncPlan: a pull whose local file is edited while its payload stage
 });
 
 test("executeSyncPlan: a pull stages its payload, then checks cheapest-last, and commits only after every check", async () => {
-  // The ordering the whole fix turns on, asserted directly because every other test here can only
-  // observe its consequences. Staging last would put the payload write between the final check and
-  // the destination changing. Running the manifest HEAD first, as this used to, put the local read
-  // and hash behind it, so a manifest replaced during that read still authorized the write. Running
-  // it last instead would leave the local guarantee ending a network round trip before the commit.
-  // Only cheapest-last leaves every check with nothing ahead of it but an index lookup and the
-  // commit's rename.
+  // The ordering asserted directly, since every other test here can only observe its consequences.
   const ops: string[] = [];
   const baseReader = fakeReader({ "a.md": "as snapshotted" });
   const reader: Reader = {
@@ -1105,11 +1081,8 @@ test("executeSyncPlan: a pull stages its payload, then checks cheapest-last, and
 });
 
 test("executeSyncPlan: a pull whose local file is edited while the manifest check is in flight is refused", async () => {
-  // The half of the local guarantee the content hash cannot cover on its own. The hash proves what
-  // the file held when it ran, but a manifest HEAD follows it, and an edit landing during that
-  // round trip would otherwise be committed over: the action reports success, the path advances in
-  // state.json at the pulled hash, and nothing afterwards can tell the edit existed. The
-  // index-only confirmation after the HEAD is what catches it.
+  // The half of the guarantee the content hash cannot cover: an edit landing during the manifest
+  // round trip that follows it. The index only confirmation after that HEAD is what catches it.
   const readerFiles: Record<string, string> = { "a.md": "as snapshotted" };
   const reader = fakeReader(readerFiles);
   const local = snapshot({
@@ -1157,9 +1130,7 @@ test("executeSyncPlan: a pull whose local file is edited while the manifest chec
 
 test("executeSyncPlan: a pull refused when the edit landing during the manifest check keeps the byte length", async () => {
   // A typo fixed in place rewrites a note without changing its length, so an existence and size
-  // comparison would wave it through and commit the pulled bytes over it: success reported, the
-  // path advanced in state.json at the pulled hash, the edit gone with nothing able to tell it
-  // ever existed. The mtime is what makes the final confirmation a guard rather than a formality.
+  // comparison would wave it through. The mtime is what makes the final check a real guard.
   const readerFiles: Record<string, string> = { "a.md": "hello world" };
   const readerMtimes: Record<string, number> = { "a.md": 1 };
   const reader = fakeReader(readerFiles, readerMtimes);
@@ -1292,11 +1263,8 @@ test("executeSyncPlan: a pullDelete whose local file is edited while the manifes
 });
 
 test("executeSyncPlan: a conflict fetches, stages and checks the manifest before it vacates the path", async () => {
-  // The ordering that makes the restore's guarantee worth having, asserted directly. Every slow
-  // and fallible step runs while the local edit is still sitting at its own path, so the interval
-  // in which that path stands empty, and a note created there could be replaced by the restore, is
-  // the rename and the commit back to back. Vacating first, as this used to, spanned a download, a
-  // staged write and a network round trip.
+  // Every slow and fallible step runs while the local edit still sits at its own path, so the
+  // interval in which that path stands empty is two adjacent renames rather than a download.
   const ops: string[] = [];
   const reader = fakeReader({ "a.md": "local edit" });
   const { writer, files } = fakeLocalWriter();
@@ -1448,10 +1416,8 @@ test("executeSyncPlan: a discard that itself fails never masks the failure that 
 });
 
 test("executeSyncPlan: a conflict restore refuses when the manifest has moved on, leaving the vault exactly as it was", async () => {
-  // The manifest is confirmed before the local edit is moved aside, so a stale plan costs nothing
-  // locally: the note is still at its own path, under its own name, and the whole conflict is
-  // replanned against the newer manifest next pass. Checking after the rename, as this used to,
-  // left the split half applied instead: a copy on disk and an empty path where the note was.
+  // The manifest is confirmed before the local edit moves, so a stale plan costs nothing locally
+  // and the whole conflict is replanned next pass.
   const reader = fakeReader({ "a.md": "local edit" });
   const { writer, files } = fakeLocalWriter();
   files.set("a.md", "local edit");
@@ -1511,10 +1477,8 @@ test("executeSyncPlan: conflict restore with hash mismatch is refused and nothin
 });
 
 test("executeSyncPlan: conflict with hash mismatch on remote restore leaves the local edit where the user left it", async () => {
-  // Corrupt or truncated remote bytes are caught while the local edit is still untouched at its
-  // own path, because the fetch and its integrity check now run before anything local moves. The
-  // conflict is simply replanned next pass. Splitting first, as this used to, meant a blob that
-  // never verifies left the note renamed away and its path empty on every single pass.
+  // The fetch and its integrity check run before anything local moves, so corrupt remote bytes
+  // leave the local edit untouched and the conflict simply replans next pass.
   const reader = fakeReader({ "a.md": "local edit" });
   const { writer, files } = fakeLocalWriter();
   files.set("a.md", "local edit");

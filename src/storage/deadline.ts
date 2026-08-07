@@ -7,11 +7,8 @@ const BASE_TIMEOUT_MS = 60_000;
 
 const BYTES_PER_MB = 1_000_000;
 
-// TIMEOUT_MS_PER_MB extends the budget by a megabyte's worth of transfer time so a large attachment
-// on a slow link is not cut off part way through a transfer that was going to succeed, whether it is
-// a put streaming up or a get streaming down. The implied floor is roughly 0.1 MB/s. A single
-// request carries the whole object today, so the allowance is what keeps big files syncable until
-// they move in chunks (#55).
+// TIMEOUT_MS_PER_MB buys a megabyte's worth of transfer time, an implied floor of roughly
+// 0.1 MB/s, so a large attachment on a slow link is not cut off part way through.
 const TIMEOUT_MS_PER_MB = 10_000;
 
 // timeoutFor returns how long a request moving bytes of body, in either direction, is allowed to
@@ -20,11 +17,8 @@ export function timeoutFor(bytes: number): number {
   return BASE_TIMEOUT_MS + Math.ceil(bytes / BYTES_PER_MB) * TIMEOUT_MS_PER_MB;
 }
 
-// withDeadline sends request through transport and rejects if no response has arrived within ms.
-// Obsidian's requestUrl accepts no AbortSignal, so the losing request cannot be cancelled and keeps
-// running, detached, until the platform gives up on it; settling the promise is the whole point.
-// A dispatch that never settles leaves the plugin's in flight sync guard set forever, so every
-// later sync silently no-ops and the status bar sits on "syncing" until Obsidian restarts.
+// withDeadline rejects if no response arrives within ms. The losing request cannot be cancelled, so
+// settling the promise is the whole point.
 export async function withDeadline(
   transport: Transport,
   request: Request,

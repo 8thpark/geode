@@ -14,7 +14,8 @@ export const DEFAULT_SETTINGS: GeodeSettings = {
 // ConnectionStatus is the current in-memory state of a Test Connection check.
 export type ConnectionStatus = "unknown" | "checking" | "ok" | "error";
 
-// GeodeSettings is the persisted shape of a Geode plugin's user configuration.
+// GeodeSettings is the persisted shape of a Geode plugin's user configuration; see
+// docs/technical_settings.md for why each field is normalized where it is used rather than saved.
 export type GeodeSettings = {
   version: number;
   provider: "r2" | "custom";
@@ -22,20 +23,12 @@ export type GeodeSettings = {
   endpoint: string;
   region: string;
   bucket: string;
-  // prefix is the folder inside the bucket the vault lives under, empty for the bucket root
-  // (#154). Stored exactly as typed and canonicalized at the point of use by normalizePrefix, the
-  // same way endpoint and region are, so a trailing slash never reads back as an unsaved change.
-  //
-  // A value normalizeSettings loads is never checked against prefixError, and is deliberately kept
-  // even when unusable: blanking it would silently repoint a vault at the bucket root, and showing
-  // an empty field gives a user nothing to correct. createS3Client is what refuses to act on one,
-  // so an unusable prefix always fails loudly and always survives long enough to be fixed.
+  // prefix is the folder inside the bucket the vault lives under, stored exactly as typed and
+  // canonicalized at the point of use rather than on save.
   prefix: string;
   accessKeyId: string;
-  // secretId is a SecretStorage reference name, not the secret value itself. Obsidian's
-  // SecretComponent picker lets a user pick or create a secret name of their choosing;
-  // it does not support forcing new entries onto a fixed ID, so we have to remember whichever
-  // one they picked.
+  // secretId is a SecretStorage reference name, not the secret value itself; Obsidian's picker
+  // won't force a new entry onto a fixed ID, so we remember whichever name was picked.
   secretId: string;
 };
 
@@ -57,11 +50,8 @@ export function canSave(dirty: boolean, connectionStatus: ConnectionStatus): boo
   return connectionStatus === "unknown" || connectionStatus === "ok";
 }
 
-// draftForDisplay returns the draft a settings tab should show for a given render.
-// When auto is true (Obsidian is opening the tab), the draft is re-seeded from saved
-// settings so an external data.json update cannot leave a stale draft and phantom
-// "Unsaved changes". When auto is false (an internal re-render such as a provider
-// switch), the in-progress draft is kept.
+// draftForDisplay returns the draft to show for a render: re-seeded from saved settings when auto
+// (Obsidian opening the tab), kept as is otherwise.
 export function draftForDisplay(
   auto: boolean,
   currentDraft: GeodeSettings,
@@ -130,10 +120,8 @@ export function isCurrentConnectionResult(
   return settingsEqual(testedSettings, currentSettings);
 }
 
-// normalizePrefix returns the canonical bucket key prefix for a raw settings value: surrounding
-// whitespace gone, and empty segments dropped, so "/vaults/personal/", "vaults//personal" and
-// "vaults/personal" all address the same place. Forgiving about slashes on purpose; what it cannot
-// make sense of is left for prefixError to refuse rather than quietly reinterpreted.
+// normalizePrefix returns the canonical bucket key prefix: whitespace trimmed and empty segments
+// dropped, so equivalent slash variants all address the same place.
 export function normalizePrefix(raw: string): string {
   const segments: string[] = [];
   for (const segment of raw.trim().split("/")) {
@@ -168,13 +156,8 @@ export function normalizeSettings(raw: unknown): GeodeSettings {
   };
 }
 
-// prefixError returns a short message describing why raw cannot be used as a bucket prefix, or ""
-// when it can, so an unusable value is caught while a user is typing it rather than as a baffling
-// provider error on the next sync. Only what normalizePrefix cannot canonicalize is refused: it
-// already absorbs surrounding and repeated slashes, so what reaches here is a typo rather than a
-// formatting preference. Relative segments are refused instead of resolved because the URL a
-// request is signed against collapses them itself, so "notes/../vault" would sync somewhere other
-// than what was typed, and control characters because they cannot survive a URL intact.
+// prefixError returns why raw cannot be used as a bucket prefix, or "" when it can, so a typo is
+// caught while typing rather than as a baffling provider error later.
 export function prefixError(raw: string): string {
   const prefix = normalizePrefix(raw);
   if (prefix === "") {
@@ -204,8 +187,8 @@ export function providerOr(v: unknown): "r2" | "custom" {
   return "r2";
 }
 
-// regionFor returns the signing region to use for the given settings. R2 always signs with
-// "auto" regardless of what a user might type, so custom is the only provider that needs one.
+// regionFor returns the signing region for settings; R2 always signs with "auto", so only a custom
+// provider needs one specified.
 export function regionFor(settings: GeodeSettings): string {
   if (settings.provider === "r2") {
     return "auto";
@@ -229,9 +212,8 @@ export async function saveDraft(
   await target.saveSettings();
 }
 
-// settingsEqual reports whether two settings values are identical field for field. Used to
-// derive whether a draft has unsaved changes by comparing it to the last saved settings, rather
-// than tracking a dirty flag that can't self-correct when an edit is reverted by hand.
+// settingsEqual reports whether two settings values are identical field for field, letting dirty
+// state be derived by comparison rather than tracked as a flag that can't self-correct.
 export function settingsEqual(a: GeodeSettings, b: GeodeSettings): boolean {
   return (
     a.provider === b.provider &&
