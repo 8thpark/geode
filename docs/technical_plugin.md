@@ -20,6 +20,11 @@ of Geode testable without a running app.
 
 Three tiers, and the dependency only ever points one way.
 
+```
+plugin class ──► adapters ──► pure modules
+                              (import nothing)
+```
+
 1. **Pure modules.** Planning, executing, scheduling, path safety, the object format, the storage
    client. None of them import `obsidian`.
 2. **Adapters.** One file per concern, each binding a pure interface to a real Obsidian API. These

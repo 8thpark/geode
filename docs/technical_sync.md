@@ -195,6 +195,13 @@ silently overwritten. Staging first leaves only the rename in that window.
 Three checks run before a pulled write commits, ordered so none of them stands behind another's slow
 work:
 
+```
+stage payload ──► local drift ──► manifest HEAD ──► confirm ──► commit
+    (slow)         (reads file)     (network)       (index)    (rename)
+                                                    └──────────────────┘
+                                                    the only window left
+```
+
 1. **Local drift**, the expensive one. It reads and hashes the whole destination and compares
    against the snapshot the plan was made from. Anything ordered after it inherits that read as its
    own race window, so it goes first.

@@ -48,6 +48,10 @@ needed. Be concise and to the point, and documentation across the project should
 Note that `docs/technical_*.md` pages can be more technically focused and complex, with more detail
 aimed at contributors and advanced users wanting to understand the inner workings of the project.
 
+If something can better and more concisely be explained via a simple ASCII or Mermaid diagram, then
+use one. However ensure not to add sprawling or complex diagrams, e.g. a flow diagram with a lot of
+elements, keep things simple and easy to parse!
+
 ## Remember
 
 Less is always more, simple is always better, boring is best, avoid the magic! Whilst still meeting
