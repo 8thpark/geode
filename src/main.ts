@@ -4,6 +4,8 @@ import { DEVICE_ID_KEY, deviceIdFrom, deviceSuffixFrom } from "./device/device";
 import { createLogSink } from "./log/adapter";
 import { createLogBus, createLogger, type LogBus, type Logger, type LogSink } from "./log/log";
 import { GeodeLogView, LOG_VIEW_TYPE } from "./log/view";
+import { type Actions, GeodeOnboardingModal } from "./onboarding/modal";
+import { type RemoteRead, readRemote, type SyncReport } from "./onboarding/onboarding";
 import {
   armed,
   DEFAULT_STATE,
@@ -60,6 +62,10 @@ type AppWithSetting = App & {
     openTabById: (id: string) => void;
   };
 };
+
+// PassOutcome pairs what the scheduler needs from a pass with what a UI watching one needs, since
+// neither answer contains the other: "stop" is not a message, and a message is not a policy.
+type PassOutcome = { report: SyncReport; result: PassResult };
 
 // SyncStatus is the state the status bar item reflects.
 type SyncStatus = "idle" | "syncing" | "error" | "paused";
@@ -178,6 +184,21 @@ export default class GeodePlugin extends Plugin {
       name: "Sync",
       callback: () => void this.syncNow("manual"),
     });
+    // Offered only while there is a first sync left to run, so the palette never lists a setup
+    // step for a vault that is already set up.
+    this.addCommand({
+      id: "setup",
+      name: "Set up sync",
+      checkCallback: (checking) => {
+        if (!this.canOfferOnboarding()) {
+          return false;
+        }
+        if (!checking) {
+          this.offerOnboarding();
+        }
+        return true;
+      },
+    });
     // Two commands rather than one toggle, so the palette only ever offers the one that would do
     // something, and its name says what that is without the user having to know the current state.
     this.addCommand({
@@ -272,6 +293,74 @@ export default class GeodePlugin extends Plugin {
     app.setting.openTabById(this.manifest.id);
   }
 
+  // canOfferOnboarding reports whether a first sync is still ahead of this device: a usable
+  // connection it has never completed a pass through.
+  private canOfferOnboarding(): boolean {
+    if (this.syncedBefore || !hasConnectionConfig(this.settings)) {
+      return false;
+    }
+
+    return prefixError(this.settings.prefix) === "";
+  }
+
+  // offerOnboarding opens the first sync dialog, closing the settings window first so the status
+  // bar and the log view it points at are not left underneath a modal.
+  private offerOnboarding(): void {
+    if (!this.canOfferOnboarding()) {
+      return;
+    }
+    (this.app as AppWithSetting).setting.close();
+    new GeodeOnboardingModal(this.app, this.onboardingActions()).open();
+  }
+
+  // onboardingActions returns what the first sync dialog needs from the plugin.
+  private onboardingActions(): Actions {
+    return {
+      localPaths: async () => {
+        const files = await createObsidianReader(this.app.vault).listFiles();
+        const paths: string[] = [];
+        for (const file of files) {
+          paths.push(file.path);
+        }
+        return paths;
+      },
+      openLogs: () => void this.openLogView(),
+      openSettings: () => this.openSettingsTab(),
+      readRemote: () => this.readRemoteForPreview(),
+      sync: () => this.syncNow("manual"),
+    };
+  }
+
+  // readRemoteForPreview builds the storage client the preview reads through, reporting anything
+  // that stops it being built as the dialog's own blocked state rather than as a failed pass.
+  private async readRemoteForPreview(): Promise<RemoteRead> {
+    const secretAccessKey = this.app.secretStorage.getSecret(this.settings.secretId);
+    if (secretAccessKey === null || secretAccessKey === "") {
+      return {
+        kind: "blocked",
+        message: `no secret access key found for ID "${this.settings.secretId}"`,
+      };
+    }
+    const dir = this.manifest.dir;
+    if (dir === undefined) {
+      return { kind: "blocked", message: "no plugin data directory available" };
+    }
+
+    const store = createObsidianStore(this.app.vault.adapter, `${dir}/state.json`, this.settings);
+    let localVaultId: string | undefined;
+    try {
+      const snapshot = await store.read();
+      localVaultId = snapshot.vaultId;
+    } catch (err) {
+      this.logger.error(`onboarding: could not read sync state: ${err}`);
+    }
+
+    return readRemote(
+      createS3Client(this.settings, secretAccessKey, obsidianTransport),
+      localVaultId,
+    );
+  }
+
   // restingStatus returns the status bar state to fall back to once nothing is happening, which is
   // "paused" rather than "idle" on a device where automatic sync is switched off. Silence means
   // everything is fine only if a device that has stopped syncing says so.
@@ -321,14 +410,14 @@ export default class GeodePlugin extends Plugin {
 
   // syncNow runs one pass, refusing to start a second while one is running. A manual pass ignores
   // a pause and clears any halt, since the escape hatch has to work in every state.
-  async syncNow(trigger: Trigger = "manual"): Promise<void> {
+  async syncNow(trigger: Trigger = "manual"): Promise<SyncReport> {
     if (this.schedule.syncing) {
-      return;
+      return { ok: false, message: "a sync is already running" };
     }
     if (!hasConnectionConfig(this.settings)) {
       this.logger.warn("sync: storage isn't configured yet");
       this.setSyncStatus("error", "storage isn't configured yet");
-      return;
+      return { ok: false, message: "storage isn't configured yet" };
     }
     // The storage client already refuses an unusable prefix; checking here is what makes the
     // refusal legible, rather than reporting it as a failed conditional write probe.
@@ -336,13 +425,13 @@ export default class GeodePlugin extends Plugin {
     if (badPrefix !== "") {
       this.logger.warn(`sync: ${badPrefix}`);
       this.setSyncStatus("error", badPrefix);
-      return;
+      return { ok: false, message: badPrefix };
     }
     const dir = this.manifest.dir;
     if (dir === undefined) {
       this.logger.error("sync: no plugin data directory available");
       this.setSyncStatus("error", "no plugin data directory available");
-      return;
+      return { ok: false, message: "no plugin data directory available" };
     }
 
     if (trigger === "manual") {
@@ -350,9 +439,12 @@ export default class GeodePlugin extends Plugin {
     }
     this.schedule = notePassStarted(this.schedule);
     this.setSyncStatus("syncing", "");
-    let result: PassResult = "retry";
+    let outcome: PassOutcome = {
+      report: { ok: false, message: "unexpected error" },
+      result: "retry",
+    };
     try {
-      result = await this.runSync(dir, trigger);
+      outcome = await this.runSync(dir, trigger);
     } catch (err) {
       let message = "unexpected error";
       if (err instanceof Error) {
@@ -360,19 +452,23 @@ export default class GeodePlugin extends Plugin {
       }
       this.logger.error(`sync: ${message}`);
       this.setSyncStatus("error", message);
+      outcome = { report: { ok: false, message }, result: "retry" };
     } finally {
-      this.schedule = notePassFinished(this.schedule, result, Date.now());
+      this.schedule = notePassFinished(this.schedule, outcome.result, Date.now());
     }
+
+    return outcome.report;
   }
 
   // runSync does the work of syncNow, split out so the guard and status bar bookkeeping stay
   // readable, and returns what the scheduler backs off from.
-  private async runSync(dir: string, trigger: Trigger): Promise<PassResult> {
+  private async runSync(dir: string, trigger: Trigger): Promise<PassOutcome> {
     const secretAccessKey = this.app.secretStorage.getSecret(this.settings.secretId);
     if (secretAccessKey === null || secretAccessKey === "") {
+      const message = "secret access key not found; open settings to reconfigure";
       this.logger.error(`sync: secret access key not found for ID "${this.settings.secretId}"`);
-      this.setSyncStatus("error", "secret access key not found; open settings to reconfigure");
-      return "stop";
+      this.setSyncStatus("error", message);
+      return { report: { ok: false, message }, result: "stop" };
     }
 
     const storage = createS3Client(this.settings, secretAccessKey, obsidianTransport);
@@ -382,7 +478,7 @@ export default class GeodePlugin extends Plugin {
       if (!probe.ok) {
         this.logger.error(`sync: conditional write check failed: ${probe.message}`);
         this.setSyncStatus("error", probe.message);
-        return "stop";
+        return { report: { ok: false, message: probe.message }, result: "stop" };
       }
       this.conditionalWritesVerified = true;
       this.logger.info("sync: conditional write support verified");
@@ -422,7 +518,10 @@ export default class GeodePlugin extends Plugin {
       this.logger.error(`sync: ${outcome.message}`);
       this.setSyncStatus("error", outcome.message);
 
-      return passResultFor(outcome.fault);
+      return {
+        report: { ok: false, message: outcome.message },
+        result: passResultFor(outcome.fault),
+      };
     }
 
     await stateStore.write(outcome.snapshot);
@@ -434,7 +533,7 @@ export default class GeodePlugin extends Plugin {
     }
     this.setSyncStatus(this.restingStatus(), "");
 
-    return "ok";
+    return { report: { ok: true, changeCount: outcome.changeCount }, result: "ok" };
   }
 
   // loadDeviceId returns this device's identity, minting one on first run and treating an unusable
@@ -489,5 +588,8 @@ export default class GeodePlugin extends Plugin {
     this.schedule = noteResumed(this.schedule);
     await this.loadSyncedBefore();
     this.logger.info("settings saved");
+    // Saving a connection is the moment someone has said what they want and nothing has happened
+    // yet, which is the only moment the first sync dialog has anything to offer.
+    this.offerOnboarding();
   }
 }
