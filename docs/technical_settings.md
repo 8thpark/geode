@@ -9,6 +9,7 @@ lives and how to reach it. Everything about timing, retries, and conflict handli
 project makes rather than a dial to hand you (see [Sync](technical_sync.md)).
 
 - [What Is Stored](#what-is-stored)
+- [Providers](#providers)
 - [Normalizing At The Point Of Use](#normalizing-at-the-point-of-use)
 - [Prefixes](#prefixes)
 - [The Secret](#the-secret)
@@ -21,10 +22,10 @@ Settings persist to `data.json` in the plugin's own folder.
 
 | Field         | Meaning                                                        |
 | ------------- | -------------------------------------------------------------- |
-| `provider`    | `r2` or `custom`                                               |
+| `provider`    | `r2`, `s3`, or `custom`                                        |
 | `accountId`   | Cloudflare account, which R2 derives endpoint and region from  |
 | `endpoint`    | The S3 compatible endpoint, for a custom provider              |
-| `region`      | The region, for a custom provider                              |
+| `region`      | The region, for Amazon S3 and a custom provider                |
 | `bucket`      | The bucket name                                                |
 | `prefix`      | The folder inside the bucket the vault lives under             |
 | `accessKeyId` | The access key                                                 |
@@ -34,6 +35,26 @@ Two things deliberately do not live here. The device identity and the automatic 
 to vault scoped localStorage instead, because settings travel to every device that reads a synced
 `.obsidian/` folder and both of those are statements about one machine (see
 [Device](technical_device.md)).
+
+### Providers
+
+A provider is only a way of arriving at an endpoint and a signing region. Everything past that point
+is the same S3 API for all three.
+
+| Provider           | Endpoint                          | Signing region        |
+| ------------------ | --------------------------------- | --------------------- |
+| `r2` Cloudflare R2 | Derived from `accountId`          | Always `auto`         |
+| `s3` Amazon S3     | Derived from `region`             | The `region` as typed |
+| `custom`           | Typed in full                     | The `region` as typed |
+
+Custom only appears in development builds, where esbuild defines `NODE_ENV`. It exists for the local
+MinIO setup contributors run, and a production user has no reason to reach for a raw endpoint field
+when R2 and Amazon S3 both derive theirs.
+
+Amazon S3 puts the region straight into the endpoint host, so the region is the endpoint. A value
+carrying URL authority delimiters, `x@attacker.example:443#`, would otherwise send signed requests
+and vault data to a host nobody chose. So an unrecognised region yields no endpoint at all, and the
+settings tab reports it the same way it reports a missing one.
 
 ### Normalizing At The Point Of Use
 
