@@ -14,11 +14,14 @@ export const DEFAULT_SETTINGS: GeodeSettings = {
 // ConnectionStatus is the current in-memory state of a Test Connection check.
 export type ConnectionStatus = "unknown" | "checking" | "ok" | "error";
 
+// Provider identifies a supported S3 compatible storage configuration.
+export type Provider = "r2" | "s3" | "custom";
+
 // GeodeSettings is the persisted shape of a Geode plugin's user configuration; see
 // docs/technical_settings.md for why each field is normalized where it is used rather than saved.
 export type GeodeSettings = {
   version: number;
-  provider: "r2" | "custom";
+  provider: Provider;
   accountId: string;
   endpoint: string;
   region: string;
@@ -86,10 +89,18 @@ export function normalizeEndpoint(endpoint: string): string {
   return normalized;
 }
 
-// endpointFor returns the storage endpoint URL to use for the given settings.
+// endpointFor returns the storage endpoint URL for settings, or "" when none can be derived; an
+// Amazon S3 region lands in the URL authority, so an unrecognised one yields no endpoint rather
+// than a host we never meant to sign a request against.
 export function endpointFor(settings: GeodeSettings): string {
   if (settings.provider === "r2") {
     return `https://${settings.accountId}.r2.cloudflarestorage.com`;
+  }
+  if (settings.provider === "s3") {
+    if (!isAwsRegion(settings.region)) {
+      return "";
+    }
+    return `https://s3.${settings.region}.amazonaws.com`;
   }
 
   return normalizeEndpoint(settings.endpoint);
@@ -103,7 +114,16 @@ export function hasConnectionConfig(settings: GeodeSettings): boolean {
   if (settings.provider === "r2") {
     return settings.accountId !== "";
   }
+  if (settings.provider === "s3") {
+    return isAwsRegion(settings.region);
+  }
   return settings.endpoint !== "" && settings.region !== "";
+}
+
+// isAwsRegion reports whether region looks like an AWS region identifier; only the restricted
+// alphabet matters for safety, since it admits no character that can redirect a URL authority.
+export function isAwsRegion(region: string): boolean {
+  return /^[a-z]{2}(-[a-z]+){1,2}-\d{1,2}$/.test(region);
 }
 
 // isCurrentConnectionResult reports whether a completed test still describes the current draft.
@@ -179,10 +199,19 @@ export function prefixError(raw: string): string {
   return "";
 }
 
-// providerOr returns "custom" if v is "custom", otherwise "r2".
-export function providerOr(v: unknown): "r2" | "custom" {
-  if (v === "custom") {
-    return "custom";
+// providerOptions returns user-facing providers, including Custom only for local development.
+export function providerOptions(localDev: boolean): Record<string, string> {
+  if (localDev) {
+    return { r2: "Cloudflare R2", s3: "Amazon S3", custom: "Custom" };
+  }
+
+  return { r2: "Cloudflare R2", s3: "Amazon S3" };
+}
+
+// providerOr returns a known provider, defaulting unknown values to "r2".
+export function providerOr(v: unknown): Provider {
+  if (v === "s3" || v === "custom") {
+    return v;
   }
   return "r2";
 }

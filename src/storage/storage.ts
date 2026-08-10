@@ -2,6 +2,7 @@ import { AwsClient } from "aws4fetch";
 import {
   endpointFor,
   type GeodeSettings,
+  isAwsRegion,
   normalizePrefix,
   prefixError,
   regionFor,
@@ -275,8 +276,8 @@ function conditionHeaders(condition: PutCondition | undefined): Record<string, s
 }
 
 // missingFieldFor returns the name of the first field testConnection needs but doesn't have, or
-// "" when everything required is present; R2 derives endpoint and region from the account ID, so
-// only custom needs them explicitly.
+// "" when everything required is present; R2 derives endpoint and region from the account ID and
+// Amazon S3 derives its endpoint from the region, so only custom needs both explicitly.
 function missingFieldFor(settings: GeodeSettings, secretAccessKey: string): string {
   if (settings.bucket === "") {
     return "bucket";
@@ -292,13 +293,21 @@ function missingFieldFor(settings: GeodeSettings, secretAccessKey: string): stri
     if (settings.accountId === "") {
       return "account ID";
     }
-  } else {
+    return "";
+  }
+
+  if (settings.provider === "custom") {
     if (settings.endpoint === "") {
       return "endpoint";
     }
-    if (settings.region === "") {
-      return "region";
-    }
+  }
+  if (settings.region === "") {
+    return "region";
+  }
+  // Amazon S3 builds its endpoint host from the region, so a region that isn't a real region
+  // identifier has no endpoint to sign against and is reported the same as a missing one.
+  if (settings.provider === "s3" && !isAwsRegion(settings.region)) {
+    return "region (for example us-east-1)";
   }
 
   return "";
