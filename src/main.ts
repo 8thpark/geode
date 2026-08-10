@@ -4,6 +4,8 @@ import { DEVICE_ID_KEY, deviceIdFrom, deviceSuffixFrom } from "./device/device";
 import { createLogSink } from "./log/adapter";
 import { createLogBus, createLogger, type LogBus, type Logger, type LogSink } from "./log/log";
 import { GeodeLogView, LOG_VIEW_TYPE } from "./log/view";
+import { DEFAULT_PASS, type Pass, toastFor } from "./notify/notify";
+import { createToaster, type Toaster } from "./notify/obsidian";
 import { type Actions, GeodeOnboardingModal } from "./onboarding/modal";
 import { type RemoteRead, readRemote, type SyncReport } from "./onboarding/onboarding";
 import {
@@ -65,9 +67,9 @@ type AppWithSetting = App & {
   };
 };
 
-// PassOutcome pairs what the scheduler needs from a pass with what a UI watching one needs, since
-// neither answer contains the other: "stop" is not a message, and a message is not a policy.
-type PassOutcome = { report: SyncReport; result: PassResult };
+// PassOutcome pairs what the scheduler needs from a pass with what everything watching one needs,
+// since neither answer contains the other: "stop" is not a message, and a message is not a policy.
+type PassOutcome = { pass: Pass; result: PassResult };
 
 // SyncStatus is the state the status bar item reflects.
 type SyncStatus = "idle" | "syncing" | "error" | "paused";
@@ -121,6 +123,16 @@ function passResultFor(fault: SyncFault): PassResult {
   return "retry";
 }
 
+// reportFor returns what a caller watching a pass is told about it, which is the part of a pass the
+// first sync dialog can render.
+function reportFor(pass: Pass): SyncReport {
+  if (pass.ok) {
+    return { ok: true, changeCount: pass.changes };
+  }
+
+  return { ok: false, message: pass.message };
+}
+
 // tooltipFor returns the status bar hover text for status. detail is folded into the error case.
 function tooltipFor(status: SyncStatus, detail: string): string {
   if (status === "syncing") {
@@ -160,6 +172,9 @@ export default class GeodePlugin extends Plugin {
   // once per session before trusting the compare and swap. Reset on save, so a new provider
   // re-verifies.
   private conditionalWritesVerified = false;
+  // toaster owns everything geode says out loud, including the one notice that waits to be
+  // dismissed: a halt still on screen after the halt cleared is a lie.
+  private toaster: Toaster = createToaster();
 
   async onload() {
     await this.loadSettings();
@@ -230,6 +245,9 @@ export default class GeodePlugin extends Plugin {
       },
     });
     this.register(() => this.app.workspace.detachLeavesOfType(LOG_VIEW_TYPE));
+    // A sticky toast outlives the plugin that raised it, and a disabled geode has no business
+    // still saying it has stopped syncing.
+    this.register(() => this.toaster.dismissSticky());
 
     this.statusBarEl = this.addStatusBarItem();
     this.statusBarEl.addClass("geode-status-bar", "mod-clickable");
@@ -381,9 +399,11 @@ export default class GeodePlugin extends Plugin {
     this.setSyncStatus(this.restingStatus(), "");
     if (paused) {
       this.logger.info("automatic sync paused on this device");
+      this.toaster.show(toastFor({ kind: "paused" }));
       return;
     }
     this.logger.info("automatic sync resumed on this device");
+    this.toaster.show(toastFor({ kind: "resumed" }));
   }
 
   // setSyncStatus updates the status bar icon and tooltip to reflect status.
@@ -417,35 +437,38 @@ export default class GeodePlugin extends Plugin {
     confirmed: MassChange | null = null,
   ): Promise<SyncReport> {
     if (this.schedule.syncing) {
-      return { ok: false, message: "a sync is already running" };
+      // No status change: a pass is on screen already saying it is running, and this one never
+      // started, so the toast is the whole of the answer.
+      const message = "a sync is already running";
+      this.toaster.show(toastFor({ kind: "pass", pass: { ...DEFAULT_PASS, message } }));
+      return { ok: false, message };
     }
     if (!hasConnectionConfig(this.settings)) {
       this.logger.warn("sync: storage isn't configured yet");
-      this.setSyncStatus("error", "storage isn't configured yet");
-      return { ok: false, message: "storage isn't configured yet" };
+      return this.refuse("storage isn't configured yet");
     }
     // The storage client already refuses an unusable prefix; checking here is what makes the
     // refusal legible, rather than reporting it as a failed conditional write probe.
     const badPrefix = prefixError(this.settings.prefix);
     if (badPrefix !== "") {
       this.logger.warn(`sync: ${badPrefix}`);
-      this.setSyncStatus("error", badPrefix);
-      return { ok: false, message: badPrefix };
+      return this.refuse(badPrefix);
     }
     const dir = this.manifest.dir;
     if (dir === undefined) {
       this.logger.error("sync: no plugin data directory available");
-      this.setSyncStatus("error", "no plugin data directory available");
-      return { ok: false, message: "no plugin data directory available" };
+      return this.refuse("no plugin data directory available");
     }
 
+    // Read before the pass starts, since finishing one is what resets the streak it followed.
+    const recovered = this.schedule.failures > 0;
     if (trigger === "manual") {
       this.schedule = noteResumed(this.schedule);
     }
     this.schedule = notePassStarted(this.schedule);
     this.setSyncStatus("syncing", "");
     let outcome: PassOutcome = {
-      report: { ok: false, message: "unexpected error" },
+      pass: { ...DEFAULT_PASS, message: "unexpected error" },
       result: "retry",
     };
     try {
@@ -457,12 +480,27 @@ export default class GeodePlugin extends Plugin {
       }
       this.logger.error(`sync: ${message}`);
       this.setSyncStatus("error", message);
-      outcome = { report: { ok: false, message }, result: "retry" };
+      outcome = { pass: { ...DEFAULT_PASS, message }, result: "retry" };
     } finally {
       this.schedule = notePassFinished(this.schedule, outcome.result, Date.now());
     }
 
-    return outcome.report;
+    // A halted pass and a blocked one both end automatic sync, but only one of them is the user's
+    // to answer, so the dialog's own case is never reported as a halt.
+    const stopped = outcome.result === "stop" && !outcome.pass.blocked;
+    const pass: Pass = { ...outcome.pass, manual: trigger === "manual", recovered, stopped };
+    this.toaster.show(toastFor({ kind: "pass", pass }));
+
+    return reportFor(pass);
+  }
+
+  // refuse reports a pass that never started. The status bar carries it, and so does a toast, since
+  // a refusal nobody sees is indistinguishable from a sync that silently never runs.
+  private refuse(message: string): SyncReport {
+    this.setSyncStatus("error", message);
+    this.toaster.show(toastFor({ kind: "pass", pass: { ...DEFAULT_PASS, message } }));
+
+    return { ok: false, message };
   }
 
   // runSync does the work of syncNow, split out so the guard and status bar bookkeeping stay
@@ -477,7 +515,7 @@ export default class GeodePlugin extends Plugin {
       const message = "secret access key not found; open settings to reconfigure";
       this.logger.error(`sync: secret access key not found for ID "${this.settings.secretId}"`);
       this.setSyncStatus("error", message);
-      return { report: { ok: false, message }, result: "stop" };
+      return { pass: { ...DEFAULT_PASS, message }, result: "stop" };
     }
 
     const storage = createS3Client(this.settings, secretAccessKey, obsidianTransport);
@@ -487,7 +525,7 @@ export default class GeodePlugin extends Plugin {
       if (!probe.ok) {
         this.logger.error(`sync: conditional write check failed: ${probe.message}`);
         this.setSyncStatus("error", probe.message);
-        return { report: { ok: false, message: probe.message }, result: "stop" };
+        return { pass: { ...DEFAULT_PASS, message: probe.message }, result: "stop" };
       }
       this.conditionalWritesVerified = true;
       this.logger.info("sync: conditional write support verified");
@@ -523,7 +561,10 @@ export default class GeodePlugin extends Plugin {
         void this.syncNow("manual", confirmed);
       }).open();
 
-      return { report: { ok: false, message: outcome.message }, result: "stop" };
+      return {
+        pass: { ...DEFAULT_PASS, blocked: true, message: outcome.message },
+        result: "stop",
+      };
     }
     if (!outcome.ok) {
       // A failed pass can still have made progress worth keeping: completed work is recorded so
@@ -538,7 +579,7 @@ export default class GeodePlugin extends Plugin {
       this.setSyncStatus("error", outcome.message);
 
       return {
-        report: { ok: false, message: outcome.message },
+        pass: { ...DEFAULT_PASS, message: outcome.message },
         result: passResultFor(outcome.fault),
       };
     }
@@ -552,7 +593,15 @@ export default class GeodePlugin extends Plugin {
     }
     this.setSyncStatus(this.restingStatus(), "");
 
-    return { report: { ok: true, changeCount: outcome.changeCount }, result: "ok" };
+    return {
+      pass: {
+        ...DEFAULT_PASS,
+        changes: outcome.changeCount,
+        conflicts: outcome.conflictCount,
+        ok: true,
+      },
+      result: "ok",
+    };
   }
 
   // loadDeviceId returns this device's identity, minting one on first run and treating an unusable
@@ -607,6 +656,7 @@ export default class GeodePlugin extends Plugin {
     this.schedule = noteResumed(this.schedule);
     await this.loadSyncedBefore();
     this.logger.info("settings saved");
+    this.toaster.show(toastFor({ kind: "settingsSaved" }));
     // Saving a connection is the moment someone has said what they want and nothing has happened
     // yet, which is the only moment the first sync dialog has anything to offer.
     this.offerOnboarding();

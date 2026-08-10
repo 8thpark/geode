@@ -861,6 +861,7 @@ test("syncOnce: retry adopts an identical orphaned upload with a HEAD, not anoth
       vaultId: "fixed-vault-id",
     },
     changeCount: 1,
+    conflictCount: 0,
   });
   assert.equal(filePuts, 1, "retry replaced an identical orphaned upload with a HEAD, not a PUT");
   assert.ok(retry.ok);
@@ -1041,6 +1042,46 @@ test("syncOnce: a conflict copy carries the device that made the edit (#103)", a
   const manifest = JSON.parse(unwrapped(manifestBody)) as Snapshot;
   const paths = manifest.files.map((f) => f.path);
   assert.ok(paths.includes(copyPath), paths.join(", "));
+});
+
+test("syncOnce: only a conflict that actually kept a copy is counted", async () => {
+  // Both conflicts complete, but only one of them moves a local edit aside: a path deleted here and
+  // edited elsewhere restores the remote file and preserves nothing, so counting it would have the
+  // toast claim a copy that is not on disk.
+  const baseHash = await hashOf("shared base");
+  const goneHash = await hashOf("also shared");
+  const keptRemote = await hashOf("their edit");
+  const goneRemote = await hashOf("their other edit");
+  const ancestor = snapshot(
+    { path: "kept.md", size: 11, mtime: 1, hash: baseHash, blob: baseHash },
+    { path: "gone.md", size: 12, mtime: 1, hash: goneHash, blob: goneHash },
+  );
+  const remoteManifest = encodeSnapshot(
+    snapshot(
+      { path: "kept.md", size: 10, mtime: 1, hash: keptRemote, blob: keptRemote },
+      { path: "gone.md", size: 16, mtime: 1, hash: goneRemote, blob: goneRemote },
+    ),
+  );
+  const { storage } = fakeStorage({
+    [MANIFEST_KEY]: wrapped(remoteManifest),
+    [blobKeyFor(keptRemote)]: wrapped("their edit"),
+    [blobKeyFor(goneRemote)]: wrapped("their other edit"),
+  });
+  // gone.md is absent from the reader, which is what a local delete looks like to a pass.
+  const reader = fakeReader({ "kept.md": "my edit" });
+  const { writer, files } = fakeLocalWriter();
+  files.set("kept.md", "my edit");
+  const now = Date.parse("2026-07-14T14:37:22.123Z");
+
+  const outcome = await syncOnce(ancestor, reader, writer, storage, now);
+
+  assert.equal(outcome.ok, true);
+  assert.equal(outcome.changeCount, 2);
+  assert.equal(outcome.conflictCount, 1);
+  // The copy the count refers to is on disk, and the file that never had one is simply restored.
+  assert.equal(files.get(conflictCopyPath("kept.md", now)), "my edit");
+  assert.equal(files.get("kept.md"), "their edit");
+  assert.equal(files.get("gone.md"), "their other edit");
 });
 
 test("syncOnce: a manifest that moves on mid pull is caught before stale content lands on disk", async () => {

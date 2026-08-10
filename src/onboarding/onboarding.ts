@@ -7,7 +7,7 @@ import { readRemoteManifest, readSentinel, type SyncFault } from "../sync/sync.t
 export const DONE_STEPS = [
   "Geode now syncs on its own: edits go up a few seconds after you stop typing, and it checks " +
     "for remote changes every 5 minutes.",
-  "The cloud icon in the status bar is the whole status. Click it to sync right now.",
+  "The cloud icon in the status bar says what it is doing. Click it to sync right now.",
   'Run "Geode: Logs" from the command palette to see everything it has done.',
 ];
 

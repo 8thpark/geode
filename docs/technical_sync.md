@@ -330,6 +330,10 @@ A conflict is a path that changed on both sides to different content. Neither ed
 discarded: the local edit is renamed to a conflict copy and pushed, and the remote version claims
 the original path.
 
+It is also the one thing a successful pass does that nobody would find on their own, so a pass that
+made any says so in a [toast](technical_plugin.md#toasts). An edit kept under a name you never
+learn about is not an edit that survived.
+
 The copy's name carries the time and the device, because on a three device vault "whose" is the
 question actually being asked. It uses no spaces, is lowercase throughout, and separates fields with
 underscores while hyphens live inside them, so a name parses unambiguously from the right even when
