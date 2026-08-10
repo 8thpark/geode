@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  accessKeyIdFor,
+  accountIdFor,
+  bucketFor,
   type ConnectionStatus,
   canSave,
   DEFAULT_SETTINGS,
@@ -269,8 +272,18 @@ const endpointCases: { name: string; input: GeodeSettings; want: string }[] = [
     want: "https://abc123.r2.cloudflarestorage.com",
   },
   {
+    name: "r2 with surrounding whitespace on accountId is trimmed",
+    input: { ...DEFAULT_SETTINGS, accountId: "  abc123  " },
+    want: "https://abc123.r2.cloudflarestorage.com",
+  },
+  {
     name: "amazon s3",
     input: { ...DEFAULT_SETTINGS, provider: "s3", region: "eu-west-2" },
+    want: "https://s3.eu-west-2.amazonaws.com",
+  },
+  {
+    name: "amazon s3 with surrounding whitespace on region is trimmed",
+    input: { ...DEFAULT_SETTINGS, provider: "s3", region: "  eu-west-2  " },
     want: "https://s3.eu-west-2.amazonaws.com",
   },
   {
@@ -353,11 +366,83 @@ const regionCases: { name: string; input: GeodeSettings; want: string }[] = [
     input: { ...DEFAULT_SETTINGS, provider: "custom", region: "eu-west-2" },
     want: "eu-west-2",
   },
+  {
+    name: "custom with surrounding whitespace on region is trimmed",
+    input: { ...DEFAULT_SETTINGS, provider: "custom", region: "  eu-west-2  " },
+    want: "eu-west-2",
+  },
 ];
 
 for (const { name, input, want } of regionCases) {
   test(`regionFor: ${name}`, () => {
     assert.strictEqual(regionFor(input), want);
+  });
+}
+
+const bucketCases: { name: string; input: GeodeSettings; want: string }[] = [
+  {
+    name: "a plain bucket is left alone",
+    input: { ...DEFAULT_SETTINGS, bucket: "my-vault" },
+    want: "my-vault",
+  },
+  {
+    name: "surrounding whitespace is trimmed",
+    input: { ...DEFAULT_SETTINGS, bucket: "  my-vault  " },
+    want: "my-vault",
+  },
+  {
+    name: "a leading space no longer survives into the connection",
+    input: { ...DEFAULT_SETTINGS, bucket: " my-vault" },
+    want: "my-vault",
+  },
+];
+
+for (const { name, input, want } of bucketCases) {
+  test(`bucketFor: ${name}`, () => {
+    assert.strictEqual(bucketFor(input), want);
+  });
+}
+
+const accessKeyIdCases: { name: string; input: GeodeSettings; want: string }[] = [
+  {
+    name: "a plain access key is left alone",
+    input: { ...DEFAULT_SETTINGS, accessKeyId: "AKIA123" },
+    want: "AKIA123",
+  },
+  {
+    name: "surrounding whitespace is trimmed",
+    input: { ...DEFAULT_SETTINGS, accessKeyId: "  AKIA123\n" },
+    want: "AKIA123",
+  },
+];
+
+for (const { name, input, want } of accessKeyIdCases) {
+  test(`accessKeyIdFor: ${name}`, () => {
+    assert.strictEqual(accessKeyIdFor(input), want);
+  });
+}
+
+const accountIdCases: { name: string; input: GeodeSettings; want: string }[] = [
+  {
+    name: "a plain account ID is left alone",
+    input: { ...DEFAULT_SETTINGS, accountId: "abc123" },
+    want: "abc123",
+  },
+  {
+    name: "surrounding whitespace is trimmed",
+    input: { ...DEFAULT_SETTINGS, accountId: "  abc123  " },
+    want: "abc123",
+  },
+  {
+    name: "a whitespace only account ID is empty",
+    input: { ...DEFAULT_SETTINGS, accountId: "   " },
+    want: "",
+  },
+];
+
+for (const { name, input, want } of accountIdCases) {
+  test(`accountIdFor: ${name}`, () => {
+    assert.strictEqual(accountIdFor(input), want);
   });
 }
 
@@ -570,6 +655,71 @@ const hasConnectionConfigCases: { name: string; input: GeodeSettings; want: bool
       secretId: "s",
     },
     want: true,
+  },
+  {
+    name: "r2 with a whitespace only account ID is incomplete",
+    input: { ...DEFAULT_SETTINGS, accountId: "   ", bucket: "b", accessKeyId: "a", secretId: "s" },
+    want: false,
+  },
+  {
+    name: "s3 with a whitespace only region is incomplete",
+    input: {
+      ...DEFAULT_SETTINGS,
+      provider: "s3",
+      region: "   ",
+      bucket: "b",
+      accessKeyId: "a",
+      secretId: "s",
+    },
+    want: false,
+  },
+  {
+    name: "s3 with surrounding whitespace on a real region is complete",
+    input: {
+      ...DEFAULT_SETTINGS,
+      provider: "s3",
+      region: "  us-east-1  ",
+      bucket: "b",
+      accessKeyId: "a",
+      secretId: "s",
+    },
+    want: true,
+  },
+  {
+    name: "custom with a whitespace only endpoint is incomplete",
+    input: {
+      ...DEFAULT_SETTINGS,
+      provider: "custom",
+      endpoint: "   ",
+      region: "us-east-1",
+      bucket: "b",
+      accessKeyId: "a",
+      secretId: "s",
+    },
+    want: false,
+  },
+  {
+    name: "custom with a whitespace only region is incomplete",
+    input: {
+      ...DEFAULT_SETTINGS,
+      provider: "custom",
+      endpoint: "https://s3.example.com",
+      region: "   ",
+      bucket: "b",
+      accessKeyId: "a",
+      secretId: "s",
+    },
+    want: false,
+  },
+  {
+    name: "a whitespace only bucket is incomplete",
+    input: { ...DEFAULT_SETTINGS, accountId: "a", bucket: "   ", accessKeyId: "a", secretId: "s" },
+    want: false,
+  },
+  {
+    name: "a whitespace only access key is incomplete",
+    input: { ...DEFAULT_SETTINGS, accountId: "a", bucket: "b", accessKeyId: "   ", secretId: "s" },
+    want: false,
   },
 ];
 

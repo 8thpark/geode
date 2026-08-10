@@ -1,8 +1,12 @@
 import { AwsClient } from "aws4fetch";
 import {
+  accessKeyIdFor,
+  accountIdFor,
+  bucketFor,
   endpointFor,
   type GeodeSettings,
   isAwsRegion,
+  normalizeEndpoint,
   normalizePrefix,
   prefixError,
   regionFor,
@@ -131,12 +135,12 @@ export function createS3Client(
   }
 
   const client = new AwsClient({
-    accessKeyId: settings.accessKeyId,
+    accessKeyId: accessKeyIdFor(settings),
     secretAccessKey,
     region: regionFor(settings),
     service: "s3",
   });
-  const baseUrl = `${endpointFor(settings)}/${settings.bucket}`;
+  const baseUrl = `${endpointFor(settings)}/${bucketFor(settings)}`;
   const root = normalizePrefix(settings.prefix);
 
   return {
@@ -227,12 +231,12 @@ export async function testConnection(
   }
 
   const client = new AwsClient({
-    accessKeyId: settings.accessKeyId,
+    accessKeyId: accessKeyIdFor(settings),
     secretAccessKey,
     region: regionFor(settings),
     service: "s3",
   });
-  const url = `${endpointFor(settings)}/${settings.bucket}`;
+  const url = `${endpointFor(settings)}/${bucketFor(settings)}`;
 
   let response: HttpResponse;
   try {
@@ -279,10 +283,10 @@ function conditionHeaders(condition: PutCondition | undefined): Record<string, s
 // "" when everything required is present; R2 derives endpoint and region from the account ID and
 // Amazon S3 derives its endpoint from the region, so only custom needs both explicitly.
 function missingFieldFor(settings: GeodeSettings, secretAccessKey: string): string {
-  if (settings.bucket === "") {
+  if (bucketFor(settings) === "") {
     return "bucket";
   }
-  if (settings.accessKeyId === "") {
+  if (accessKeyIdFor(settings) === "") {
     return "access key ID";
   }
   if (secretAccessKey === "") {
@@ -290,23 +294,23 @@ function missingFieldFor(settings: GeodeSettings, secretAccessKey: string): stri
   }
 
   if (settings.provider === "r2") {
-    if (settings.accountId === "") {
+    if (accountIdFor(settings) === "") {
       return "account ID";
     }
     return "";
   }
 
   if (settings.provider === "custom") {
-    if (settings.endpoint === "") {
+    if (normalizeEndpoint(settings.endpoint) === "") {
       return "endpoint";
     }
   }
-  if (settings.region === "") {
+  if (regionFor(settings) === "") {
     return "region";
   }
   // Amazon S3 builds its endpoint host from the region, so a region that isn't a real region
   // identifier has no endpoint to sign against and is reported the same as a missing one.
-  if (settings.provider === "s3" && !isAwsRegion(settings.region)) {
+  if (settings.provider === "s3" && !isAwsRegion(regionFor(settings))) {
     return "region (for example us-east-1)";
   }
 

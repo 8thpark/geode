@@ -58,12 +58,25 @@ settings tab reports it the same way it reports a missing one.
 
 ### Normalizing At The Point Of Use
 
-Endpoint, region, and prefix are stored exactly as typed and canonicalized where they are used, not
-on save.
+Every connection field is stored exactly as typed and canonicalized where it is used, not on save.
 
 The reason is the unsaved changes indicator. If saving rewrote a value, the field would read back
 differently from what was typed and a trailing slash would show up forever as an unsaved change on a
 settings tab nobody had touched.
+
+Each field gets one derivation function in the settings module, and nothing outside that module
+trims a value itself. That is what keeps a check and the request it guards from disagreeing: a
+leading space pasted into the bucket field used to pass validation and then come back as an
+unexplained `400`, because the check read the raw value and the URL was built from another.
+
+| Field         | Derived by          |
+| ------------- | ------------------- |
+| `accessKeyId` | `accessKeyIdFor`    |
+| `accountId`   | `accountIdFor`      |
+| `bucket`      | `bucketFor`         |
+| `endpoint`    | `normalizeEndpoint` |
+| `region`      | `regionFor`         |
+| `prefix`      | `normalizePrefix`   |
 
 ### Prefixes
 

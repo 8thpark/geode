@@ -44,6 +44,24 @@ export type SaveTarget = {
   saveSettings(): Promise<void>;
 };
 
+// accessKeyIdFor returns the access key a connection signs with, trimmed so a stray space cannot
+// turn a valid key into a signature mismatch.
+export function accessKeyIdFor(settings: GeodeSettings): string {
+  return settings.accessKeyId.trim();
+}
+
+// accountIdFor returns the Cloudflare account an R2 endpoint is built from, trimmed so a stray
+// space cannot land in the endpoint host.
+export function accountIdFor(settings: GeodeSettings): string {
+  return settings.accountId.trim();
+}
+
+// bucketFor returns the bucket a connection addresses, trimmed so an accidental leading space
+// cannot turn a valid bucket into a 400.
+export function bucketFor(settings: GeodeSettings): string {
+  return settings.bucket.trim();
+}
+
 // canSave reports whether the current draft may be persisted.
 export function canSave(dirty: boolean, connectionStatus: ConnectionStatus): boolean {
   if (!dirty) {
@@ -94,13 +112,14 @@ export function normalizeEndpoint(endpoint: string): string {
 // than a host we never meant to sign a request against.
 export function endpointFor(settings: GeodeSettings): string {
   if (settings.provider === "r2") {
-    return `https://${settings.accountId}.r2.cloudflarestorage.com`;
+    return `https://${accountIdFor(settings)}.r2.cloudflarestorage.com`;
   }
   if (settings.provider === "s3") {
-    if (!isAwsRegion(settings.region)) {
+    const region = regionFor(settings);
+    if (!isAwsRegion(region)) {
       return "";
     }
-    return `https://s3.${settings.region}.amazonaws.com`;
+    return `https://s3.${region}.amazonaws.com`;
   }
 
   return normalizeEndpoint(settings.endpoint);
@@ -108,16 +127,16 @@ export function endpointFor(settings: GeodeSettings): string {
 
 // hasConnectionConfig reports whether settings have enough filled in to attempt a connection.
 export function hasConnectionConfig(settings: GeodeSettings): boolean {
-  if (settings.bucket === "" || settings.accessKeyId === "" || settings.secretId === "") {
+  if (bucketFor(settings) === "" || accessKeyIdFor(settings) === "" || settings.secretId === "") {
     return false;
   }
   if (settings.provider === "r2") {
-    return settings.accountId !== "";
+    return accountIdFor(settings) !== "";
   }
   if (settings.provider === "s3") {
-    return isAwsRegion(settings.region);
+    return isAwsRegion(regionFor(settings));
   }
-  return settings.endpoint !== "" && settings.region !== "";
+  return normalizeEndpoint(settings.endpoint) !== "" && regionFor(settings) !== "";
 }
 
 // isAwsRegion reports whether region looks like an AWS region identifier; only the restricted
@@ -216,14 +235,14 @@ export function providerOr(v: unknown): Provider {
   return "r2";
 }
 
-// regionFor returns the signing region for settings; R2 always signs with "auto", so only a custom
-// provider needs one specified.
+// regionFor returns the signing region for settings, trimmed at the point of use; R2 always signs
+// with "auto", so only Amazon S3 and a custom provider need one specified.
 export function regionFor(settings: GeodeSettings): string {
   if (settings.provider === "r2") {
     return "auto";
   }
 
-  return settings.region;
+  return settings.region.trim();
 }
 
 // saveDraft persists a copy of draft when the current connection state allows it.

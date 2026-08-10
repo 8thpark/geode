@@ -119,6 +119,55 @@ const missingFieldCases: {
     secretAccessKey: "shh",
     want: "Fill in region first",
   },
+  {
+    name: "whitespace only bucket",
+    settings: { ...DEFAULT_SETTINGS, bucket: "   ", accessKeyId: "AKIA123" },
+    secretAccessKey: "shh",
+    want: "Fill in bucket first",
+  },
+  {
+    name: "whitespace only access key ID",
+    settings: { ...DEFAULT_SETTINGS, bucket: "my-vault", accessKeyId: "   " },
+    secretAccessKey: "shh",
+    want: "Fill in access key ID first",
+  },
+  {
+    name: "whitespace only account ID for R2",
+    settings: {
+      ...DEFAULT_SETTINGS,
+      accountId: "   ",
+      bucket: "my-vault",
+      accessKeyId: "AKIA123",
+    },
+    secretAccessKey: "shh",
+    want: "Fill in account ID first",
+  },
+  {
+    name: "whitespace only endpoint for custom",
+    settings: {
+      ...DEFAULT_SETTINGS,
+      provider: "custom",
+      endpoint: "   ",
+      region: "us-east-1",
+      bucket: "my-vault",
+      accessKeyId: "AKIA123",
+    },
+    secretAccessKey: "shh",
+    want: "Fill in endpoint first",
+  },
+  {
+    name: "whitespace only region for custom",
+    settings: {
+      ...DEFAULT_SETTINGS,
+      provider: "custom",
+      endpoint: "https://s3.example.com",
+      region: "   ",
+      bucket: "my-vault",
+      accessKeyId: "AKIA123",
+    },
+    secretAccessKey: "shh",
+    want: "Fill in region first",
+  },
 ];
 
 for (const { name, settings, secretAccessKey, want } of missingFieldCases) {
