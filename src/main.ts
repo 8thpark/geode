@@ -4,6 +4,8 @@ import { DEVICE_ID_KEY, deviceIdFrom, deviceSuffixFrom } from "./device/device";
 import { createLogSink } from "./log/adapter";
 import { createLogBus, createLogger, type LogBus, type Logger, type LogSink } from "./log/log";
 import { GeodeLogView, LOG_VIEW_TYPE } from "./log/view";
+import { type Actions, GeodeOnboardingModal } from "./onboarding/modal";
+import { type RemoteRead, readRemote, type SyncReport } from "./onboarding/onboarding";
 import {
   armed,
   DEFAULT_STATE,
@@ -11,6 +13,7 @@ import {
   noteFocus,
   notePassFinished,
   notePassStarted,
+  noteReconnected,
   noteResumed,
   noteVaultChange,
   PAUSE_KEY,
@@ -29,6 +32,8 @@ import {
 import { GeodeSettingTab } from "./settings/tab";
 import { obsidianTransport } from "./storage/obsidian";
 import { createS3Client, probeConditionalWrites } from "./storage/storage";
+import type { MassChange } from "./sync/guard";
+import { GeodeMassChangeModal } from "./sync/modal";
 import { type SyncFault, syncOnce } from "./sync/sync";
 import {
   createObsidianLocalWriter,
@@ -60,13 +65,15 @@ type AppWithSetting = App & {
   };
 };
 
+// PassOutcome pairs what the scheduler needs from a pass with what a UI watching one needs, since
+// neither answer contains the other: "stop" is not a message, and a message is not a policy.
+type PassOutcome = { report: SyncReport; result: PassResult };
+
 // SyncStatus is the state the status bar item reflects.
 type SyncStatus = "idle" | "syncing" | "error" | "paused";
 
-// deviceLabel returns the human recognisable half of this device's ID, lowercase to match the rest
-// of the suffix a conflict copy carries. The mobile checks come first: an iPad reports itself as
-// macOS on some builds, so asking "is this a phone or tablet" before "which desktop OS" is what
-// keeps an iPad from being labelled mac.
+// deviceLabel returns the human recognisable half of this device's ID, asking "phone or tablet"
+// before "which desktop OS" because an iPad reports itself as macOS on some builds.
 function deviceLabel(): string {
   if (Platform.isIosApp) {
     return "ios";
@@ -101,10 +108,8 @@ function iconFor(status: SyncStatus): string {
   return "cloud";
 }
 
-// passResultFor maps how a pass failed onto what the scheduler should do about it. The two
-// vocabularies are kept apart deliberately: sync says what went wrong without knowing there is a
-// timer, the scheduler decides when to try again without knowing what a bucket is, and this line
-// is the whole of what either needs from the other.
+// passResultFor maps how a pass failed onto what the scheduler should do about it, and is the whole
+// of what those two modules need from each other.
 function passResultFor(fault: SyncFault): PassResult {
   if (fault === "raced") {
     return "raced";
@@ -130,36 +135,30 @@ function tooltipFor(status: SyncStatus, detail: string): string {
   return "Geode: click to sync";
 }
 
-// GeodePlugin is the Obsidian plugin entry point that owns settings load and save.
+// GeodePlugin is the Obsidian plugin entry point that owns settings load and save; see
+// docs/technical_plugin.md for the layering rule every adapter here follows.
 export default class GeodePlugin extends Plugin {
   settings: GeodeSettings = DEFAULT_SETTINGS;
-  // deviceId names this machine in conflict copies and logs (#103). Read from, and when absent
-  // minted into, vault scoped localStorage rather than settings: see DEVICE_ID_KEY for why it must
-  // never be able to travel to another device.
+  // deviceId names this machine in conflict copies and logs, held in vault scoped localStorage
+  // rather than settings so it can never travel to another device.
   deviceId = "";
   // Assigned in onload, which Obsidian always runs before any other plugin method.
   logger!: Logger;
   private logBus!: LogBus;
   private logSink!: LogSink;
   private statusBarEl!: HTMLElement;
-  // schedule decides when an automatic pass is due (#93). It holds the in flight flag too, so
-  // "a pass is running" has one home rather than a plugin field and a scheduler field that can
-  // disagree.
+  // schedule decides when an automatic pass is due, and holds the in flight flag too so "a pass
+  // is running" has one home rather than two fields that can disagree.
   private schedule: State = DEFAULT_STATE;
   // paused is this device's own answer to whether automatic sync runs at all, remembered across
   // restarts in localStorage (see PAUSE_KEY). Manual sync ignores it entirely.
   private paused = false;
-  // syncedBefore gates automatic sync on a completed sync already existing for this bucket. A
-  // bucket's first pass mints its identity, uploads the whole vault, and has no ancestor to fall
-  // back on if the configuration is wrong, so it stays something a user asks for rather than
-  // something that happens to them. Reloaded whenever settings change, which is what makes
-  // repointing at a fresh bucket demote it back to a manual first sync.
+  // syncedBefore gates automatic sync on this bucket having completed one pass already, and is
+  // reloaded on every settings change.
   private syncedBefore = false;
-  // The manifest compare-and-swap that keeps overlapping syncs from clobbering each other (#83)
-  // only holds if the provider honours conditional writes. testConnection probes for this, but
-  // nothing forces a user to run it, so sync verifies once per session before it trusts the CAS
-  // and refuses to run rather than silently lose edits on a provider that ignores preconditions
-  // (#108). Reset on saveSettings so switching provider re-verifies.
+  // Nothing forces anyone to run the settings tab's probe, so sync verifies conditional writes
+  // once per session before trusting the compare and swap. Reset on save, so a new provider
+  // re-verifies.
   private conditionalWritesVerified = false;
 
   async onload() {
@@ -186,6 +185,21 @@ export default class GeodePlugin extends Plugin {
       id: "sync",
       name: "Sync",
       callback: () => void this.syncNow("manual"),
+    });
+    // Offered only while there is a first sync left to run, so the palette never lists a setup
+    // step for a vault that is already set up.
+    this.addCommand({
+      id: "setup",
+      name: "Set up sync",
+      checkCallback: (checking) => {
+        if (!this.canOfferOnboarding()) {
+          return false;
+        }
+        if (!checking) {
+          this.offerOnboarding();
+        }
+        return true;
+      },
     });
     // Two commands rather than one toggle, so the palette only ever offers the one that would do
     // something, and its name says what that is without the user having to know the current state.
@@ -225,9 +239,8 @@ export default class GeodePlugin extends Plugin {
     this.addSettingTab(new GeodeSettingTab(this.app, this));
     this.logger.info(`loaded (provider=${this.settings.provider}, device=${this.deviceId})`);
 
-    // onLayoutReady, not onload directly: the vault isn't guaranteed fully indexed yet at
-    // onload time, and every file would otherwise arrive as a create event the moment the index
-    // caught up (#44).
+    // onLayoutReady, not onload: the vault is not guaranteed indexed at onload, so every file
+    // would arrive as a create event the moment the index caught up.
     this.app.workspace.onLayoutReady(() => {
       void this.loadSyncedBefore();
       this.schedule = noteFocus(this.schedule, document.hasFocus(), Date.now());
@@ -245,12 +258,10 @@ export default class GeodePlugin extends Plugin {
       this.registerDomEvent(window, "blur", () => {
         this.schedule = noteFocus(this.schedule, false, Date.now());
       });
-      // Reconnecting is not treated as proof anything works, only as reason enough to stop waiting
-      // out a backoff whose premise has visibly expired. Nothing gates on navigator.onLine, which
-      // reports being on a network rather than being able to reach anything: trusting it would
-      // turn one wrong answer into a sync that silently never runs.
+      // Reconnecting only ends a backoff whose premise has visibly expired, and is never proof
+      // anything works. Nothing gates on navigator.onLine, which reports far less than it seems.
       this.registerDomEvent(window, "online", () => {
-        this.schedule = noteResumed(this.schedule);
+        this.schedule = noteReconnected(this.schedule, Date.now());
       });
 
       this.registerInterval(window.setInterval(() => this.tick(), TICK_MS));
@@ -282,6 +293,74 @@ export default class GeodePlugin extends Plugin {
     const app = this.app as AppWithSetting;
     app.setting.open();
     app.setting.openTabById(this.manifest.id);
+  }
+
+  // canOfferOnboarding reports whether a first sync is still ahead of this device: a usable
+  // connection it has never completed a pass through.
+  private canOfferOnboarding(): boolean {
+    if (this.syncedBefore || !hasConnectionConfig(this.settings)) {
+      return false;
+    }
+
+    return prefixError(this.settings.prefix) === "";
+  }
+
+  // offerOnboarding opens the first sync dialog, closing the settings window first so the status
+  // bar and the log view it points at are not left underneath a modal.
+  private offerOnboarding(): void {
+    if (!this.canOfferOnboarding()) {
+      return;
+    }
+    (this.app as AppWithSetting).setting.close();
+    new GeodeOnboardingModal(this.app, this.onboardingActions()).open();
+  }
+
+  // onboardingActions returns what the first sync dialog needs from the plugin.
+  private onboardingActions(): Actions {
+    return {
+      localPaths: async () => {
+        const files = await createObsidianReader(this.app.vault).listFiles();
+        const paths: string[] = [];
+        for (const file of files) {
+          paths.push(file.path);
+        }
+        return paths;
+      },
+      openLogs: () => void this.openLogView(),
+      openSettings: () => this.openSettingsTab(),
+      readRemote: () => this.readRemoteForPreview(),
+      sync: () => this.syncNow("manual"),
+    };
+  }
+
+  // readRemoteForPreview builds the storage client the preview reads through, reporting anything
+  // that stops it being built as the dialog's own blocked state rather than as a failed pass.
+  private async readRemoteForPreview(): Promise<RemoteRead> {
+    const secretAccessKey = this.app.secretStorage.getSecret(this.settings.secretId);
+    if (secretAccessKey === null || secretAccessKey === "") {
+      return {
+        kind: "blocked",
+        message: `no secret access key found for ID "${this.settings.secretId}"`,
+      };
+    }
+    const dir = this.manifest.dir;
+    if (dir === undefined) {
+      return { kind: "blocked", message: "no plugin data directory available" };
+    }
+
+    const store = createObsidianStore(this.app.vault.adapter, `${dir}/state.json`, this.settings);
+    let localVaultId: string | undefined;
+    try {
+      const snapshot = await store.read();
+      localVaultId = snapshot.vaultId;
+    } catch (err) {
+      this.logger.error(`onboarding: could not read sync state: ${err}`);
+    }
+
+    return readRemote(
+      createS3Client(this.settings, secretAccessKey, obsidianTransport),
+      localVaultId,
+    );
   }
 
   // restingStatus returns the status bar state to fall back to once nothing is happening, which is
@@ -331,36 +410,33 @@ export default class GeodePlugin extends Plugin {
     void this.syncNow(decision.trigger);
   }
 
-  // syncNow pushes every local change since the last sync to remote storage, pulls every remote
-  // change since then down locally, and renames the local side of anything that changed on both
-  // ends to a conflict copy rather than ever guessing which edit should win. Refuses to start a
-  // second sync while one is already running. A manual pass ignores a pause and clears any halt:
-  // the escape hatch has to work in every state, especially the one where the automatic path has
-  // given up.
-  async syncNow(trigger: Trigger = "manual"): Promise<void> {
+  // syncNow runs one pass, refusing to start a second while one is running. A manual pass ignores
+  // a pause and clears any halt, since the escape hatch has to work in every state.
+  async syncNow(
+    trigger: Trigger = "manual",
+    confirmed: MassChange | null = null,
+  ): Promise<SyncReport> {
     if (this.schedule.syncing) {
-      return;
+      return { ok: false, message: "a sync is already running" };
     }
     if (!hasConnectionConfig(this.settings)) {
       this.logger.warn("sync: storage isn't configured yet");
       this.setSyncStatus("error", "storage isn't configured yet");
-      return;
+      return { ok: false, message: "storage isn't configured yet" };
     }
-    // createS3Client refuses an unusable prefix on its own, so this is not what makes sync safe
-    // (#154); it is what makes the refusal legible. Without it the first operation to run is the
-    // conditional write probe, and a user would be told their provider failed a write check when
-    // the real answer is one bad character in a setting they can fix.
+    // The storage client already refuses an unusable prefix; checking here is what makes the
+    // refusal legible, rather than reporting it as a failed conditional write probe.
     const badPrefix = prefixError(this.settings.prefix);
     if (badPrefix !== "") {
       this.logger.warn(`sync: ${badPrefix}`);
       this.setSyncStatus("error", badPrefix);
-      return;
+      return { ok: false, message: badPrefix };
     }
     const dir = this.manifest.dir;
     if (dir === undefined) {
       this.logger.error("sync: no plugin data directory available");
       this.setSyncStatus("error", "no plugin data directory available");
-      return;
+      return { ok: false, message: "no plugin data directory available" };
     }
 
     if (trigger === "manual") {
@@ -368,9 +444,12 @@ export default class GeodePlugin extends Plugin {
     }
     this.schedule = notePassStarted(this.schedule);
     this.setSyncStatus("syncing", "");
-    let result: PassResult = "retry";
+    let outcome: PassOutcome = {
+      report: { ok: false, message: "unexpected error" },
+      result: "retry",
+    };
     try {
-      result = await this.runSync(dir, trigger);
+      outcome = await this.runSync(dir, trigger, confirmed);
     } catch (err) {
       let message = "unexpected error";
       if (err instanceof Error) {
@@ -378,22 +457,27 @@ export default class GeodePlugin extends Plugin {
       }
       this.logger.error(`sync: ${message}`);
       this.setSyncStatus("error", message);
+      outcome = { report: { ok: false, message }, result: "retry" };
     } finally {
-      this.schedule = notePassFinished(this.schedule, result, Date.now());
+      this.schedule = notePassFinished(this.schedule, outcome.result, Date.now());
     }
+
+    return outcome.report;
   }
 
-  // runSync does the actual work of syncNow, split out so syncNow can own the in flight guard
-  // and status bar bookkeeping around it without this getting lost in indentation. Its result is
-  // what the scheduler backs off from: "retry" for anything a later attempt could plausibly fix,
-  // "stop" for the failures where retrying every few minutes is just noise (a secret that isn't
-  // there, a provider that won't honour the conditional writes every safety property rests on).
-  private async runSync(dir: string, trigger: Trigger): Promise<PassResult> {
+  // runSync does the work of syncNow, split out so the guard and status bar bookkeeping stay
+  // readable, and returns what the scheduler backs off from.
+  private async runSync(
+    dir: string,
+    trigger: Trigger,
+    confirmed: MassChange | null,
+  ): Promise<PassOutcome> {
     const secretAccessKey = this.app.secretStorage.getSecret(this.settings.secretId);
     if (secretAccessKey === null || secretAccessKey === "") {
+      const message = "secret access key not found; open settings to reconfigure";
       this.logger.error(`sync: secret access key not found for ID "${this.settings.secretId}"`);
-      this.setSyncStatus("error", "secret access key not found; open settings to reconfigure");
-      return "stop";
+      this.setSyncStatus("error", message);
+      return { report: { ok: false, message }, result: "stop" };
     }
 
     const storage = createS3Client(this.settings, secretAccessKey, obsidianTransport);
@@ -403,7 +487,7 @@ export default class GeodePlugin extends Plugin {
       if (!probe.ok) {
         this.logger.error(`sync: conditional write check failed: ${probe.message}`);
         this.setSyncStatus("error", probe.message);
-        return "stop";
+        return { report: { ok: false, message: probe.message }, result: "stop" };
       }
       this.conditionalWritesVerified = true;
       this.logger.info("sync: conditional write support verified");
@@ -430,10 +514,20 @@ export default class GeodePlugin extends Plugin {
       Date.now(),
       () => crypto.randomUUID(),
       this.deviceId,
+      confirmed,
     );
+    if (!outcome.ok && outcome.fault === "blocked") {
+      this.logger.warn(`sync: ${outcome.message}`);
+      this.setSyncStatus("error", outcome.message);
+      new GeodeMassChangeModal(this.app, outcome.change, outcome.restated, (confirmed) => {
+        void this.syncNow("manual", confirmed);
+      }).open();
+
+      return { report: { ok: false, message: outcome.message }, result: "stop" };
+    }
     if (!outcome.ok) {
-      // A failed pass can still have made progress worth keeping (#87): the snapshot records what
-      // completed so it is never re-planned, while each failed file stays pending for next pass.
+      // A failed pass can still have made progress worth keeping: completed work is recorded so
+      // it is never replanned, while each failed file stays pending.
       if (outcome.snapshot !== null) {
         await stateStore.write(outcome.snapshot);
       }
@@ -443,28 +537,26 @@ export default class GeodePlugin extends Plugin {
       this.logger.error(`sync: ${outcome.message}`);
       this.setSyncStatus("error", outcome.message);
 
-      return passResultFor(outcome.fault);
+      return {
+        report: { ok: false, message: outcome.message },
+        result: passResultFor(outcome.fault),
+      };
     }
 
     await stateStore.write(outcome.snapshot);
     this.syncedBefore = true;
-    // A pass that changed nothing is the ordinary case once sync is automatic, and a line for each
-    // one would push everything worth reading out of a 500 line file inside two days. A pass a user
-    // asked for always reports, since they are standing there waiting for an answer. Nothing is
-    // logged when a pass starts, for the same reason: a "starting" line with no matching "complete"
-    // is how a perfectly ordinary idle poll would come to look like a hang.
+    // An idle pass logs nothing, since a line each would flush the capped file inside two days, but
+    // a pass someone asked for always reports.
     if (outcome.changeCount > 0 || trigger === "manual") {
       this.logger.info(`sync: complete (${trigger}, ${outcome.changeCount} change(s) applied)`);
     }
     this.setSyncStatus(this.restingStatus(), "");
 
-    return "ok";
+    return { report: { ok: true, changeCount: outcome.changeCount }, result: "ok" };
   }
 
-  // loadDeviceId returns this device's identity, minting and storing one the first time it runs on
-  // a given device. Vault scoped localStorage, never data.json or state.json, so a synced
-  // .obsidian/ folder can't hand this identity to another machine (see DEVICE_ID_KEY). A stored
-  // value that isn't a usable string is treated as absent and replaced rather than trusted.
+  // loadDeviceId returns this device's identity, minting one on first run and treating an unusable
+  // stored value as absent.
   loadDeviceId(): string {
     const stored: unknown = this.app.loadLocalStorage(DEVICE_ID_KEY);
     if (typeof stored === "string" && stored !== "") {
@@ -481,11 +573,8 @@ export default class GeodePlugin extends Plugin {
     this.settings = normalizeSettings(await this.loadData());
   }
 
-  // loadSyncedBefore records whether this vault has already completed a sync against the currently
-  // configured bucket, which is what automatic sync waits for. The answer comes from state.json
-  // carrying a vaultId, and createObsidianStore refuses a state file written against different
-  // settings (#89), so repointing at another bucket reads back as never synced and correctly
-  // demands a manual first pass rather than starting one unattended.
+  // loadSyncedBefore records whether this bucket has completed a pass already. The state store
+  // refuses a file written against different settings, so repointing reads back as never synced.
   private async loadSyncedBefore(): Promise<void> {
     const dir = this.manifest.dir;
     if (dir === undefined) {
@@ -518,5 +607,8 @@ export default class GeodePlugin extends Plugin {
     this.schedule = noteResumed(this.schedule);
     await this.loadSyncedBefore();
     this.logger.info("settings saved");
+    // Saving a connection is the moment someone has said what they want and nothing has happened
+    // yet, which is the only moment the first sync dialog has anything to offer.
+    this.offerOnboarding();
   }
 }

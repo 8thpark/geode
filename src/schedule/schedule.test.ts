@@ -13,6 +13,7 @@ import {
   noteFocus,
   notePassFinished,
   notePassStarted,
+  noteReconnected,
   noteResumed,
   noteVaultChange,
   POLL_INTERVAL_MS,
@@ -24,10 +25,8 @@ import {
 // being large enough that subtracting any delay below stays comfortably positive.
 const NOW = 10_000_000;
 
-// idle returns a scheduler that finished a pass at NOW and holds focus it gained before that pass,
-// having never been away, so none of the poll, focus, or retry rules is armed. Almost every case
-// starts here and moves exactly one thing, since a case that arms two rules at once proves nothing
-// about which one answered.
+// idle returns a scheduler state with every automatic rule disarmed, so a test can move exactly
+// one thing and prove which rule answered.
 function idle(over: Partial<State> = {}): State {
   return { ...DEFAULT_STATE, lastPassAt: NOW, focusedAt: NOW - FOCUS_MIN_GAP_MS, ...over };
 }
@@ -95,9 +94,8 @@ test("due: each rule fires on its own terms, and the order between them holds", 
       want: { due: true, trigger: "focus" },
     },
     {
-      // The absence is what has to be short here, not the pass. A window someone has been working
-      // in for five unbroken minutes has a five minute old pass and no absence at all, so
-      // measuring the gap from the pass would make every two second switch to another app a sync.
+      // The absence has to be short, not the pass: five unbroken minutes leaves a five minute old
+      // pass but no absence at all.
       name: "a two second switch to another app is not an absence, however old the last pass is",
       state: idle({
         lastPassAt: NOW - POLL_INTERVAL_MS + 1,
@@ -122,9 +120,8 @@ test("due: each rule fires on its own terms, and the order between them holds", 
       want: { due: true, trigger: "retry" },
     },
     {
-      // The failure this rule exists for. A push that fails has already had its pending work
-      // cleared by notePassStarted, and an unfocused window has neither a poll nor a focus event
-      // to fall back on, so without a retry of its own the edits would sit there unsynced.
+      // The case this rule exists for: an unfocused failed push has no poll or focus event to fall
+      // back on, so it needs its own retry.
       name: "a failed pass retries even with the window unfocused and nothing pending",
       state: idle({ retryAfter: NOW, focusedAt: 0 }),
       want: { due: true, trigger: "retry" },
@@ -152,9 +149,8 @@ test("noteVaultChange: the first change starts the ceiling, every change resets 
   assert.equal(first.pendingSince, 100);
   assert.equal(first.lastEventAt, 100);
 
-  // The ceiling is measured from the oldest pending change, so a second edit must not push it
-  // forward; only the quiet period restarts. Otherwise continuous typing would reset both clocks
-  // together and nothing would ever be pushed.
+  // The ceiling is measured from the oldest change, so a second edit must not push it forward,
+  // only the quiet period restarts.
   const second = noteVaultChange(first, 900);
   assert.equal(second.pendingSince, 100);
   assert.equal(second.lastEventAt, 900);
@@ -169,9 +165,8 @@ test("notePassStarted: pending work is cleared, because the pass about to run co
 });
 
 test("notePassStarted: an edit landing mid pass is still pending once the pass finishes", () => {
-  // The pass snapshots the vault at its own start, so an edit arriving after that is not covered
-  // by it and has to survive into the next one. Clearing pending at the end of a pass rather than
-  // the start is exactly how that edit would get lost.
+  // The pass snapshots the vault at its own start, so an edit arriving after that must survive
+  // into the next pass rather than being cleared with it.
   let state = notePassStarted(noteVaultChange(DEFAULT_STATE, 100));
   state = noteVaultChange(state, 200);
   state = notePassFinished(state, "ok", 300);
@@ -220,10 +215,8 @@ test("notePassFinished: the retry delay doubles with each consecutive failure, u
 });
 
 test("notePassFinished: losing a race retries soon and never counts towards giving up", () => {
-  // Two devices syncing at overlapping times is ordinary once sync runs on a timer rather than a
-  // click, and the loser has lost nothing: its work is intact and the manifest it needs to
-  // reconcile against is now sitting there fresh. Counting these would let an entirely healthy
-  // two device vault escalate itself into a half hour backoff.
+  // Losing a race is ordinary once sync runs on a timer, and the loser has lost nothing, so
+  // counting it would escalate a healthy vault into a half hour backoff for no reason.
   let state = DEFAULT_STATE;
   for (let i = 0; i < 10; i++) {
     state = notePassFinished(state, "raced", 1_000);
@@ -235,11 +228,8 @@ test("notePassFinished: losing a race retries soon and never counts towards givi
 });
 
 test("notePassFinished: a race breaks a failure streak, since it proves the round trip works", () => {
-  // A raced pass reached the provider, read the manifest, moved the files, and lost only the final
-  // compare-and-swap, so the network and the credentials are demonstrably fine. Merely holding the
-  // count instead of clearing it would charge the next unrelated blip a doubled delay for a streak
-  // that a working round trip had already broken, and a long enough interleaving of blips and
-  // races would reach the half hour cap without ever failing twice in a row.
+  // A raced pass reached the provider, read the manifest, and moved the files: proof the round
+  // trip works, so it resets the streak instead of merely holding it.
   let state = notePassFinished(DEFAULT_STATE, "retry", 1_000);
   assert.equal(state.failures, 1);
 
@@ -249,6 +239,37 @@ test("notePassFinished: a race breaks a failure streak, since it proves the roun
   state = notePassFinished(state, "retry", 3_000);
   assert.equal(state.failures, 1);
   assert.equal(state.retryAfter, 3_000 + BACKOFF_BASE_MS);
+});
+
+test("noteReconnected: ends a backoff early, keeping the streak that sized it", () => {
+  let state = notePassFinished(notePassFinished(DEFAULT_STATE, "retry", 100), "retry", 200);
+  assert.equal(state.retryAfter, 200 + BACKOFF_BASE_MS * 2);
+
+  state = noteReconnected(state, 300);
+  assert.deepEqual(due(state, 300), { due: true, trigger: "retry" });
+  // The streak survives, so a reconnect that fixed nothing cannot flap the retry delay back down to
+  // the base every time an interface returns.
+  assert.equal(state.failures, 2);
+
+  state = notePassFinished(state, "retry", 300);
+  assert.equal(state.retryAfter, 300 + BACKOFF_BASE_MS * 4);
+});
+
+test("noteReconnected: with nothing waiting, there is nothing to bring forward", () => {
+  // A retry already due is not pushed back to the moment the network returned, and a state with no
+  // retry pending is not handed one it never earned.
+  const overdue = notePassFinished(DEFAULT_STATE, "retry", 100);
+  assert.deepEqual(noteReconnected(overdue, overdue.retryAfter + 1), overdue);
+  assert.deepEqual(noteReconnected(DEFAULT_STATE, 100), DEFAULT_STATE);
+});
+
+test("noteReconnected: a halt survives, since a network returning fixes nothing it stopped for", () => {
+  // Rejected credentials and a bucket belonging to another vault are exactly as wrong after a
+  // reconnect, so resuming here would re-fail on every flap for as long as the vault is open.
+  const halted = notePassFinished(DEFAULT_STATE, "stop", 100);
+
+  assert.deepEqual(noteReconnected(halted, 200), halted);
+  assert.deepEqual(due(noteReconnected(halted, 200), 100 + BACKOFF_MAX_MS * 10), { due: false });
 });
 
 test("noteResumed: clears a halt and any pending retry, and nothing else does", () => {
@@ -281,10 +302,8 @@ test("noteFocus: losing focus records when, so the absence can be measured on th
 });
 
 test("a failed push retries on its own, having already cleared the work it was covering", () => {
-  // End to end over the rule above: an edit on an unfocused window pushes, the push fails, and
-  // nothing else is ever going to fire. No poll, because the window is unfocused. No focus event,
-  // because nobody has touched it. No further edit, because the user has walked away. The retry
-  // has to come from the failure itself or the work sits there.
+  // End to end: an edit on an unfocused window pushes and fails, and nothing else is ever going to
+  // fire it again, so the retry has to come from the failure itself.
   let state = { ...DEFAULT_STATE, lastPassAt: NOW - POLL_INTERVAL_MS, focusedAt: 0 };
   state = noteVaultChange(state, NOW);
 

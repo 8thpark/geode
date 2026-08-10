@@ -183,3 +183,113 @@
     transform: rotate(360deg);
   }
 }
+
+.geode-onboarding p {
+  margin: 0 0 1em;
+}
+
+.geode-onboarding-counts {
+  display: flex;
+  gap: 0.5em;
+  margin-bottom: 1em;
+}
+
+.geode-onboarding-count {
+  flex: 1;
+  padding: 0.75em 0.5em;
+  border-radius: var(--radius-m, 8px);
+  background: var(--background-secondary);
+  text-align: center;
+}
+
+.geode-onboarding-count-value {
+  font-size: 1.5em;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.geode-onboarding-count-label {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.geode-onboarding-caution {
+  color: var(--text-warning);
+}
+
+.geode-onboarding-error {
+  color: var(--text-error);
+}
+
+.geode-onboarding-steps {
+  margin: 0 0 1em;
+  padding-left: 1.25em;
+  color: var(--text-muted);
+}
+
+.geode-onboarding-steps li {
+  margin-bottom: 0.35em;
+}
+
+.geode-onboarding-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5em;
+  justify-content: flex-end;
+}
+
+.geode-onboarding-buttons button {
+  cursor: pointer;
+}
+
+.geode-mass-change p {
+  margin: 0 0 1em;
+}
+
+.geode-mass-change-note {
+  color: var(--text-warning);
+}
+
+.geode-mass-change-paths {
+  margin: 0 0 1em;
+}
+
+.geode-mass-change-paths summary {
+  cursor: pointer;
+  color: var(--text-muted);
+}
+
+.geode-mass-change-paths ul {
+  margin: 0.5em 0 0;
+  padding-left: 1.25em;
+  max-height: 12em;
+  overflow-y: auto;
+  font-size: var(--font-ui-smaller);
+}
+
+.geode-mass-change-paths li {
+  margin-bottom: 0.2em;
+}
+
+.geode-mass-change-verb {
+  display: inline-block;
+  min-width: 8em;
+  color: var(--text-muted);
+}
+
+.geode-mass-change-more {
+  margin: 0.5em 0 0;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.geode-mass-change-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5em;
+  justify-content: flex-end;
+}
+
+.geode-mass-change-buttons button {
+  cursor: pointer;
+}

@@ -13,10 +13,8 @@ test("deviceSuffixFrom: five bytes encode to eight base32 characters (#103)", ()
 });
 
 test("deviceSuffixFrom: the alphabet is lowercase and skips the ambiguous letters (#103)", () => {
-  // One case throughout is what makes two device IDs unable to collide by case alone, which
-  // decodeSnapshot refuses outright (#94); lowercase specifically because the whole suffix a
-  // conflict copy carries is lowercase. i, l, o and u are absent so a suffix read off a filename
-  // can't be transcribed back wrong.
+  // One case throughout is what stops two device IDs colliding by case alone, and i, l, o and u
+  // are absent so a suffix read off a filename cannot be transcribed back wrong.
   const every = deviceSuffixFrom(new Uint8Array([255, 255, 255, 255, 255]));
 
   assert.equal(every, "zzzzzzzz");
@@ -48,8 +46,8 @@ test("deviceIdFrom: an empty half degrades to the other rather than leaving a st
 
 test("deviceIdFrom: every generated ID is safe in a conflict copy path (#103)", () => {
   // The ID lands in a filename written to disk, so it has to clear the same rules a pulled
-  // manifest entry does (#132) and must never introduce uppercase that could let two devices
-  // collide by case alone (#94).
+  // manifest entry does, and must never introduce uppercase that could let two devices collide by
+  // case alone.
   const labels = ["mac", "ios", "android", "windows", "linux", "device"];
   const suffixes = ["01234567", "zzzzzzzz", "k3pl7qna", "00000000"];
 

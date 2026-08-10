@@ -1,8 +1,5 @@
-// Integration tests: drive the real sync orchestration (syncOnce) and the real vault/obsidian.ts file
-// I/O against a real S3 compatible server (MinIO, via `docker compose`) plus real temp directories
-// on disk. Each "device" is a temp vault wired through the real adapter code over a node:fs backed
-// Vault, so these exercise multi device convergence and conflict resolution end to end, not with
-// in-memory fakes. Requires Docker; run via `npm run test:integration`, not `npm test`.
+// Integration tests: real syncOnce and real adapter file I/O against MinIO and temp directories,
+// so multi device convergence is exercised end to end rather than against fakes. Needs Docker.
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -35,10 +32,8 @@ const liveSettings: GeodeSettings = {
   provider: "custom",
   endpoint: "http://localhost:4568",
   region: "us-east-1",
-  // sync.itest has this bucket to itself: syncOnce's first sync path lists the reserved blob
-  // prefix and refuses over anything it can't explain (#109), so sharing geode-test with
-  // storage.itest's leftover objects (harmless there, since none live under that prefix) is not
-  // worth the risk of a future test tripping the same refusal here.
+  // This file owns the bucket outright, since a first sync refuses over blobs it cannot explain
+  // and a shared bucket's leftovers would eventually trip that.
   bucket: "geode-sync-test",
   accessKeyId: "geodedev",
 };
@@ -54,10 +49,8 @@ type Device = {
   stateStore: Store;
 };
 
-// newDevice creates a fresh temp vault with the plugin data folder pre-created (as Obsidian would
-// have), wired to the real vault/obsidian.ts code over a node:fs backed vault. settings only ever
-// differs for the prefix scenario, which needs a state store fingerprinted against the same target
-// its sync actually writes to.
+// newDevice creates a fresh temp vault wired to the real adapter code. settings differs only for
+// the prefix scenario, which needs a state store fingerprinted against the target it writes to.
 function newDevice(settings: GeodeSettings = liveSettings): Device {
   const root = mkdtempSync(join(tmpdir(), "geode-device-"));
   mkdirSync(join(root, ".obsidian", "plugins", "geode"), { recursive: true });
@@ -70,10 +63,8 @@ function newDevice(settings: GeodeSettings = liveSettings): Device {
   };
 }
 
-// writeLocal creates or overwrites a file in a device's vault, the way a user editing in Obsidian
-// would, so a following sync sees it as a local change. Edits in these tests always change the
-// byte length so a same millisecond, same size rewrite can never hide a change from mtime based
-// detection.
+// writeLocal edits a file the way someone in Obsidian would. Every edit here changes the byte
+// length, so a same millisecond rewrite can never hide a change from stat based detection.
 async function writeLocal(d: Device, path: string, body: string): Promise<void> {
   const staged = await d.writer.stageFile(path, new TextEncoder().encode(body), "replace");
   await staged.commit();
@@ -88,10 +79,8 @@ async function readLocal(d: Device, path: string): Promise<string | undefined> {
   }
 }
 
-// contentOf returns the payload inside a bucket object's envelope (#184), so a test asserting on
-// what the bucket holds compares content rather than framing. A body that is not a geode object at
-// all throws: every object these tests read was written by a sync moments earlier, so anything
-// else is the test itself being wrong about what it fetched.
+// contentOf returns the payload inside an object's envelope, so an assertion compares content
+// rather than framing. A body that is not a geode object throws, since it can only be a test bug.
 function contentOf(body: Uint8Array | null): string {
   const opened = unwrapObject(body ?? new Uint8Array());
   if (!opened.ok) {
@@ -113,10 +102,8 @@ async function deleteLocal(d: Device, path: string): Promise<void> {
   await d.writer.deleteFile(path);
 }
 
-// sync runs one pass for a device, mirroring the plugin's runSync spine: read previous state, run
-// syncOnce, persist the new snapshot whenever one comes back (a full success, or a failed pass
-// that still made progress). client only ever differs for the prefix scenario, which drives the
-// same code against a client rooted inside the bucket rather than at it.
+// sync runs one pass for a device, mirroring the plugin's spine: read state, run syncOnce,
+// persist whatever snapshot comes back.
 async function sync(d: Device, now = Date.now(), client = storage): Promise<SyncOutcome> {
   const previous = await d.stateStore.read();
   const outcome = await syncOnce(previous, d.reader, d.writer, client, now);
@@ -131,10 +118,8 @@ async function sync(d: Device, now = Date.now(), client = storage): Promise<Sync
   return outcome;
 }
 
-// resetRemote clears the manifest and every object, so each scenario starts from an empty bucket;
-// the bucket is exclusively this file's, so a full wipe never disturbs another test file's keys.
-// A failed listing fails the scenario here rather than proceeding with a stale bucket, which
-// would surface later as a baffling orphan refusal on the scenario's first sync.
+// resetRemote empties the bucket between scenarios, failing loudly on a bad listing rather than
+// letting a stale bucket resurface later as a baffling orphan refusal.
 async function resetRemote(): Promise<void> {
   await storage.deleteObject(MANIFEST_KEY);
   const listed = await storage.listObjects();
@@ -266,7 +251,7 @@ test("sync: a file deleted independently on both devices converges without a con
 
     // B's sync sees the file deleted on both sides since the last sync. Before the fix, planSync
     // misclassified this as a conflict, and executeSyncPlan then tried to read the local bytes of
-    // a file that no longer existed, throwing uncaught and leaving the sync stuck mid-flight.
+    // a file that no longer existed, throwing uncaught and leaving the sync stuck mid flight.
     const bOutcome = await sync(b);
     assert.equal(bOutcome.ok, true);
 
@@ -299,10 +284,8 @@ test("sync: a file deleted on one device and edited on another restores the edit
     await writeLocal(b, "five/note.md", "B kept editing");
     assert.equal((await sync(b)).ok, true);
 
-    // A's sync sees local deleted, remote modified since the last sync. Before the fix this was
-    // classified as a conflict and executeSyncPlan unconditionally tried to read the local bytes
-    // of a.md to preserve as a copy — but A has nothing there, so it threw uncaught and A was
-    // stuck retrying the same throw forever.
+    // Local deleted, remote modified. A conflict here has no local bytes to preserve, so the
+    // deleted side must be carried explicitly rather than discovered by a failed read.
     const aOutcome = await sync(a);
     assert.equal(aOutcome.ok, true);
 
@@ -318,10 +301,8 @@ test("sync: a stale state.json from an older build never deletes the vault on th
   await resetRemote();
   const a = newDevice();
   try {
-    // Reproduce an upgrader's poisoned ancestor. The older build wrote state.json on every file
-    // event, not only on completed syncs, so a developer who ran it against their own vault has a
-    // state.json describing every file despite nothing ever reaching the (still empty) bucket:
-    // files on disk, a state.json claiming them, and a remote that has never been written.
+    // An upgrader's poisoned ancestor: a state.json describing the whole vault while the bucket
+    // has never been written. A first sync must drop that ancestor rather than diff against it.
     await writeLocal(a, "seven/one.md", "first note");
     await writeLocal(a, "seven/two.md", "second note");
     await a.stateStore.write(await takeSnapshot(a.reader, { files: [] }));
@@ -357,10 +338,8 @@ test("sync: a stale state.json from an older build never deletes the vault on th
 });
 
 test("sync: two devices syncing at overlapping times never silently delete a file", async () => {
-  // Reproduces #83 against a real bucket. B's entire sync pass lands while A's pass sits between
-  // reading the manifest and uploading its own, the exact interleaving overlapping automatic
-  // syncs produce. Before the fix A's unconditional manifest upload clobbered B's, so B's next
-  // sync read from-b.md as a remote deletion and silently deleted it.
+  // B's whole pass lands while A sits between reading the manifest and uploading its own, the
+  // interleaving overlapping automatic syncs produce. A's upload must lose the compare and swap.
   await resetRemote();
   const a = newDevice();
   const b = newDevice();
@@ -402,13 +381,9 @@ test("sync: two devices syncing at overlapping times never silently delete a fil
 });
 
 test("sync: a deleted manifest with unexplained blobs reports and proceeds, rather than deadlocking B forever", async () => {
-  // Reproduces #109 for content addressed storage, and the regression an outright refusal here
-  // caused. A syncs a note up, then the manifest alone is deleted (a bucket lifecycle rule, manual
-  // cleanup, a partial restore) while its blob survives. B, never synced, then sees what looks
-  // like a first sync; its local vault has no file whose content explains that blob (a's note was
-  // never B's). A hard refusal here never writes a manifest, so every future attempt of B's would
-  // hit the identical refusal forever; the pass must instead proceed, push B's own files, and
-  // report the stranded content as a failure rather than silently going ok.
+  // The manifest is deleted while a blob survives, and B cannot explain that blob. Refusing would
+  // never write a manifest, so every retry hits the same refusal; the pass must proceed and report
+  // the stranded content instead.
   await resetRemote();
   const a = newDevice();
   const b = newDevice();
@@ -441,13 +416,9 @@ test("sync: a deleted manifest with unexplained blobs reports and proceeds, rath
 });
 
 test("sync: a deleted manifest over locally diverged content reports and proceeds, rather than guessing a conflict", async () => {
-  // A and B share a synced note, then the manifest alone is deleted (a lifecycle rule, manual
-  // cleanup) and B edits the note before its next sync. Under the plaintext path keyed layout this
-  // replaced, the surviving object's key was the path itself, so this case could be resolved
-  // automatically as a conflict. Under content addressed storage the manifest was the only place
-  // that ever recorded which path a hash belonged to, so B's now-edited local file no longer
-  // explains the surviving blob, and the pass has no path information left to construct a
-  // conflict from; it proceeds with B's edit as a plain push and reports the stranded original.
+  // The manifest is deleted and B edits the note before its next sync. Nothing now records which
+  // path the surviving blob belonged to, so the pass pushes B's edit and reports the original as
+  // stranded rather than constructing a conflict it has no path information for.
   await resetRemote();
   const a = newDevice();
   const b = newDevice();
@@ -494,10 +465,8 @@ test("sync: an edit on one device and a delete on another preserves the edit as 
     await deleteLocal(b, "six/note.md");
     assert.equal((await sync(b)).ok, true);
 
-    // A's sync sees local modified, remote deleted since the last sync. Before the fix this
-    // succeeded at preserving A's edit as a copy, then treated the expected empty read at the
-    // original path as a sync failure, blocking state.json from ever advancing and repeating on
-    // every subsequent sync.
+    // Local modified, remote deleted. The rename is the whole local change, so the path being
+    // left empty afterwards is the correct final state rather than a failure to report.
     const now = Date.parse("2026-07-14T10:00:00.000Z");
     const aOutcome = await sync(a, now);
     assert.equal(aOutcome.ok, true);
@@ -514,10 +483,8 @@ test("sync: an edit on one device and a delete on another preserves the edit as 
 });
 
 test("sync: two devices converge inside a bucket prefix (#154)", async () => {
-  // The whole spine driven against a client rooted inside the bucket: manifest, sentinel and blobs
-  // all land under the prefix, the bucket root stays empty, and the devices converge exactly as
-  // they do at the root. Nothing above the storage client knows the prefix exists, so this is what
-  // proves that indifference is real rather than merely intended.
+  // The whole spine against a client rooted inside the bucket, which is what proves nothing above
+  // the storage client knows a prefix exists.
   await resetRemote();
   const prefixed: GeodeSettings = { ...liveSettings, prefix: "vaults/personal" };
   const prefixedStorage = createS3Client(prefixed, SECRET, fetchTransport);

@@ -29,11 +29,8 @@ function renderRow(list: HTMLElement, entry: LogEntry): void {
   row.createSpan({ cls: "geode-log-message", text: entry.message });
 }
 
-// GeodeLogView renders geode's persisted log as a plain, most recent first list, updating live as
-// entries are logged. The pane is always a straight render of what the sink holds: every change
-// re-reads and redraws rather than mutating the DOM in place. A redraw waits while the user has
-// selected log text, then catches up from the sink as soon as that selection clears. Read only: it
-// has no way to write log entries, only display what the sink recorded.
+// GeodeLogView renders the persisted log, most recent first, always as a straight redraw of what
+// the sink holds rather than a DOM mutation; see docs/technical_logging.md.
 export class GeodeLogView extends ItemView {
   private sink: LogSink;
   private bus: LogBus;
@@ -82,7 +79,7 @@ export class GeodeLogView extends ItemView {
     await this.refresh();
   }
 
-  // clear empties the persisted log, then re-renders from the sink like any other change, so the
+  // clear empties the persisted log, then rerenders from the sink like any other change, so the
   // pane reflects whatever actually survived, including any entry that landed mid-clear.
   private async clear(): Promise<void> {
     await this.sink.clear();
@@ -102,12 +99,8 @@ export class GeodeLogView extends ItemView {
     return this.refreshInFlight;
   }
 
-  // runRefresh reads and draws in a loop until no further pass was requested mid-render. The queued
-  // flag is reset before each read and checked immediately after, and the guard is released in the
-  // same synchronous tick as that final check, with no await in between. So an entry logged while a
-  // read is in flight always forces one more read: it either lands before this read's snapshot (and
-  // is drawn now) or sets the flag (and the loop runs again), never slipping through the gap as the
-  // run finishes.
+  // runRefresh loops until no further pass was requested mid render, releasing the guard in the
+  // same tick as its final check so an entry can never slip through the gap.
   private async runRefresh(): Promise<void> {
     try {
       do {

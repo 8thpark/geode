@@ -12,10 +12,8 @@ export type ListPage = {
 // body doesn't match the shape this parser understands.
 export type ParsedListPage = { ok: true; page: ListPage } | { ok: false; message: string };
 
-// parseListObjectsXml extracts object keys, sizes, and last-modified timestamps from an S3
-// ListObjectsV2 XML response, along with the continuation token when the listing is truncated.
-// Regex rather than a DOM parser: the schema is narrow and stable, and DOMParser isn't available
-// outside a browser-like runtime, which would make this untestable under node:test.
+// parseListObjectsXml extracts keys, sizes, timestamps, and any continuation token from a
+// ListObjectsV2 response, by regex since DOMParser is unavailable outside a browser runtime.
 export function parseListObjectsXml(xml: string): ParsedListPage {
   const objects: ObjectMeta[] = [];
   const contentsPattern = /<Contents>([\s\S]*?)<\/Contents>/g;
@@ -31,14 +29,9 @@ export function parseListObjectsXml(xml: string): ParsedListPage {
     match = contentsPattern.exec(xml);
   }
 
-  // looseContentsCount counts every opening tag that looks like a Contents element (a namespace
-  // prefix or trailing attributes included), not just the exact bare form the strict pattern
-  // above requires. A mismatch against what actually got parsed means some entries were dropped
-  // silently: a provider whose <Contents> carries an attribute, or is namespace prefixed, still
-  // reports IsTruncated or KeyCount normally, so checking only for those markers' presence (as an
-  // earlier version of this guard did) would still wave a listing like that through as an empty
-  // bucket. A first sync over that result would then push local files and write a manifest that
-  // never mentions the entries the parser silently dropped, orphaning them forever (#109).
+  // Counting every tag that merely looks like a Contents element catches a listing this parser read
+  // incompletely, which a first sync would otherwise read as an empty bucket and orphan every entry
+  // it dropped.
   const looseContentsCount = looseTagCount(xml, "Contents");
   const recognizable = hasTag(xml, "KeyCount") || hasTag(xml, "IsTruncated");
   if (looseContentsCount !== objects.length || (objects.length === 0 && !recognizable)) {
