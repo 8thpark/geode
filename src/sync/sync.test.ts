@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { encodeSnapshot, hashBytes, type Snapshot } from "../vault/vault.ts";
+import type { ResultStatus } from "../storage/storage.ts";
+import { encodeSnapshot, type FileState, hashBytes, type Snapshot } from "../vault/vault.ts";
 import type { LocalWriter } from "./execute.ts";
 import {
   empty,
@@ -12,18 +13,22 @@ import {
   unwrapped,
   wrapped,
 } from "./fake.ts";
+import { massChangeFor } from "./guard.ts";
 import {
   blobKeyFor,
   conflictCopyPath,
   encodeSentinel,
   MANIFEST_KEY,
   SENTINEL_KEY,
+  type SyncAction,
 } from "./plan.ts";
 import {
   adoptLiveStats,
+  faultFor,
   readRemoteManifest,
   readSentinel,
   revertFailedPaths,
+  type SyncFault,
   syncOnce,
   unexplainedBlobs,
 } from "./sync.ts";
@@ -34,6 +39,76 @@ import {
 async function hashOf(text: string): Promise<string> {
   return hashBytes(new TextEncoder().encode(text));
 }
+
+// deletesOf returns the plan a wiped remote produces for entries, for building the answer a
+// confirmation dialog would have been given.
+function deletesOf(entries: FileState[]): SyncAction[] {
+  const actions: SyncAction[] = [];
+  for (const entry of entries) {
+    actions.push({ kind: "pullDelete", path: entry.path });
+  }
+
+  return actions;
+}
+
+// vaultOf builds a vault of count files as both snapshot entries and the live content behind them,
+// for the cases where what matters is how many files a pass would touch.
+async function vaultOf(
+  count: number,
+): Promise<{ content: Record<string, string>; entries: FileState[] }> {
+  const content: Record<string, string> = {};
+  const entries: FileState[] = [];
+  for (let i = 0; i < count; i++) {
+    const path = `note-${i}.md`;
+    const text = `note ${i}`;
+    const hash = await hashOf(text);
+    content[path] = text;
+    entries.push({ path, size: text.length, mtime: 1, hash, blob: hash });
+  }
+
+  return { content, entries };
+}
+
+test("faultFor: trying again is worth something, or it never will be, and a race is neither", () => {
+  const cases: { status: ResultStatus; want: SyncFault }[] = [
+    // The compare and swap doing its job: nothing failed, nothing lost, and the manifest the
+    // loser needs is already sitting there fresh.
+    { status: "conflict", want: "raced" },
+    // The provider saying we're wrong, not unlucky; no number of retries argues with that.
+    { status: "auth", want: "permanent" },
+    { status: "client", want: "permanent" },
+    // Worth another go, including 429 and 5xx, which statusForHttp already folds into server.
+    { status: "server", want: "transient" },
+    { status: "network", want: "transient" },
+    // Never reaches here as a failure, since a 404 on the manifest is a first sync rather than an
+    // error, but transient is the harmless answer if one ever does.
+    { status: "not_found", want: "transient" },
+  ];
+
+  for (const c of cases) {
+    assert.equal(faultFor(c.status), c.want, c.status);
+  }
+});
+
+test("syncOnce: a rejected access key halts rather than being retried forever (#93)", async () => {
+  // A rejected access key must be reported as permanent, not transient, so it is never retried
+  // forever on a timer.
+  const { storage } = fakeStorage();
+  storage.getObject = async () => ({
+    ok: false,
+    status: "auth",
+    message: "Storage rejected the read (403)",
+    body: null,
+    etag: null,
+  });
+  const reader = fakeReader({ "a.md": "alpha" });
+  const { writer } = fakeLocalWriter();
+
+  const outcome = await syncOnce(empty, reader, writer, storage, 1);
+
+  assert.ok(!outcome.ok);
+  assert.equal(outcome.fault, "permanent");
+});
 
 test("readRemoteManifest: a 404 is treated as an empty snapshot", async () => {
   const { storage } = fakeStorage();
@@ -53,8 +128,8 @@ test("readRemoteManifest: valid JSON is parsed into a snapshot, with the manifes
 });
 
 test("readRemoteManifest: a manifest without an etag is refused, not synced unsafely", async () => {
-  // Without an etag the manifest upload can't be conditional, and an unconditional upload is the
-  // concurrent clobber #83 fixed; the pass must refuse rather than proceed.
+  // Without an etag the manifest upload can't be conditional, and an unconditional upload risks a
+  // concurrent clobber; the pass must refuse rather than proceed.
   const { storage } = fakeStorage({ [MANIFEST_KEY]: wrapped(encodeSnapshot(empty)) });
   const inner = storage.getObject;
   storage.getObject = async (key) => {
@@ -64,7 +139,11 @@ test("readRemoteManifest: a manifest without an etag is refused, not synced unsa
 
   const result = await readRemoteManifest(storage);
 
-  assert.deepEqual(result, { ok: false, message: "remote manifest has no etag" });
+  assert.deepEqual(result, {
+    ok: false,
+    fault: "permanent",
+    message: "remote manifest has no etag",
+  });
 });
 
 test("readRemoteManifest: corrupt JSON is reported as a failure, not an empty snapshot", async () => {
@@ -72,17 +151,22 @@ test("readRemoteManifest: corrupt JSON is reported as a failure, not an empty sn
 
   const result = await readRemoteManifest(storage);
 
-  assert.deepEqual(result, { ok: false, message: "remote manifest is corrupt" });
+  assert.deepEqual(result, {
+    ok: false,
+    fault: "permanent",
+    message: "remote manifest is corrupt",
+  });
 });
 
 test("readRemoteManifest: a manifest with no envelope is corrupt, and one from a newer suite needs an update", async () => {
-  // Bare JSON at the manifest key is not a geode object (#184): every manifest this build writes
-  // carries an envelope, so bytes without one were written by something else, and reading them
-  // leniently would make an unversioned object indistinguishable from a version 1 one.
+  // Bare JSON at the manifest key isn't a geode object: every manifest this build writes carries
+  // an envelope, so bytes without one were written by something else, and reading them leniently
+  // would make an unversioned object indistinguishable from a version 1 one.
   const bare = fakeStorage({ [MANIFEST_KEY]: encodeSnapshot(snapshot(file("a.md", "h1"))) });
 
   assert.deepEqual(await readRemoteManifest(bare.storage), {
     ok: false,
+    fault: "permanent",
     message: "remote manifest is corrupt",
   });
 
@@ -93,27 +177,31 @@ test("readRemoteManifest: a manifest with no envelope is corrupt, and one from a
 
   assert.deepEqual(await readRemoteManifest(encrypted.storage), {
     ok: false,
+    fault: "permanent",
     message: "remote manifest is a format this version of geode can't read",
   });
 });
 
 test("readRemoteManifest: JSON of the wrong shape is corrupt, not a snapshot with an undefined files", async () => {
-  // Each of these parses cleanly but has no files array. Without the shape check they returned
-  // ok:true and later threw TypeError in planSync when byPath iterated remote.files; they must
-  // instead surface as the corrupt-manifest result the signature promises.
+  // Each of these parses cleanly but has no files array; treating them as corrupt here is what
+  // keeps that absence from crashing downstream code that assumes one exists.
   for (const body of ["{}", "[]", "null", "42", '"files"']) {
     const { storage } = fakeStorage({ [MANIFEST_KEY]: wrapped(body) });
 
     const result = await readRemoteManifest(storage);
 
-    assert.deepEqual(result, { ok: false, message: "remote manifest is corrupt" }, body);
+    assert.deepEqual(
+      result,
+      { ok: false, fault: "permanent", message: "remote manifest is corrupt" },
+      body,
+    );
   }
 });
 
 test("readRemoteManifest: a pre-marker manifest with no version field is refused, since only the current storage layout is understood", async () => {
-  // Buckets written before the format version marker existed (#91) are version 1 by definition:
-  // plaintext path keyed storage. This build only understands version 2, content addressed blobs,
-  // so a version 1 manifest must be refused rather than misread against a layout it never used.
+  // Buckets from before the format version marker existed are version 1 by definition: plaintext
+  // path keyed storage, which this build (version 2, content addressed blobs) must refuse rather
+  // than misread.
   const want: Snapshot = snapshot(file("a.md", "h1"));
   const { storage } = fakeStorage({ [MANIFEST_KEY]: wrapped(JSON.stringify(want)) });
 
@@ -121,6 +209,7 @@ test("readRemoteManifest: a pre-marker manifest with no version field is refused
 
   assert.deepEqual(result, {
     ok: false,
+    fault: "permanent",
     message: "remote manifest is a format this version of geode can't read",
   });
 });
@@ -135,12 +224,13 @@ test("readRemoteManifest: a manifest from a format version this build doesn't kn
 
   assert.deepEqual(result, {
     ok: false,
+    fault: "permanent",
     message: "remote manifest is a format this version of geode can't read",
   });
 });
 
 test("readRemoteManifest: a manifest entry with a traversal path refuses the pass (#132)", async () => {
-  // A remote manifest is untrusted input: anyone who can write to the bucket can shape it. A
+  // A remote manifest is untrusted input anyone who can write to the bucket can shape, so a
   // crafted path must never reach a local file operation.
   const raw = JSON.stringify({
     version: 3,
@@ -152,13 +242,14 @@ test("readRemoteManifest: a manifest entry with a traversal path refuses the pas
 
   assert.deepEqual(result, {
     ok: false,
+    fault: "permanent",
     message: "remote manifest contains a path unsafe to write",
   });
 });
 
 test("readRemoteManifest: two paths differing only by case refuse the pass (#94)", async () => {
-  // Bucket keys are case sensitive; macOS, Windows, and Android are not by default. Pulling both
-  // would silently let one overwrite the other with no conflict ever raised.
+  // Bucket keys are case sensitive while macOS, Windows, and Android are not by default, so
+  // pulling both would silently let one overwrite the other with no conflict ever raised.
   const raw = JSON.stringify({
     version: 3,
     files: [
@@ -172,6 +263,7 @@ test("readRemoteManifest: two paths differing only by case refuse the pass (#94)
 
   assert.deepEqual(result, {
     ok: false,
+    fault: "permanent",
     message: "remote manifest contains two paths that differ only by case",
   });
 });
@@ -188,7 +280,11 @@ test("readRemoteManifest: a non 404 failure is reported, never guessed at as emp
 
   const result = await readRemoteManifest(storage);
 
-  assert.deepEqual(result, { ok: false, message: "Storage rejected the read (500)" });
+  assert.deepEqual(result, {
+    ok: false,
+    fault: "transient",
+    message: "Storage rejected the read (500)",
+  });
 });
 
 test("readSentinel: a 404 is reported as sentinel: null, not a failure", async () => {
@@ -213,7 +309,11 @@ test("readSentinel: corrupt JSON is reported as a failure, not an absent sentine
 
   const result = await readSentinel(storage);
 
-  assert.deepEqual(result, { ok: false, message: "remote sentinel is corrupt" });
+  assert.deepEqual(result, {
+    ok: false,
+    fault: "permanent",
+    message: "remote sentinel is corrupt",
+  });
 });
 
 test("readSentinel: an unknown format version refuses the pass", async () => {
@@ -224,6 +324,7 @@ test("readSentinel: an unknown format version refuses the pass", async () => {
 
   assert.deepEqual(result, {
     ok: false,
+    fault: "permanent",
     message: "remote sentinel is a format this version of geode can't read",
   });
 });
@@ -279,6 +380,7 @@ test("syncOnce: a manifest format this build doesn't know halts the pass before 
 
   assert.deepEqual(outcome, {
     ok: false,
+    fault: "permanent",
     message: "remote manifest is a format this version of geode can't read",
     failures: [],
     snapshot: null,
@@ -304,10 +406,7 @@ test("syncOnce: a genuinely new bucket writes a sentinel too (#183)", async () =
 });
 
 test("syncOnce: a pass with nothing to do writes nothing at all (#102)", async () => {
-  // Ancestor, local vault, and remote manifest all agree, so planSync produces no actions. Every
-  // manifest upload is a compare-and-swap, so a device with nothing to say is a device that can
-  // lose a race it had no reason to enter; under automatic sync (#93) two idle devices on a timer
-  // would trade "another device synced at the same time" errors over a vault nobody touched.
+  // Ancestor, local vault, and remote manifest all agree, so planning finds nothing to do.
   const ancestor: Snapshot = { files: [file("a.md", "h1")], vaultId: "known-id" };
   const remoteManifest = wrapped(encodeSnapshot(snapshot(file("a.md", "h1"))));
   const { storage, objects } = fakeStorage({
@@ -320,7 +419,7 @@ test("syncOnce: a pass with nothing to do writes nothing at all (#102)", async (
     written.push(key);
     return inner(key, body, condition);
   };
-  // "h1" and "xy" are both two bytes, so takeSnapshot stat-skips a.md and reuses the ancestor's
+  // "h1" and "xy" are both two bytes, so takeSnapshot stat skips a.md and reuses the ancestor's
   // hash: the local side is genuinely unchanged, not merely hashing to the same thing by luck.
   const reader = fakeReader({ "a.md": "xy" });
   const { writer } = fakeLocalWriter();
@@ -333,15 +432,14 @@ test("syncOnce: a pass with nothing to do writes nothing at all (#102)", async (
   // The bucket holds exactly what it held before the pass ran, down to the bytes.
   assert.equal(objects.get(MANIFEST_KEY), remoteManifest);
   // state.json still advances: skipping the remote write must never cost the next pass its
-  // stat-skip, or an idle sync would trade one wasted upload for a full rehash of the vault.
+  // stat skip, or an idle sync would trade one wasted upload for a full rehash of the vault.
   assert.deepEqual(outcome.snapshot.files, [file("a.md", "h1")]);
   assert.equal(outcome.snapshot.vaultId, "known-id");
 });
 
 test("syncOnce: a first sync with nothing to do still writes the manifest (#102)", async () => {
-  // An empty vault against an empty bucket plans nothing, but the manifest existing is what tells
-  // every later pass this bucket has been synced before (see resolveVaultIdentity). Skipping it
-  // because the plan was empty would leave the bucket stuck in first sync state forever.
+  // Even with nothing to plan, the manifest still must land: its existence is what ends first sync
+  // state for every later pass.
   const reader = fakeReader({});
   const { writer } = fakeLocalWriter();
   const { storage, objects } = fakeStorage();
@@ -369,10 +467,8 @@ test("syncOnce: a first sync with nothing to do still writes the manifest (#102)
 });
 
 test("syncOnce: a pass with nothing to do still writes a missing sentinel (#102, #183)", async () => {
-  // The manifest exists but the sentinel does not: an upgrade from before sentinels existed, or a
-  // crash between the two writes of an otherwise successful first sync. Skipping the manifest write
-  // must not skip the repair. The sentinel write carries its own condition precisely so a bucket
-  // that lost one heals on the next pass, whether or not that pass had anything else to do.
+  // The manifest exists but the sentinel doesn't, an upgrade or a crash between a first sync's two
+  // writes; the pass must still repair it even when nothing else changed.
   const ancestor: Snapshot = { files: [file("a.md", "h1")] };
   const { storage, objects } = fakeStorage({
     [MANIFEST_KEY]: wrapped(encodeSnapshot(snapshot(file("a.md", "h1")))),
@@ -390,17 +486,15 @@ test("syncOnce: a pass with nothing to do still writes a missing sentinel (#102,
 
   assert.ok(outcome.ok);
   assert.equal(outcome.changeCount, 0);
-  // The sentinel, and only the sentinel.
   assert.deepEqual(written, [SENTINEL_KEY]);
   assert.ok(objects.has(SENTINEL_KEY));
   assert.equal(outcome.snapshot.vaultId, "minted-id");
 });
 
 test("syncOnce: a device pointed at a different vault's sentinel refuses (#183)", async () => {
-  // This device already trusts a different vaultId (its state.json carries one from a prior
-  // successful sync), and the bucket it is pointed at now belongs to a genuinely different vault.
-  // Whether that other vault's manifest happens to exist is irrelevant here; the mismatch alone is
-  // the danger #183 exists to catch (a typo in a configured prefix, the wrong bucket entirely).
+  // This device already trusts a different vaultId from a prior sync, and the bucket now belongs to
+  // a genuinely different vault; whether that vault's manifest exists is irrelevant, the mismatch
+  // alone is what must refuse.
   const reader = fakeReader({ "a.md": "alpha" });
   reader.listFiles = async () => {
     throw new Error("unexpected local listing");
@@ -424,6 +518,7 @@ test("syncOnce: a device pointed at a different vault's sentinel refuses (#183)"
 
   assert.deepEqual(outcome, {
     ok: false,
+    fault: "permanent",
     message: "this bucket belongs to a different vault than the one last synced here",
     failures: [],
     snapshot: null,
@@ -431,11 +526,8 @@ test("syncOnce: a device pointed at a different vault's sentinel refuses (#183)"
 });
 
 test("syncOnce: a never-synced device proceeds without a manifest (#109)", async () => {
-  // The sentinel proves someone has used this bucket before, but this particular device has no
-  // history of its own to protect, so it must fall through to the ordinary first-sync path rather
-  // than refuse: exactly the #109 scenario a manifest deleted while its blob survives, which the
-  // existing unexplainedBlobs reporting already resolves. Refusing here for every device, not just
-  // ones with something to lose, would silently reinstate that permanent deadlock.
+  // The sentinel proves this bucket has synced before, but this device has no history of its own to
+  // compare against, so it falls through to the first sync path rather than refuse.
   const reader = fakeReader({ "a.md": "alpha" });
   const { writer } = fakeLocalWriter();
   const { storage } = fakeStorage({
@@ -449,11 +541,8 @@ test("syncOnce: a never-synced device proceeds without a manifest (#109)", async
 });
 
 test("syncOnce: a stale ancestor is ignored on a first sync, so a populated vault is pushed, not wiped", async () => {
-  // An older build wrote state.json on every file event rather than only on completed syncs, so an
-  // upgrader carries a `previous` snapshot describing their whole vault even though nothing ever
-  // reached the (still empty) bucket. Diffed against that empty remote it reads as "every file
-  // deleted remotely", and before the fix syncOnce pullDeleted the lot. A first sync (no remote
-  // manifest) must instead drop the ancestor and push whatever is local.
+  // An upgrader's stale state.json describes the whole vault even though nothing ever reached the
+  // empty bucket; a first sync must drop that ancestor rather than diff against it.
   const previous = snapshot(file("a.md", "h1"), file("b.md", "h2"));
   const reader = fakeReader({ "a.md": "alpha", "b.md": "beta" });
   const { writer, files } = fakeLocalWriter();
@@ -464,21 +553,16 @@ test("syncOnce: a stale ancestor is ignored on a first sync, so a populated vaul
   const outcome = await syncOnce(previous, reader, writer, storage, 1);
 
   assert.equal(outcome.ok, true);
-  // Nothing was deleted locally.
   assert.equal(files.get("a.md"), "alpha");
   assert.equal(files.get("b.md"), "beta");
-  // Both files' blobs reached the previously empty bucket.
   assert.equal(objects.get(blobKeyFor(await hashOf("alpha"))), wrapped("alpha"));
   assert.equal(objects.get(blobKeyFor(await hashOf("beta"))), wrapped("beta"));
 });
 
 test("syncOnce: a present but empty manifest still trusts the ancestor and pulls a real remote deletion", async () => {
-  // The other side of the same coin: here a manifest genuinely exists and is empty, so a prior sync
-  // really did produce an empty remote. A file the ancestor knew about, unchanged locally, was
-  // deleted remotely, and pullDelete is the correct result that must NOT be suppressed. The reader
-  // reports the file at the same size and mtime as the ancestor so takeSnapshot reuses its hash and
-  // sees no local change; the hash is the real content hash so the pullDelete's drift check also
-  // sees the file as unchanged.
+  // Unlike the previous test, this manifest genuinely is empty, so a file the ancestor knew about
+  // must be pulled and deleted rather than suppressed; the reader matches the ancestor's size and
+  // mtime so the hash is reused and the drift check also sees it as unchanged.
   const previous = snapshot({
     path: "a.md",
     size: 2,
@@ -497,16 +581,109 @@ test("syncOnce: a present but empty manifest still trusts the ancestor and pulls
   assert.equal(files.has("a.md"), false);
 });
 
+test("syncOnce: a remote that lost most of a vault halts before deleting anything", async () => {
+  // A manifest that looks wiped plans as "delete every local file", which is the one pass that
+  // must never run unasked: it stops instead, leaving both sides exactly as they were.
+  const vault = await vaultOf(12);
+  const reader = fakeReader(vault.content);
+  const { writer, files } = fakeLocalWriter();
+  for (const path of Object.keys(vault.content)) {
+    files.set(path, vault.content[path]);
+  }
+  const { storage, objects } = fakeStorage({ [MANIFEST_KEY]: wrapped(encodeSnapshot(empty)) });
+
+  const outcome = await syncOnce(snapshot(...vault.entries), reader, writer, storage, 1);
+
+  assert.ok(!outcome.ok);
+  assert.equal(outcome.fault, "blocked");
+  if (outcome.fault === "blocked") {
+    assert.equal(outcome.change.localDeletes, 12);
+    assert.equal(outcome.change.tracked, 12);
+    assert.equal(outcome.change.paths.length, 12);
+    assert.equal(outcome.restated, false);
+  }
+  assert.equal(outcome.snapshot, null);
+  assert.equal(files.size, 12);
+  // Only the seeded manifest: no blob, no sentinel, and no manifest of its own went up.
+  assert.equal(objects.size, 1);
+});
+
+test("syncOnce: the confirmed pass runs in full when it is still the plan that was confirmed", async () => {
+  const vault = await vaultOf(12);
+  const reader = fakeReader(vault.content);
+  const { writer, files } = fakeLocalWriter();
+  for (const path of Object.keys(vault.content)) {
+    files.set(path, vault.content[path]);
+  }
+  const { storage } = fakeStorage({ [MANIFEST_KEY]: wrapped(encodeSnapshot(empty)) });
+  const confirmed = massChangeFor(deletesOf(vault.entries), snapshot(...vault.entries), 12);
+
+  const outcome = await syncOnce(
+    snapshot(...vault.entries),
+    reader,
+    writer,
+    storage,
+    1,
+    () => "vault-1",
+    "",
+    confirmed,
+  );
+
+  assert.equal(outcome.ok, true);
+  assert.equal(files.size, 0);
+});
+
+test("syncOnce: a confirmation is spent on the plan it was given and no other", async () => {
+  // The vault moved on between the dialog and the answer, so what would run is not what was on
+  // the screen. The pass is asked again rather than executing an unseen plan under an old yes.
+  const vault = await vaultOf(12);
+  const reader = fakeReader(vault.content);
+  const { writer, files } = fakeLocalWriter();
+  for (const path of Object.keys(vault.content)) {
+    files.set(path, vault.content[path]);
+  }
+  const { storage, objects } = fakeStorage({ [MANIFEST_KEY]: wrapped(encodeSnapshot(empty)) });
+  const stale = await vaultOf(12);
+  stale.entries[0] = { ...stale.entries[0], path: "somewhere-else.md" };
+  const confirmed = massChangeFor(deletesOf(stale.entries), snapshot(...stale.entries), 12);
+
+  const outcome = await syncOnce(
+    snapshot(...vault.entries),
+    reader,
+    writer,
+    storage,
+    1,
+    () => "vault-1",
+    "",
+    confirmed,
+  );
+
+  assert.ok(!outcome.ok);
+  assert.equal(outcome.fault, "blocked");
+  if (outcome.fault === "blocked") {
+    assert.equal(outcome.restated, true);
+  }
+  assert.equal(files.size, 12);
+  assert.equal(objects.size, 1);
+});
+
+test("syncOnce: a first sync pushing a whole vault is never mistaken for a mass deletion", async () => {
+  // Every action here is an addition, so a bootstrap of any size must sail through the guard the
+  // wiped remote above trips.
+  const vault = await vaultOf(200);
+  const reader = fakeReader(vault.content);
+  const { writer } = fakeLocalWriter();
+  const { storage } = fakeStorage();
+
+  const outcome = await syncOnce(empty, reader, writer, storage, 1);
+
+  assert.equal(outcome.ok, true);
+});
+
 test("syncOnce: a missing manifest with unexplained blobs reports and proceeds, rather than deadlocking every future sync", async () => {
-  // Reproduces #109 for content addressed storage, and the regression an outright refusal here
-  // caused. A lifecycle rule or manual cleanup deleted the manifest while a blob survived, and its
-  // hash matches nothing in this device's local vault: this device cannot say what path, if any,
-  // that content used to live at. A blanket refusal here never writes a manifest, so
-  // remote.firstSync stays true and every future attempt hits the identical refusal, forever, even
-  // once the explanation is entirely mundane (an interrupted first sync's blob, whose local file
-  // was deleted before the retry) rather than another vault's stray data. The pass must instead
-  // proceed, push what is local, and report the stranded content as a failure so a human can still
-  // notice it without every future sync being blocked on it.
+  // A lifecycle rule or manual cleanup deleted the manifest while a blob survived that matches
+  // nothing local; refusing here would deadlock every future sync, so the pass proceeds and reports
+  // the stranded content instead.
   const strayHash = await hashOf("not local");
   const { storage, objects } = fakeStorage({ [blobKeyFor(strayHash)]: wrapped("not local") });
   const reader = fakeReader({ "a.md": "alpha" });
@@ -532,10 +709,9 @@ test("syncOnce: a missing manifest with unexplained blobs reports and proceeds, 
 });
 
 test("syncOnce: an interrupted first sync's own uploads never block the retry", async () => {
-  // A first sync that pushed a.md's blob and then died before its manifest upload leaves a blob
-  // and no manifest, the same bucket signature as #109's hazard. Its hash matches what the local
-  // vault still holds, so nothing is unexplained; the retry must fold it in and complete, not
-  // refuse.
+  // A first sync that pushed a.md's blob then died before the manifest upload leaves a blob with
+  // no manifest; unlike the unexplained case above, its hash matches what the local vault still
+  // holds, so the retry must fold it in and complete rather than refuse.
   const aHash = await hashOf("alpha");
   const { storage, objects } = fakeStorage({ [blobKeyFor(aHash)]: wrapped("alpha") });
   const reader = fakeReader({ "a.md": "alpha", "b.md": "beta" });
@@ -564,6 +740,7 @@ test("syncOnce: a failed bucket listing on a first sync is reported, never guess
 
   assert.deepEqual(outcome, {
     ok: false,
+    fault: "transient",
     message: "Storage rejected the list (500)",
     failures: [],
     snapshot: null,
@@ -584,11 +761,9 @@ test("unexplainedBlobs: a blob whose hash matches nothing local is unexplained; 
 });
 
 test("syncOnce: a manifest overwritten by another device mid sync fails the pass instead of clobbering it", async () => {
-  // Reproduces #83. Device A (under test) and device B share a synced vault containing a.md, then
-  // sync at overlapping times: B's whole pass (pushing b.md and its manifest) lands while A is
-  // between reading the manifest and uploading its own. Before the fix A's unconditional upload
-  // clobbered B's manifest, so b.md read as a remote deletion on B's next sync and was silently
-  // deleted. A's conditional upload must instead lose the race and fail the pass.
+  // Device A and B share a synced vault and sync at overlapping times: B's whole pass lands while
+  // A sits between reading the manifest and uploading its own, so A's conditional upload must
+  // lose the race and fail rather than clobber B's manifest.
   const ancestor = snapshot(file("a.md", "h1"));
   const { storage, objects } = fakeStorage({ [MANIFEST_KEY]: wrapped(encodeSnapshot(ancestor)) });
   const beeHash = await hashOf("bee");
@@ -614,15 +789,14 @@ test("syncOnce: a manifest overwritten by another device mid sync fails the pass
 
   assert.deepEqual(outcome, {
     ok: false,
+    fault: "raced",
     message: "another device synced at the same time; sync again",
     failures: [],
     snapshot: null,
   });
-  // B's manifest survived; A's never landed.
   assert.equal(objects.get(MANIFEST_KEY), wrapped(bManifest));
   // A's push still reached the bucket (harmless: the next pass folds it into the manifest).
   assert.equal(objects.get(blobKeyFor(await hashOf("ccc"))), wrapped("ccc"));
-  // Nothing was touched locally.
   assert.equal(files.get("a.md"), "xy");
   assert.equal(files.get("c.md"), "ccc");
 
@@ -635,10 +809,9 @@ test("syncOnce: a manifest overwritten by another device mid sync fails the pass
 });
 
 test("syncOnce: retry adopts an identical orphaned upload with a HEAD, not another PUT", async () => {
-  // Reproduces #110's shape for content addressed storage. The file's blob PUT lands before the
-  // manifest CAS is even attempted, so it survives a pass that then fails on the manifest race; a
-  // naive retry that always PUTs again would waste the upload a second time. ensureBlobStored's
-  // HEAD-before-PUT is what makes the retry free.
+  // The blob PUT lands before the manifest CAS is attempted, so it survives a pass that fails on
+  // the manifest race; a naive retry would PUT it again, so ensureBlobStored's HEAD-before-PUT is
+  // what makes the retry free.
   const ancestor = snapshot({
     path: "a.md",
     size: 4,
@@ -669,6 +842,7 @@ test("syncOnce: retry adopts an identical orphaned upload with a HEAD, not anoth
 
   assert.deepEqual(first, {
     ok: false,
+    fault: "raced",
     message: "another device synced at the same time; sync again",
     failures: [],
     snapshot: null,
@@ -691,19 +865,15 @@ test("syncOnce: retry adopts an identical orphaned upload with a HEAD, not anoth
   assert.equal(filePuts, 1, "retry replaced an identical orphaned upload with a HEAD, not a PUT");
   assert.ok(retry.ok);
   // The stored manifest never carries vaultId, only the snapshot syncOnce hands back for local
-  // persistence does (#183), so the comparison strips it before checking the two agree.
+  // persistence does, so the comparison strips it before checking the two agree.
   const { vaultId: _vaultId, ...storedShape } = retry.snapshot;
   assert.equal(objects.get(MANIFEST_KEY), wrapped(encodeSnapshot(storedShape)));
 });
 
 test("syncOnce: a file changed mid sync is not recorded in the manifest and is pushed next pass", async () => {
-  // Reproduces #84. The vault is in sync (a.md, unchanged), and b.md is new locally, so the pass
-  // pushes b.md. While that push is in flight the user edits a.md and creates c.md. Before the
-  // fix the manifest was a re-snapshot of the disk taken after the plan ran, so it recorded both
-  // with content the bucket never received; neither then ever uploaded (state.json already agreed
-  // with the manifest), and another device could push the stale bucket copy of a.md back over the
-  // edit. The manifest must instead keep claiming only what the bucket holds, leaving both files
-  // as local changes for the next pass to push.
+  // The vault is in sync except b.md, new locally; while its push is in flight the user edits a.md
+  // and creates c.md, so the manifest must keep claiming only what the bucket holds, not a fresh
+  // disk snapshot.
   const xyHash = await hashOf("xy");
   const ancestor = snapshot({ path: "a.md", size: 2, mtime: 1, hash: xyHash, blob: xyHash });
   const { storage, objects } = fakeStorage({
@@ -757,11 +927,8 @@ test("syncOnce: a file changed mid sync is not recorded in the manifest and is p
 });
 
 test("syncOnce: a file edited mid sync is never overwritten by a pull, and the retry preserves it as a conflict copy", async () => {
-  // Reproduces #86. Both files are in sync locally and edited remotely, so the pass plans a pull
-  // for each. While a.md's pull is fetching, the user edits b.md; before the fix the pull planned
-  // for b.md then overwrote that edit with the remote version, silently discarding it. The pass
-  // must refuse that pull and fail instead, and because state.json never advances, the retry sees
-  // b.md changed on both sides and preserves the edit as a conflict copy.
+  // An edit lands on b.md while a.md's pull is in flight. The pull planned for b.md must refuse
+  // rather than overwrite it, so the retry sees both sides changed and preserves the edit.
   const aV2Hash = await hashOf("a v2");
   const bV2Hash = await hashOf("b v2");
   const ancestor = snapshot(
@@ -779,10 +946,8 @@ test("syncOnce: a file edited mid sync is never overwritten by a pull, and the r
   const { writer, files } = fakeLocalWriter();
   files.set("a.md", "a v1");
   files.set("b.md", "b v1");
-  // Mirror pulls into the reader, as writing to a real vault would: the retry below re-snapshots
-  // through the reader and must see what the first pass's completed pull actually left on disk.
-  // Mirrored on commit, not on staging, so the reader only ever sees content that reached the
-  // destination, exactly as the vault would.
+  // Mirror pulls into the reader as a real vault would, on commit rather than on staging, so the
+  // reader only ever sees content that actually reached its destination.
   const innerStage = writer.stageFile;
   writer.stageFile = async (path, data, mode) => {
     const staged = await innerStage(path, data, mode);
@@ -813,8 +978,8 @@ test("syncOnce: a file edited mid sync is never overwritten by a pull, and the r
   // The edit survived and a.md's pull still landed.
   assert.equal(files.get("b.md"), "edited mid sync");
   assert.equal(files.get("a.md"), "a v2");
-  // A manifest was still uploaded (#87), and it records exactly what the bucket really holds:
-  // both remote versions, untouched by this pass's pulls.
+  // A manifest still went up, recording exactly what the bucket holds rather than what the pass
+  // intended to do to it.
   const manifestBody = objects.get(MANIFEST_KEY);
   assert.ok(manifestBody !== undefined);
   const manifest = JSON.parse(unwrapped(manifestBody)) as Snapshot;
@@ -822,10 +987,8 @@ test("syncOnce: a file edited mid sync is never overwritten by a pull, and the r
   assert.equal(hashes.get("a.md"), aV2Hash);
   assert.equal(hashes.get("b.md"), bV2Hash);
 
-  // The pass still returned a snapshot recording its progress, with b.md held at the ancestor's
-  // view. The retry diffs b.md against that same ancestor: changed locally and remotely, a
-  // genuine conflict, so the edit is renamed to a conflict copy, pushed, and the remote version
-  // pulled.
+  // The pass still returned a snapshot, with b.md held at the ancestor's view, so the retry reads
+  // it as changed on both sides and resolves it as a conflict.
   assert.ok(outcome.snapshot !== null);
   const retry = await syncOnce(outcome.snapshot, reader, writer, storage, now);
 
@@ -881,13 +1044,9 @@ test("syncOnce: a conflict copy carries the device that made the edit (#103)", a
 });
 
 test("syncOnce: a manifest that moves on mid pull is caught before stale content lands on disk", async () => {
-  // A blob fetched by its own hash always reads back exactly that content, so unlike the plaintext
-  // path keyed layout this replaced, a pull can never notice on its own that a newer manifest has
-  // since pointed the path at a different hash. Another device completes an entire sync (new
-  // content, new manifest) in the window between this pass reading the manifest and its pull's
-  // fetch finishing; the drift check right before the write must catch this rather than let the
-  // now stale content land on disk, only to be discovered afterward when this pass's own manifest
-  // upload fails.
+  // Another device completes a whole sync between this pass reading the manifest and its pull
+  // committing. A blob read by its own address cannot notice that itself, so the manifest check
+  // right before the write is the only thing that catches it.
   const aV1Hash = await hashOf("a v1");
   const aV2Hash = await hashOf("a v2");
   const aV3Hash = await hashOf("a v3");
@@ -937,12 +1096,8 @@ test("syncOnce: a manifest that moves on mid pull is caught before stale content
 });
 
 test("syncOnce: a failed push doesn't discard the progress of the rest of the pass", async () => {
-  // Reproduces #87. Two new local files; a.md's push is rejected by the provider, b.md's lands.
-  // Before the fix the pass bailed without uploading a manifest or returning a snapshot: b.md sat
-  // in the bucket invisible to every other device, all completed work was re-planned from scratch
-  // next time, and a file that fails permanently wedged sync forever. The pass must instead
-  // record b.md's progress in both the manifest and the returned snapshot, leaving only a.md
-  // pending.
+  // One push is rejected and the other lands. The pass must record the successful one in both the
+  // manifest and the returned snapshot, so one bad file never wedges sync for the rest.
   const reader = fakeReader({ "a.md": "alpha", "b.md": "world" });
   const { writer } = fakeLocalWriter();
   const { storage, objects } = fakeStorage();
@@ -996,11 +1151,8 @@ test("syncOnce: a failed push doesn't discard the progress of the rest of the pa
 });
 
 test("syncOnce: a conflict's copy push survives into the uploaded manifest even when the restore fails", async () => {
-  // Reproduces #177: the local edit is moved aside and its copy pushed, but installing the remote
-  // version over the vacated path fails (a locked destination here, a note recreated in the gap in
-  // production). The copy still landed in the bucket; if the manifest this pass uploads doesn't
-  // name it, the object sits there forever, invisible to every other device, until this same one
-  // syncs again.
+  // A conflict's copy push succeeds while its restore fails. The copy is in the bucket either
+  // way, so the manifest must name it or the object stays invisible to every other device.
   const aV2Hash = await hashOf("a v2");
   const ancestor = snapshot({
     path: "a.md",
@@ -1094,11 +1246,8 @@ test("syncOnce: the failure message counts files, not operation failures", async
 });
 
 test("syncOnce: a failed pull records progress without the ancestor ever advancing past it", async () => {
-  // The other half of #87, and the reason a failed action's path must revert to the ancestor's
-  // view: a.md was edited remotely and its pull fails (a locked file, say), while b.md is new
-  // remotely and pulls fine. The pass must record b.md's progress, but if a.md's entry advanced
-  // to the manifest's view the unchanged local copy would read as a fresh local edit on the next
-  // pass and be pushed over the newer remote version, quietly undoing the remote edit.
+  // Why a failed action's path must revert to the ancestor. Advancing it to the manifest's view
+  // would make the unchanged local copy read as a fresh edit and push over the newer remote one.
   const aV1Hash = await hashOf("a v1");
   const aV2Hash = await hashOf("a v2");
   const beeHash = await hashOf("bee");

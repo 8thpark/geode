@@ -18,6 +18,7 @@ import {
   hasConnectionConfig,
   isCurrentConnectionResult,
   prefixError,
+  providerOptions,
   providerOr,
   saveDraft,
   settingsEqual,
@@ -26,7 +27,8 @@ import {
 // DEBUG_LABEL_WIDTH is the column width debug info labels are padded to, so values line up.
 const DEBUG_LABEL_WIDTH = 12;
 
-// renderSettingsTab draws every section into containerEl from the tab's current draft state.
+// renderSettingsTab draws every section into containerEl from the tab's current draft state; see
+// docs/technical_settings.md for the draft and dirty model.
 export function renderSettingsTab(tab: GeodeSettingTab, containerEl: HTMLElement): void {
   renderHeader(containerEl);
   renderStorageSection(tab, containerEl);
@@ -81,14 +83,8 @@ function flashButtonText(button: ButtonComponent, original: string, feedback: st
   window.setTimeout(() => button.setButtonText(original), 1500);
 }
 
-// onFieldChanged clears any stale connection status and updates the actions row without
-// redrawing the whole tab, so text inputs never lose focus mid keystroke. Whether the draft
-// counts as dirty is derived by comparing it to saved settings, not tracked here.
-//
-// A value the storage layer would refuse outright (a malformed prefix) is reported as a connection
-// error rather than through a field of its own: that reuses the one status line and the Save
-// gating already keyed to it, so an unusable draft can't be saved and left to fail at sync time
-// instead, and no new UI has to exist to say so.
+// onFieldChanged clears any stale connection status and updates the actions row without redrawing
+// the whole tab, so text inputs never lose focus mid keystroke.
 function onFieldChanged(tab: GeodeSettingTab): void {
   tab.connectionStatus = "unknown";
   tab.connectionMessage = "";
@@ -122,9 +118,8 @@ function platformLabel(): string {
   return "Unknown";
 }
 
-// renderActions draws the status dot, status line, Test Connection button, and Save button, and
-// stashes references on tab so later field edits can update them in place. The connection
-// message and the dirty reminder are separate spans on one line so each keeps its own colour.
+// renderActions draws the status dot, status line, and buttons, stashing element references on
+// tab so later field edits can update them in place without a full redraw.
 function renderActions(tab: GeodeSettingTab, containerEl: HTMLElement): void {
   const setting = new Setting(containerEl).setName("Connection");
 
@@ -150,8 +145,8 @@ function renderActions(tab: GeodeSettingTab, containerEl: HTMLElement): void {
 
   setting.addButton((button) => {
     tab.saveButtonEl = button;
-    // Obsidian's own disabled-button styling forces cursor: not-allowed with its own
-    // !important rule; an inline style is the only thing guaranteed to win over that.
+    // Obsidian's own disabled button styling forces cursor: not-allowed with its own !important
+    // rule; an inline style is the only thing guaranteed to win over that.
     button.buttonEl.style.setProperty("cursor", "pointer", "important");
     button
       .setButtonText("Save")
@@ -212,6 +207,22 @@ function renderProviderFields(tab: GeodeSettingTab, containerEl: HTMLElement): v
     return;
   }
 
+  if (tab.draft.provider === "s3") {
+    new Setting(containerEl)
+      .setName("Region")
+      .setDesc("The AWS region your bucket lives in.")
+      .addText((text) =>
+        text
+          .setPlaceholder("us-east-1")
+          .setValue(tab.draft.region)
+          .onChange((value) => {
+            tab.draft.region = value;
+            onFieldChanged(tab);
+          }),
+      );
+    return;
+  }
+
   new Setting(containerEl)
     .setName("Endpoint")
     .setDesc("The S3 compatible endpoint URL for your storage.")
@@ -239,10 +250,8 @@ function renderProviderFields(tab: GeodeSettingTab, containerEl: HTMLElement): v
     );
 }
 
-// renderSecretRow draws the secret access key control. SecretComponent's setValue only
-// pre-highlights an existing entry in its picker; it cannot force a newly created secret onto a
-// fixed ID, since Obsidian's own "add secret" dialog always asks the user to name it. So we have
-// to remember whichever ID the user actually picks, the same way we track every other field.
+// renderSecretRow draws the secret access key control; SecretComponent can't force a new entry
+// onto a fixed ID, so we remember whichever name the user actually picks.
 function renderSecretRow(tab: GeodeSettingTab, containerEl: HTMLElement): void {
   new Setting(containerEl)
     .setName("Secret access key")
@@ -274,7 +283,7 @@ function renderStorageSection(tab: GeodeSettingTab, containerEl: HTMLElement): v
     .setDesc("Where your vault is synced to.")
     .addDropdown((dropdown) =>
       dropdown
-        .addOptions({ r2: "Cloudflare R2", custom: "Custom" })
+        .addOptions(providerOptions(process.env.NODE_ENV !== "production"))
         .setValue(tab.draft.provider)
         .onChange((value) => {
           tab.draft.provider = providerOr(value);
@@ -416,14 +425,11 @@ export class GeodeSettingTab extends PluginSettingTab {
     return !settingsEqual(this.draft, this.plugin.settings);
   }
 
-  // display renders the tab. When auto is true (every time Obsidian opens this tab, including
-  // the first time) it re-seeds the draft from live plugin settings, then fires an automatic
-  // connection test if the draft looks complete. Internal re-renders (a provider switch) pass
-  // false so they keep the in-progress draft and don't retrigger the connection test.
+  // display renders the tab; auto true re-seeds the draft from saved settings and may fire an
+  // automatic connection test, auto false (an internal rerender) keeps the in-progress draft.
   display(auto = true): void {
-    // Constructor only runs once for the life of this tab instance. Without re-seeding here,
-    // a reopened tab keeps a stale draft after settings change elsewhere (e.g. data.json via
-    // sync) and can show phantom "Unsaved changes" against the newer saved settings.
+    // The constructor only runs once for the tab's life, so re-seeding here is what stops a
+    // reopened tab showing a phantom "Unsaved changes" after settings changed elsewhere.
     this.draft = draftForDisplay(auto, this.draft, this.plugin.settings);
     if (auto) {
       this.connectionStatus = "unknown";
@@ -438,10 +444,8 @@ export class GeodeSettingTab extends PluginSettingTab {
     }
   }
 
-  // refreshActionsUI updates the status dot, status line, Save button, and debug info block
-  // without redrawing the rest of the tab. Empty rows collapse rather than reserving blank line
-  // height, and the connection message and dirty reminder are updated independently so the
-  // dirty reminder never inherits the connection status colour.
+  // refreshActionsUI updates the status dot, status line, buttons, and debug info without
+  // redrawing the tab, keeping the dirty reminder's colour independent of connection status.
   refreshActionsUI(): void {
     if (this.saveButtonEl !== null) {
       this.saveButtonEl.setDisabled(!canSave(this.dirty, this.connectionStatus));

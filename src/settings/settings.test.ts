@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  accessKeyIdFor,
+  accountIdFor,
   bucketFor,
   type ConnectionStatus,
   canSave,
@@ -9,10 +11,12 @@ import {
   endpointFor,
   type GeodeSettings,
   hasConnectionConfig,
+  isAwsRegion,
   isCurrentConnectionResult,
   normalizePrefix,
   normalizeSettings,
   prefixError,
+  providerOptions,
   regionFor,
   saveDraft,
   settingsEqual,
@@ -199,9 +203,9 @@ const normalizeCases: { name: string; input: unknown; want: GeodeSettings }[] = 
     want: { ...DEFAULT_SETTINGS, bucket: "my-bucket" },
   },
   {
-    name: "provider s3 coerced to r2",
-    input: { provider: "s3" },
-    want: DEFAULT_SETTINGS,
+    name: "provider s3 preserved",
+    input: { provider: "s3", region: "eu-west-2" },
+    want: { ...DEFAULT_SETTINGS, provider: "s3", region: "eu-west-2" },
   },
   {
     name: "provider 42 coerced to r2",
@@ -273,6 +277,16 @@ const endpointCases: { name: string; input: GeodeSettings; want: string }[] = [
     want: "https://abc123.r2.cloudflarestorage.com",
   },
   {
+    name: "amazon s3",
+    input: { ...DEFAULT_SETTINGS, provider: "s3", region: "eu-west-2" },
+    want: "https://s3.eu-west-2.amazonaws.com",
+  },
+  {
+    name: "amazon s3 with surrounding whitespace on region is trimmed",
+    input: { ...DEFAULT_SETTINGS, provider: "s3", region: "  eu-west-2  " },
+    want: "https://s3.eu-west-2.amazonaws.com",
+  },
+  {
     name: "custom",
     input: { ...DEFAULT_SETTINGS, provider: "custom", endpoint: "https://s3.example.com" },
     want: "https://s3.example.com",
@@ -297,11 +311,47 @@ const endpointCases: { name: string; input: GeodeSettings; want: string }[] = [
     input: { ...DEFAULT_SETTINGS, provider: "custom", endpoint: "  https://s3.example.com  " },
     want: "https://s3.example.com",
   },
+  {
+    name: "amazon s3 with a region carrying URL authority delimiters yields no endpoint",
+    input: { ...DEFAULT_SETTINGS, provider: "s3", region: "x@attacker.example:443#" },
+    want: "",
+  },
+  {
+    name: "amazon s3 with a region carrying a path separator yields no endpoint",
+    input: { ...DEFAULT_SETTINGS, provider: "s3", region: "us-east-1/../evil" },
+    want: "",
+  },
+  {
+    name: "amazon s3 with an empty region yields no endpoint",
+    input: { ...DEFAULT_SETTINGS, provider: "s3", region: "" },
+    want: "",
+  },
 ];
 
 for (const { name, input, want } of endpointCases) {
   test(`endpointFor: ${name}`, () => {
     assert.strictEqual(endpointFor(input), want);
+  });
+}
+
+const awsRegionCases: { region: string; want: boolean }[] = [
+  { region: "us-east-1", want: true },
+  { region: "eu-west-2", want: true },
+  { region: "ap-southeast-1", want: true },
+  { region: "us-gov-west-1", want: true },
+  { region: "", want: false },
+  { region: "US-EAST-1", want: false },
+  { region: "us-east", want: false },
+  { region: "us-east-1 ", want: false },
+  { region: "x@attacker.example:443#", want: false },
+  { region: "us-east-1@attacker.example", want: false },
+  { region: "us-east-1/../evil", want: false },
+  { region: "us-east-1\nx", want: false },
+];
+
+for (const { region, want } of awsRegionCases) {
+  test(`isAwsRegion: ${JSON.stringify(region)} is ${want}`, () => {
+    assert.strictEqual(isAwsRegion(region), want);
   });
 }
 
@@ -350,6 +400,49 @@ const bucketCases: { name: string; input: GeodeSettings; want: string }[] = [
 for (const { name, input, want } of bucketCases) {
   test(`bucketFor: ${name}`, () => {
     assert.strictEqual(bucketFor(input), want);
+  });
+}
+
+const accessKeyIdCases: { name: string; input: GeodeSettings; want: string }[] = [
+  {
+    name: "a plain access key is left alone",
+    input: { ...DEFAULT_SETTINGS, accessKeyId: "AKIA123" },
+    want: "AKIA123",
+  },
+  {
+    name: "surrounding whitespace is trimmed",
+    input: { ...DEFAULT_SETTINGS, accessKeyId: "  AKIA123\n" },
+    want: "AKIA123",
+  },
+];
+
+for (const { name, input, want } of accessKeyIdCases) {
+  test(`accessKeyIdFor: ${name}`, () => {
+    assert.strictEqual(accessKeyIdFor(input), want);
+  });
+}
+
+const accountIdCases: { name: string; input: GeodeSettings; want: string }[] = [
+  {
+    name: "a plain account ID is left alone",
+    input: { ...DEFAULT_SETTINGS, accountId: "abc123" },
+    want: "abc123",
+  },
+  {
+    name: "surrounding whitespace is trimmed",
+    input: { ...DEFAULT_SETTINGS, accountId: "  abc123  " },
+    want: "abc123",
+  },
+  {
+    name: "a whitespace only account ID is empty",
+    input: { ...DEFAULT_SETTINGS, accountId: "   " },
+    want: "",
+  },
+];
+
+for (const { name, input, want } of accountIdCases) {
+  test(`accountIdFor: ${name}`, () => {
+    assert.strictEqual(accountIdFor(input), want);
   });
 }
 
@@ -427,6 +520,21 @@ for (const { name, input, want } of prefixErrorCases) {
   });
 }
 
+test("providerOptions: production excludes the custom provider", () => {
+  assert.deepStrictEqual(providerOptions(false), {
+    r2: "Cloudflare R2",
+    s3: "Amazon S3",
+  });
+});
+
+test("providerOptions: local development includes the custom provider", () => {
+  assert.deepStrictEqual(providerOptions(true), {
+    r2: "Cloudflare R2",
+    s3: "Amazon S3",
+    custom: "Custom",
+  });
+});
+
 const settingsEqualCases: { name: string; a: GeodeSettings; b: GeodeSettings; want: boolean }[] = [
   {
     name: "identical values are equal",
@@ -489,6 +597,41 @@ const hasConnectionConfigCases: { name: string; input: GeodeSettings; want: bool
     want: false,
   },
   {
+    name: "s3 missing region is incomplete",
+    input: {
+      ...DEFAULT_SETTINGS,
+      provider: "s3",
+      bucket: "b",
+      accessKeyId: "a",
+      secretId: "s",
+    },
+    want: false,
+  },
+  {
+    name: "s3 with all fields is complete",
+    input: {
+      ...DEFAULT_SETTINGS,
+      provider: "s3",
+      region: "us-east-1",
+      bucket: "b",
+      accessKeyId: "a",
+      secretId: "s",
+    },
+    want: true,
+  },
+  {
+    name: "s3 with a region that is not an AWS region identifier is incomplete",
+    input: {
+      ...DEFAULT_SETTINGS,
+      provider: "s3",
+      region: "x@attacker.example:443#",
+      bucket: "b",
+      accessKeyId: "a",
+      secretId: "s",
+    },
+    want: false,
+  },
+  {
     name: "custom missing region is incomplete",
     input: {
       ...DEFAULT_SETTINGS,
@@ -512,6 +655,71 @@ const hasConnectionConfigCases: { name: string; input: GeodeSettings; want: bool
       secretId: "s",
     },
     want: true,
+  },
+  {
+    name: "r2 with a whitespace only account ID is incomplete",
+    input: { ...DEFAULT_SETTINGS, accountId: "   ", bucket: "b", accessKeyId: "a", secretId: "s" },
+    want: false,
+  },
+  {
+    name: "s3 with a whitespace only region is incomplete",
+    input: {
+      ...DEFAULT_SETTINGS,
+      provider: "s3",
+      region: "   ",
+      bucket: "b",
+      accessKeyId: "a",
+      secretId: "s",
+    },
+    want: false,
+  },
+  {
+    name: "s3 with surrounding whitespace on a real region is complete",
+    input: {
+      ...DEFAULT_SETTINGS,
+      provider: "s3",
+      region: "  us-east-1  ",
+      bucket: "b",
+      accessKeyId: "a",
+      secretId: "s",
+    },
+    want: true,
+  },
+  {
+    name: "custom with a whitespace only endpoint is incomplete",
+    input: {
+      ...DEFAULT_SETTINGS,
+      provider: "custom",
+      endpoint: "   ",
+      region: "us-east-1",
+      bucket: "b",
+      accessKeyId: "a",
+      secretId: "s",
+    },
+    want: false,
+  },
+  {
+    name: "custom with a whitespace only region is incomplete",
+    input: {
+      ...DEFAULT_SETTINGS,
+      provider: "custom",
+      endpoint: "https://s3.example.com",
+      region: "   ",
+      bucket: "b",
+      accessKeyId: "a",
+      secretId: "s",
+    },
+    want: false,
+  },
+  {
+    name: "a whitespace only bucket is incomplete",
+    input: { ...DEFAULT_SETTINGS, accountId: "a", bucket: "   ", accessKeyId: "a", secretId: "s" },
+    want: false,
+  },
+  {
+    name: "a whitespace only access key is incomplete",
+    input: { ...DEFAULT_SETTINGS, accountId: "a", bucket: "b", accessKeyId: "   ", secretId: "s" },
+    want: false,
   },
 ];
 

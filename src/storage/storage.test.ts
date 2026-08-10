@@ -85,6 +85,17 @@ const missingFieldCases: {
     want: "Fill in account ID first",
   },
   {
+    name: "missing region for Amazon S3",
+    settings: {
+      ...DEFAULT_SETTINGS,
+      provider: "s3",
+      bucket: "my-vault",
+      accessKeyId: "AKIA123",
+    },
+    secretAccessKey: "shh",
+    want: "Fill in region first",
+  },
+  {
     name: "missing endpoint for custom",
     settings: {
       ...DEFAULT_SETTINGS,
@@ -102,6 +113,55 @@ const missingFieldCases: {
       ...DEFAULT_SETTINGS,
       provider: "custom",
       endpoint: "https://s3.example.com",
+      bucket: "my-vault",
+      accessKeyId: "AKIA123",
+    },
+    secretAccessKey: "shh",
+    want: "Fill in region first",
+  },
+  {
+    name: "whitespace only bucket",
+    settings: { ...DEFAULT_SETTINGS, bucket: "   ", accessKeyId: "AKIA123" },
+    secretAccessKey: "shh",
+    want: "Fill in bucket first",
+  },
+  {
+    name: "whitespace only access key ID",
+    settings: { ...DEFAULT_SETTINGS, bucket: "my-vault", accessKeyId: "   " },
+    secretAccessKey: "shh",
+    want: "Fill in access key ID first",
+  },
+  {
+    name: "whitespace only account ID for R2",
+    settings: {
+      ...DEFAULT_SETTINGS,
+      accountId: "   ",
+      bucket: "my-vault",
+      accessKeyId: "AKIA123",
+    },
+    secretAccessKey: "shh",
+    want: "Fill in account ID first",
+  },
+  {
+    name: "whitespace only endpoint for custom",
+    settings: {
+      ...DEFAULT_SETTINGS,
+      provider: "custom",
+      endpoint: "   ",
+      region: "us-east-1",
+      bucket: "my-vault",
+      accessKeyId: "AKIA123",
+    },
+    secretAccessKey: "shh",
+    want: "Fill in endpoint first",
+  },
+  {
+    name: "whitespace only region for custom",
+    settings: {
+      ...DEFAULT_SETTINGS,
+      provider: "custom",
+      endpoint: "https://s3.example.com",
+      region: "   ",
       bucket: "my-vault",
       accessKeyId: "AKIA123",
     },
@@ -347,8 +407,8 @@ test("createS3Client: every key is addressed under the configured prefix (#154)"
 });
 
 test("createS3Client: no prefix leaves every key at the bucket root", async () => {
-  // The default, and what every bucket synced before #154 already holds, so this is the case that
-  // must not move: rooting a client at "" has to produce byte for byte the URL it always did.
+  // The default, and what every bucket synced before prefixes existed already holds, so rooting a
+  // client at "" has to produce byte for byte the URL it always did.
   const { transport, urls } = recordingTransport();
   const client = createS3Client(deadlineSettings, "shh", transport);
 
@@ -360,7 +420,7 @@ test("createS3Client: no prefix leaves every key at the bucket root", async () =
 test("listObjects: lists under the prefix and hands keys back relative to it (#154)", async () => {
   // The round trip that matters: sync reads a blob's hash by slicing BLOB_PREFIX off a listed key,
   // so a key still carrying the bucket prefix would parse as a hash that matches nothing local and
-  // be reported as content the vault can't explain (#109).
+  // be reported as content the vault can't explain.
   const listed = listingXml(["vaults/personal/.geode/blobs/aaa"]);
   const { transport, urls } = recordingTransport(listed);
   const client = createS3Client(rootedSettings, "shh", transport);
@@ -392,7 +452,7 @@ test("listObjects: no prefix argument still lists only under the client's root",
 test("listObjects: a key outside the prefix fails the listing, it is never mis-sliced", async () => {
   // Every key was asked for under the prefix, so one that arrives outside it means the provider
   // answered a different question. Slicing it anyway would invent a plausible looking key, and a
-  // listing that quietly disagrees with the bucket is what sync reads as remote deletions (#180).
+  // listing that quietly disagrees with the bucket is what sync reads as remote deletions.
   const { transport } = recordingTransport(listingXml(["someone-elses/note"]));
   const client = createS3Client(rootedSettings, "shh", transport);
 
@@ -404,10 +464,8 @@ test("listObjects: a key outside the prefix fails the listing, it is never mis-s
 });
 
 test("createS3Client: an unusable prefix refuses every operation (#154)", async () => {
-  // Settings reach createS3Client straight from data.json, so the settings tab's own validation is
-  // not on this path at all: a hand edit, an older build, or a synced .obsidian/ folder can all
-  // deliver a prefix no user ever typed. stubTransport throws, so any operation that reached the
-  // network would fail this test rather than return a refusal.
+  // Settings reach the client straight from data.json, so the settings tab's validation is not on
+  // this path. stubTransport throws, so anything reaching the network fails rather than refuses.
   const client = createS3Client(
     { ...rootedSettings, prefix: "../elsewhere" },
     "shh",
@@ -554,10 +612,8 @@ test("parseListObjectsXml treats a bare KeyCount marker as an empty bucket", () 
 });
 
 test("parseListObjectsXml fails loudly on a body with no recognizable listing markers", () => {
-  // A provider whose response uses a namespace prefix on <Contents> (or attributes this parser's
-  // bare-tag regex doesn't match) would otherwise parse to zero objects, indistinguishable from a
-  // genuinely empty bucket. That would let a first sync proceed and silently orphan every file the
-  // listing failed to surface (#109), so this shape must be refused rather than guessed at.
+  // A namespace prefixed <Contents> would parse to zero objects, indistinguishable from an empty
+  // bucket, so a first sync would orphan every file the listing failed to surface.
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
   <ns:Contents>
@@ -572,12 +628,8 @@ test("parseListObjectsXml fails loudly on a body with no recognizable listing ma
 });
 
 test("parseListObjectsXml fails on an attribute-bearing Contents despite IsTruncated", () => {
-  // A namespace prefix isn't the only way a provider can dodge the strict <Contents> pattern: an
-  // attribute on the opening tag does too, and unlike a wholly unrecognized body, the rest of the
-  // response can still look completely ordinary, IsTruncated included. Checking only for
-  // IsTruncated's presence would wave this through as an empty bucket and orphan the entry it
-  // dropped, so the parser must instead notice that a Contents-shaped tag existed but never made
-  // it into the parsed objects.
+  // An attribute on the opening tag dodges the strict pattern too, and the rest of the response
+  // still looks ordinary, so the parser must notice a Contents shaped tag it never parsed.
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <ListBucketResult>
   <Contents encoding-type="url">

@@ -6,7 +6,7 @@ compatibility: Designed for Claude Code (or similar products)
 metadata:
   author: revett
   repo: https://github.com/revett/typescript-as-go
-  version: 0.5.1
+  version: 0.6.0
 ---
 
 # TypeScript As Go
@@ -64,7 +64,11 @@ writing Typescript, as well as the strict file layout rules.
 17. Release resources with `try/finally` or a `using` declaration placed right where the resource is
     acquired, so cleanup sits beside setup and cannot be forgotten on an early return
 18. One sentence `//` doc comment above every exported symbol, Go style
-    (`// normalizeSettings returns ...`)
+    (`// normalizeSettings returns ...`), three lines at most, carrying the context a reader
+    cannot derive from the code rather than restating what the code already says; a tuned
+    constant's comment says why the value is what it is, since a number cannot justify itself,
+    and any rationale too long to fit belongs in the project's documentation, linked from the
+    comment by a bare path (`see docs/architecture.md`)
 19. Table driven tests with `node:test` and `node:assert/strict` and no test framework dependency,
     each test sitting beside the code it covers as `name.test.ts`, mirroring Go's `_test.go` pattern
 20. Reach for a small, focused dependency when hand rolling something fiddly to get right (request
@@ -99,6 +103,10 @@ writing Typescript, as well as the strict file layout rules.
 15. No chained array pipelines (`.filter().map()`, `.map().filter()`) and no `.reduce`; Go has no
     map or filter, so write an explicit `for...of` that guards with `continue` and pushes into a
     result, one readable loop over a pipeline (a single `.map` on an already clean list is fine)
+16. No issue, ticket, or PR references in comments (`(#86)`), since the code must stand on its own
+    to a reader with no access to the tracker; history belongs in the commit message and the
+    reasoning in the documentation, where the reference can travel with it
+17. No restating a rationale above a second symbol, stating it once and pointing at that one place
 
 ### File Layout
 

@@ -1,8 +1,12 @@
 import { AwsClient } from "aws4fetch";
 import {
+  accessKeyIdFor,
+  accountIdFor,
   bucketFor,
   endpointFor,
   type GeodeSettings,
+  isAwsRegion,
+  normalizeEndpoint,
   normalizePrefix,
   prefixError,
   regionFor,
@@ -12,30 +16,28 @@ import { encodeComponent, encodeKey } from "./encode.ts";
 import { messageFor, statusForHttp } from "./errors.ts";
 import { parseListObjectsXml } from "./xml.ts";
 
-// PROBE_KEY_PREFIX namespaces testConnection's throwaway probe object under geode's reserved bucket
-// prefix (sync's RESERVED_PREFIX). A probe left behind by a failed cleanup therefore sits where
-// sync ignores it, never pulled to every device as a phantom vault file.
+// PROBE_KEY_PREFIX keeps the connection test's throwaway object under the reserved prefix, so a
+// leftover probe is never pulled to a device as a phantom vault file.
 const PROBE_KEY_PREFIX = ".geode/connection-probe-";
 
-// ConnectionResult reports whether a storage provider accepted a test request. Message is the
-// empty string when ok is true.
+// ConnectionResult reports whether a storage provider accepted a test request; message is empty
+// when ok is true.
 export type ConnectionResult = {
   ok: boolean;
   status: ResultStatus;
   message: string;
 };
 
-// DeleteResult reports whether an object was removed. Message is the empty string when ok is
-// true.
+// DeleteResult reports whether an object was removed; message is empty when ok is true.
 export type DeleteResult = {
   ok: boolean;
   status: ResultStatus;
   message: string;
 };
 
-// GetResult reports whether an object was read. Body is null when ok is false. Etag is the
-// object's ETag exactly as the server sent it (quotes included, opaque to us), for handing back
-// in a later conditional put; null when ok is false or the server sent none.
+// GetResult reports whether an object was read; body and etag are null when ok is false, and
+// etag is otherwise the server's opaque ETag string, unchanged, for handing back in a later
+// conditional put.
 export type GetResult = {
   ok: boolean;
   status: ResultStatus;
@@ -44,10 +46,8 @@ export type GetResult = {
   etag: string | null;
 };
 
-// HeadResult reports whether an object exists at a key, without transferring its body. Message is
-// the empty string when ok is true. Etag is the object's ETag exactly as the server sent it,
-// mirroring GetResult, so a caller can detect the object changing underneath it without paying
-// for a body transfer; null when ok is false or the server sent none.
+// HeadResult reports whether an object exists at a key, without transferring its body; etag
+// carries the same meaning as GetResult's.
 export type HeadResult = {
   ok: boolean;
   status: ResultStatus;
@@ -55,10 +55,9 @@ export type HeadResult = {
   etag: string | null;
 };
 
-// HttpResponse is the normalized reply a Transport returns: the HTTP status and the fully read
-// body, so the storage operations never touch a streaming Response and the fetch and requestUrl
-// transports are interchangeable behind one shape. Header looks a single response header up by
-// name, case insensitively, since the two transports disagree on header name casing.
+// HttpResponse is the normalized reply a Transport returns, so storage operations never touch a
+// streaming Response and both transports are interchangeable; header looks a name up case
+// insensitively, since the two transports disagree on header casing.
 export type HttpResponse = {
   ok: boolean;
   status: number;
@@ -66,7 +65,7 @@ export type HttpResponse = {
   header: (name: string) => string | null;
 };
 
-// ListResult reports whether a bucket listing succeeded. Objects is empty when ok is false.
+// ListResult reports whether a bucket listing succeeded; objects is empty when ok is false.
 export type ListResult = {
   ok: boolean;
   status: ResultStatus;
@@ -81,22 +80,20 @@ export type ObjectMeta = {
   lastModified: string;
 };
 
-// PutCondition makes a put conditional: "ifMatch" succeeds only while the object's ETag still
-// equals etag, "ifAbsent" only while no object exists at the key. A failed precondition comes
-// back as a "conflict" status, how a caller detects a concurrent writer instead of silently
-// overwriting what that writer just stored.
+// PutCondition makes a put conditional: "ifMatch" requires the current ETag, "ifAbsent" requires no
+// object at the key; a failed precondition surfaces as a "conflict" status rather than silently
+// overwriting a concurrent writer.
 export type PutCondition = { kind: "ifMatch"; etag: string } | { kind: "ifAbsent" };
 
-// PutResult reports whether an object was written. Message is the empty string when ok is true.
+// PutResult reports whether an object was written; message is empty when ok is true.
 export type PutResult = {
   ok: boolean;
   status: ResultStatus;
   message: string;
 };
 
-// ResultStatus classifies the outcome of a storage operation so callers can distinguish absent
-// objects and failed put preconditions from transient failures without parsing the message
-// string.
+// ResultStatus classifies a storage operation's outcome, so callers can distinguish absent
+// objects and failed preconditions from transient failures without parsing the message string.
 export type ResultStatus =
   | "ok"
   | "not_found"
@@ -106,14 +103,9 @@ export type ResultStatus =
   | "server"
   | "network";
 
-// StorageClient reads, writes, deletes, and lists objects in a bucket. Every method takes and
-// returns plain data, never provider credentials or settings, so a future WebDAV or Dropbox
-// client can satisfy this same shape without changing anything that depends on it.
-//
-// Every key is relative to the client's own root, the configured bucket prefix (#154), and every
-// listed key comes back relative to it too. So nothing above this type knows or cares whether the
-// vault sits at the bucket root or three folders down: sync's key constants stay fixed strings,
-// and a blob's hash reads off a listed key the same way either way.
+// StorageClient reads, writes, deletes, and lists objects, taking and returning plain data so a
+// future WebDAV or Dropbox client can satisfy the same shape. Every key is relative to the client's
+// own root; see docs/technical_storage.md.
 export type StorageClient = {
   putObject: (key: string, body: Uint8Array, condition?: PutCondition) => Promise<PutResult>;
   getObject: (key: string, expectedBytes?: number) => Promise<GetResult>;
@@ -122,37 +114,28 @@ export type StorageClient = {
   listObjects: (prefix?: string) => Promise<ListResult>;
 };
 
-// Transport sends an already signed request and returns its response, rejecting only when the
-// request never completes (offline, a failed DNS lookup, a refused connection). A transport need
-// not bound its own runtime: send dispatches every request under a deadline, so a stalled
-// connection rejects there rather than hanging forever. The plugin injects a transport backed by
-// Obsidian's requestUrl, which issues a native request and so is never subject to CORS; tests and
-// any non Obsidian caller inject fetchTransport.
+// Transport sends an already signed request and resolves its response, rejecting only when the
+// request never reaches the server; send applies the deadline, so a transport itself need not
+// bound its own runtime.
 export type Transport = (request: Request) => Promise<HttpResponse>;
 
 // createS3Client returns a StorageClient backed by the S3 compatible endpoint in settings, sending
-// every request through the given transport. A prefix the client cannot address safely is refused
-// here rather than anywhere above, since this is the one place every request to a provider is built
-// and so the only guard no future caller (the CLI, the API, MCP) can be written without.
+// every request through the given transport.
 export function createS3Client(
   settings: GeodeSettings,
   secretAccessKey: string,
   transport: Transport,
 ): StorageClient {
-  // Settings arrive here straight from data.json, which a hand edit, an older build, or a synced
-  // .obsidian/ folder can all put an unusable prefix into without the settings tab ever seeing it,
-  // so validating only where a user types is validating nothing. Dropping a bad prefix would sync
-  // the vault to the bucket root, and honouring one is worse still: the URL a request is signed
-  // against collapses relative segments itself, so a leading ".." leaves the bucket entirely and
-  // addresses a different one. Refusing every operation is the only outcome that cannot quietly
-  // read or write a vault somewhere it was never meant to go.
+  // Settings arrive straight from data.json, which nothing above this client validates, so
+  // refusing every operation here is the only way a bad prefix can never sync or address the
+  // wrong bucket.
   const badPrefix = prefixError(settings.prefix);
   if (badPrefix !== "") {
     return refusingClient(badPrefix);
   }
 
   const client = new AwsClient({
-    accessKeyId: settings.accessKeyId.trim(),
+    accessKeyId: accessKeyIdFor(settings),
     secretAccessKey,
     region: regionFor(settings),
     service: "s3",
@@ -171,9 +154,8 @@ export function createS3Client(
   };
 }
 
-// fetchTransport dispatches a signed request through the global fetch. It is the transport for
-// tests and any environment without Obsidian; the plugin uses a requestUrl backed transport so its
-// requests are not subject to CORS.
+// fetchTransport dispatches a signed request through the global fetch; it is the transport for
+// tests and any environment without Obsidian.
 export async function fetchTransport(request: Request): Promise<HttpResponse> {
   const response = await fetch(request);
   const buffer = await response.arrayBuffer();
@@ -186,14 +168,9 @@ export async function fetchTransport(request: Request): Promise<HttpResponse> {
   };
 }
 
-// probeConditionalWrites confirms the provider actually honours the compare-and-swap sync is built
-// on, not merely that it accepts the credentials. It writes a throwaway object with If-None-Match:
-// *, then issues a second If-None-Match: * write that must be rejected: a provider with no
-// conditional-write support (Backblaze B2, Wasabi, Garage) fails the first write, and one that
-// accepts the header but ignores it (Google Cloud Storage's S3 interop) lets the second write
-// clobber the first, the exact silent data loss the conditional puts exist to prevent. It also
-// checks the read hands back an ETag, which sync needs to make later updates conditional. The probe
-// object is always deleted, best effort.
+// probeConditionalWrites confirms a provider actually honours the compare and swap sync depends
+// on, not merely that it accepts the credentials, deleting its throwaway object best effort when
+// done.
 export async function probeConditionalWrites(client: StorageClient): Promise<ConnectionResult> {
   const key = `${PROBE_KEY_PREFIX}${crypto.randomUUID()}`;
   const body = new TextEncoder().encode("geode connection probe");
@@ -230,18 +207,15 @@ export async function probeConditionalWrites(client: StorageClient): Promise<Con
 
     return { ok: true, status: "ok", message: "" };
   } finally {
-    // Best effort: the probe already proved what it needed to, and a leftover object lives under
-    // the reserved prefix where sync ignores it. A cleanup that rejects would escape the finally
-    // and replace the probe's verdict, so the rejection is swallowed rather than allowed to mask
-    // an otherwise successful test.
+    // Best effort: a rejecting cleanup would escape the finally and replace the probe's verdict,
+    // so the rejection is swallowed rather than allowed to mask an otherwise successful test.
     await client.deleteObject(key).catch(() => undefined);
   }
 }
 
-// testConnection reports whether a storage provider is usable for sync: it accepts the credentials
-// (a signed HEAD for the bucket) and honours the conditional writes sync's compare-and-swap depends
-// on (probeConditionalWrites). Reporting ok on the HEAD alone would green-light providers that
-// authenticate fine but silently lose edits under concurrency.
+// testConnection reports whether a storage provider is usable for sync: it must accept the
+// credentials and honour the conditional writes probeConditionalWrites checks, since a HEAD alone
+// would green-light a provider that silently loses edits under concurrency.
 export async function testConnection(
   settings: GeodeSettings,
   secretAccessKey: string,
@@ -257,7 +231,7 @@ export async function testConnection(
   }
 
   const client = new AwsClient({
-    accessKeyId: settings.accessKeyId.trim(),
+    accessKeyId: accessKeyIdFor(settings),
     secretAccessKey,
     region: regionFor(settings),
     service: "s3",
@@ -282,8 +256,8 @@ export async function testConnection(
   return probeConditionalWrites(createS3Client(settings, secretAccessKey, transport));
 }
 
-// bytesOf reports the size of a request body so its deadline can scale with it. Only a put carries
-// one, and it is always the Uint8Array s3PutObject passes through.
+// bytesOf reports the size of a request body so its deadline can scale with it; only a put
+// carries one.
 function bytesOf(init: RequestInit): number {
   if (init.body instanceof Uint8Array) {
     return init.body.byteLength;
@@ -306,14 +280,13 @@ function conditionHeaders(condition: PutCondition | undefined): Record<string, s
 }
 
 // missingFieldFor returns the name of the first field testConnection needs but doesn't have, or
-// "" if everything required is present. The requirements mirror hasConnectionConfig: all providers
-// need bucket, access key, and secret; R2 derives endpoint and region from the account ID, so
-// only custom needs them explicitly.
+// "" when everything required is present; R2 derives endpoint and region from the account ID and
+// Amazon S3 derives its endpoint from the region, so only custom needs both explicitly.
 function missingFieldFor(settings: GeodeSettings, secretAccessKey: string): string {
   if (bucketFor(settings) === "") {
     return "bucket";
   }
-  if (settings.accessKeyId.trim() === "") {
+  if (accessKeyIdFor(settings) === "") {
     return "access key ID";
   }
   if (secretAccessKey === "") {
@@ -321,25 +294,32 @@ function missingFieldFor(settings: GeodeSettings, secretAccessKey: string): stri
   }
 
   if (settings.provider === "r2") {
-    if (settings.accountId === "") {
+    if (accountIdFor(settings) === "") {
       return "account ID";
     }
-  } else {
-    if (settings.endpoint === "") {
+    return "";
+  }
+
+  if (settings.provider === "custom") {
+    if (normalizeEndpoint(settings.endpoint) === "") {
       return "endpoint";
     }
-    if (settings.region === "") {
-      return "region";
-    }
+  }
+  if (regionFor(settings) === "") {
+    return "region";
+  }
+  // Amazon S3 builds its endpoint host from the region, so a region that isn't a real region
+  // identifier has no endpoint to sign against and is reported the same as a missing one.
+  if (settings.provider === "s3" && !isAwsRegion(regionFor(settings))) {
+    return "region (for example us-east-1)";
   }
 
   return "";
 }
 
-// refusingClient returns a StorageClient that fails every operation with the same message, for a
-// configuration no request built from it could be trusted to address. The status is "client"
-// because nothing about the request was ever valid, so a retry cannot help and only correcting the
-// setting can; sync surfaces the message as-is, naming the setting at fault.
+// refusingClient returns a StorageClient that fails every operation with the given message, since
+// a configuration that could not be trusted to address a request should never attempt one; status
+// is "client" because only correcting the setting, never a retry, can help.
 function refusingClient(message: string): StorageClient {
   return {
     putObject: async () => ({ ok: false, status: "client", message }),
@@ -350,9 +330,9 @@ function refusingClient(message: string): StorageClient {
   };
 }
 
-// rootedKey returns the bucket key an object actually lives at for a client rooted at root. Doing
-// this here, rather than threading a prefix through sync's key constants, is what keeps the whole
-// layer above unaware a prefix exists at all.
+// rootedKey returns the bucket key an object actually lives at for a client rooted at root, so
+// the prefix stays hidden from every layer above rather than threaded through sync's key
+// constants.
 function rootedKey(root: string, key: string): string {
   if (root === "") {
     return key;
@@ -361,12 +341,9 @@ function rootedKey(root: string, key: string): string {
   return `${root}/${key}`;
 }
 
-// rootedList lists under the client's root and hands the keys back relative to it, the mirror of
-// rootedKey, so a caller reading a blob's hash off a listed key gets the same string whether or
-// not a prefix is configured. Every key is asked for under the root, so one that comes back
-// outside it is a provider answering a question it wasn't asked; that fails the listing rather
-// than being mis-sliced into a plausible looking key (#180), since a listing silently short of
-// the truth is what sync reads as remote deletions.
+// rootedList lists under the client's root and returns keys relative to it, mirroring rootedKey;
+// a key that comes back outside the root fails the listing rather than being trusted, since a
+// provider answering a different question should not be silently re-sliced into a plausible key.
 async function rootedList(
   client: AwsClient,
   transport: Transport,
@@ -429,11 +406,9 @@ async function s3DeleteObject(
   return { ok: true, status: "ok", message: "" };
 }
 
-// s3GetObject reads the bytes stored at key. expectedBytes is the object's known size from the
-// manifest entry the caller is reading against; it scales the deadline the same way a put's body
-// does, so a large attachment on a slow link is not cut off part way through the download. It
-// defaults to zero for the few reads with no size to hand (the manifest itself), which get the base
-// budget.
+// s3GetObject reads the bytes stored at key; expectedBytes, when known, scales the deadline the
+// same way a put's body does, so a large attachment on a slow link is not cut short, defaulting
+// to zero (the base budget) for reads with no size to hand.
 async function s3GetObject(
   client: AwsClient,
   transport: Transport,
@@ -479,11 +454,9 @@ async function s3GetObject(
   };
 }
 
-// s3HeadObject reports whether key exists, without transferring the object's body. Used both to
-// check for an already stored blob before uploading it (a content addressed key that already
-// exists holds, by construction, the exact bytes a caller would otherwise upload, so the upload
-// can be skipped entirely) and, via its etag, to detect a mutable key like the manifest changing
-// underneath a plan without paying for a body transfer.
+// s3HeadObject reports whether key exists without transferring its body, used both to skip
+// uploading a blob whose content addressed key already exists and, via its etag, to detect a
+// mutable key like the manifest changing without paying for a body transfer.
 async function s3HeadObject(
   client: AwsClient,
   transport: Transport,
@@ -508,9 +481,9 @@ async function s3HeadObject(
   return { ok: true, status: "ok", message: "", etag: response.header("etag") };
 }
 
-// s3ListObjects lists objects in the bucket, optionally restricted to a key prefix. S3 caps a
-// single response at 1,000 keys, so it follows NextContinuationToken until the listing is complete
-// and returns every key. Stopping early would make unlisted keys look like remote deletions.
+// s3ListObjects lists objects in the bucket, optionally restricted to a key prefix, following
+// NextContinuationToken past S3's 1,000 key page cap since stopping early would read as remote
+// deletions.
 async function s3ListObjects(
   client: AwsClient,
   transport: Transport,
@@ -566,9 +539,8 @@ async function s3ListObjects(
   return { ok: true, status: "ok", message: "", objects };
 }
 
-// s3PutObject writes body to key, creating or overwriting it. When condition is set, the write
-// only lands if its precondition still holds; a 412, or a 409 from a provider that reports a
-// losing race that way, surfaces as "conflict".
+// s3PutObject writes body to key, creating or overwriting it; when condition is set, a losing
+// precondition surfaces as "conflict" whether the provider reports it as 412 or 409.
 async function s3PutObject(
   client: AwsClient,
   transport: Transport,
@@ -600,12 +572,9 @@ async function s3PutObject(
   return { ok: true, status: "ok", message: "" };
 }
 
-// send signs the request with the client's credentials, then hands the signed request to the
-// transport under a deadline. Signing is environment agnostic (aws4fetch uses WebCrypto); only the
-// transport, and so whether the request is subject to CORS, differs between the plugin runtime and
-// tests. The deadline is applied here rather than at each transport binding because this is the one
-// dispatch point every storage operation goes through, so no future transport can be injected
-// without one.
+// send signs the request, then dispatches it through the transport under a deadline, applied here
+// rather than at each transport binding since this is the one dispatch point every storage
+// operation goes through.
 async function send(
   client: AwsClient,
   transport: Transport,
@@ -615,9 +584,8 @@ async function send(
 ): Promise<HttpResponse> {
   const signed = await client.sign(url, init);
 
-  // Only one direction ever carries bytes here: a put streams its body up, a get streams the object
-  // back down, a copy moves nothing through the client. The deadline scales with whichever transfer
-  // is non-empty so neither a large upload nor a large download is cut off mid-flight.
+  // Only one direction carries bytes at a time (a put streams up, a get streams down), so the
+  // deadline scales with whichever transfer is non-empty, keeping neither cut off mid flight.
   const transferBytes = Math.max(bytesOf(init), expectedResponseBytes);
 
   return withDeadline(transport, signed, timeoutFor(transferBytes));

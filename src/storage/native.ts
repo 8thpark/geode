@@ -6,10 +6,9 @@ import type { HttpResponse, Transport } from "./storage.ts";
 // mapping can be exercised without a running Obsidian.
 export type Dispatch = (param: RequestUrlParam) => Promise<RequestUrlResponse>;
 
-// nativeRequest converts a signed request into the parameters for Obsidian's requestUrl, carrying
-// the SigV4 Authorization and x-amz-* headers through unchanged so the signature stays valid. throw
-// is false so a rejected status comes back as a response for the storage layer to classify, rather
-// than throwing and being misread as the request never reaching the server.
+// nativeRequest converts a signed request into requestUrl parameters, carrying every header
+// through unchanged so the signature stays valid and letting a rejected status come back as a
+// response.
 export async function nativeRequest(request: Request): Promise<RequestUrlParam> {
   return {
     url: request.url,
@@ -33,10 +32,8 @@ export function nativeResponse(
   };
 }
 
-// nativeTransport builds a Transport from a dispatcher: it converts the signed request, hands the
-// parameter to dispatch, and converts the response back. All of the transport's logic lives here so
-// a fake dispatch can exercise it without a running Obsidian; the plugin binds dispatch to
-// Obsidian's requestUrl.
+// nativeTransport builds a Transport from a dispatcher, holding all the conversion logic here so
+// a fake dispatch can exercise it without a running Obsidian.
 export function nativeTransport(dispatch: Dispatch): Transport {
   return async (request) => nativeResponse(await dispatch(await nativeRequest(request)));
 }
