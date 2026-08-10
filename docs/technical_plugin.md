@@ -48,6 +48,7 @@ needing a running Obsidian.
 | State store    | Reading and writing `state.json`                              |
 | Storage        | Dispatching signed requests through `requestUrl`              |
 | Log sink       | Appending to a capped file in the plugin's data folder        |
+| Toaster        | Putting a decided toast on screen, and taking the sticky one down |
 
 Pulled content is written through the low level data adapter rather than the Vault API, because a
 path pulled down for the first time has no `TFile` for the Vault API to operate on.

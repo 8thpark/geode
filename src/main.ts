@@ -1,10 +1,11 @@
 import type { App } from "obsidian";
-import { Notice, Platform, Plugin, setIcon, setTooltip } from "obsidian";
+import { Platform, Plugin, setIcon, setTooltip } from "obsidian";
 import { DEVICE_ID_KEY, deviceIdFrom, deviceSuffixFrom } from "./device/device";
 import { createLogSink } from "./log/adapter";
 import { createLogBus, createLogger, type LogBus, type Logger, type LogSink } from "./log/log";
 import { GeodeLogView, LOG_VIEW_TYPE } from "./log/view";
-import { DEFAULT_PASS, type Pass, STICKY, type Toast, toastFor } from "./notify/notify";
+import { DEFAULT_PASS, type Pass, toastFor } from "./notify/notify";
+import { createToaster, type Toaster } from "./notify/obsidian";
 import { type Actions, GeodeOnboardingModal } from "./onboarding/modal";
 import { type RemoteRead, readRemote, type SyncReport } from "./onboarding/onboarding";
 import {
@@ -171,9 +172,9 @@ export default class GeodePlugin extends Plugin {
   // once per session before trusting the compare and swap. Reset on save, so a new provider
   // re-verifies.
   private conditionalWritesVerified = false;
-  // stickyNotice is the one toast that waits to be dismissed, held so the next thing geode says can
-  // take it down: a halt notice still on screen after the halt cleared is a lie.
-  private stickyNotice: Notice | null = null;
+  // toaster owns everything geode says out loud, including the one notice that waits to be
+  // dismissed: a halt still on screen after the halt cleared is a lie.
+  private toaster: Toaster = createToaster();
 
   async onload() {
     await this.loadSettings();
@@ -246,7 +247,7 @@ export default class GeodePlugin extends Plugin {
     this.register(() => this.app.workspace.detachLeavesOfType(LOG_VIEW_TYPE));
     // A sticky toast outlives the plugin that raised it, and a disabled geode has no business
     // still saying it has stopped syncing.
-    this.register(() => this.dismissSticky());
+    this.register(() => this.toaster.dismissSticky());
 
     this.statusBarEl = this.addStatusBarItem();
     this.statusBarEl.addClass("geode-status-bar", "mod-clickable");
@@ -398,33 +399,11 @@ export default class GeodePlugin extends Plugin {
     this.setSyncStatus(this.restingStatus(), "");
     if (paused) {
       this.logger.info("automatic sync paused on this device");
-      this.showToast(toastFor({ kind: "paused" }));
+      this.toaster.show(toastFor({ kind: "paused" }));
       return;
     }
     this.logger.info("automatic sync resumed on this device");
-    this.showToast(toastFor({ kind: "resumed" }));
-  }
-
-  // showToast puts a decided toast on screen and is the only place geode calls Notice. Anything it
-  // says retires the sticky one first, since the newer statement is the true one.
-  private showToast(toast: Toast | null): void {
-    if (toast === null) {
-      return;
-    }
-    this.dismissSticky();
-    const notice = new Notice(toast.text, toast.durationMs);
-    if (toast.durationMs === STICKY) {
-      this.stickyNotice = notice;
-    }
-  }
-
-  // dismissSticky takes down the toast that was waiting to be dismissed, if one is up.
-  private dismissSticky(): void {
-    if (this.stickyNotice === null) {
-      return;
-    }
-    this.stickyNotice.hide();
-    this.stickyNotice = null;
+    this.toaster.show(toastFor({ kind: "resumed" }));
   }
 
   // setSyncStatus updates the status bar icon and tooltip to reflect status.
@@ -461,7 +440,7 @@ export default class GeodePlugin extends Plugin {
       // No status change: a pass is on screen already saying it is running, and this one never
       // started, so the toast is the whole of the answer.
       const message = "a sync is already running";
-      this.showToast(toastFor({ kind: "pass", pass: { ...DEFAULT_PASS, message } }));
+      this.toaster.show(toastFor({ kind: "pass", pass: { ...DEFAULT_PASS, message } }));
       return { ok: false, message };
     }
     if (!hasConnectionConfig(this.settings)) {
@@ -510,7 +489,7 @@ export default class GeodePlugin extends Plugin {
     // to answer, so the dialog's own case is never reported as a halt.
     const stopped = outcome.result === "stop" && !outcome.pass.blocked;
     const pass: Pass = { ...outcome.pass, manual: trigger === "manual", recovered, stopped };
-    this.showToast(toastFor({ kind: "pass", pass }));
+    this.toaster.show(toastFor({ kind: "pass", pass }));
 
     return reportFor(pass);
   }
@@ -519,7 +498,7 @@ export default class GeodePlugin extends Plugin {
   // a refusal nobody sees is indistinguishable from a sync that silently never runs.
   private refuse(message: string): SyncReport {
     this.setSyncStatus("error", message);
-    this.showToast(toastFor({ kind: "pass", pass: { ...DEFAULT_PASS, message } }));
+    this.toaster.show(toastFor({ kind: "pass", pass: { ...DEFAULT_PASS, message } }));
 
     return { ok: false, message };
   }
@@ -677,7 +656,7 @@ export default class GeodePlugin extends Plugin {
     this.schedule = noteResumed(this.schedule);
     await this.loadSyncedBefore();
     this.logger.info("settings saved");
-    this.showToast(toastFor({ kind: "settingsSaved" }));
+    this.toaster.show(toastFor({ kind: "settingsSaved" }));
     // Saving a connection is the moment someone has said what they want and nothing has happened
     // yet, which is the only moment the first sync dialog has anything to offer.
     this.offerOnboarding();

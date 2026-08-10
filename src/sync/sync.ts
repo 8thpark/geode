@@ -450,11 +450,12 @@ export function unexplainedBlobs(objects: ObjectMeta[], local: Snapshot): string
 }
 
 // conflictsIn counts the actions that renamed a local file aside, which is the one thing a
-// successful pass does that nobody would find on their own.
+// successful pass does that nobody would find on their own. A conflict whose local side was deleted
+// has no local content to preserve, so it restores the remote file and leaves no copy to report.
 function conflictsIn(completed: SyncAction[]): number {
   let count = 0;
   for (const action of completed) {
-    if (action.kind === "conflict") {
+    if (action.kind === "conflict" && action.deletedSide !== "local") {
       count += 1;
     }
   }
