@@ -861,6 +861,7 @@ test("syncOnce: retry adopts an identical orphaned upload with a HEAD, not anoth
       vaultId: "fixed-vault-id",
     },
     changeCount: 1,
+    conflictCount: 0,
   });
   assert.equal(filePuts, 1, "retry replaced an identical orphaned upload with a HEAD, not a PUT");
   assert.ok(retry.ok);

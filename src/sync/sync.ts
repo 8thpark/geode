@@ -24,11 +24,11 @@ import {
   type SyncAction,
 } from "./plan.ts";
 
-// SyncOutcome is the result of a single sync pass: on success the new snapshot to persist and how
-// many actions ran, on failure a message and any per file failures, with snapshot carrying progress
-// worth keeping rather than always null.
+// SyncOutcome is the result of a single sync pass: on success the new snapshot to persist, how many
+// actions ran, and how many of them moved a local file aside, on failure a message and any per file
+// failures, with snapshot carrying progress worth keeping rather than always null.
 export type SyncOutcome =
-  | { ok: true; snapshot: Snapshot; changeCount: number }
+  | { ok: true; snapshot: Snapshot; changeCount: number; conflictCount: number }
   // A blocked pass executed nothing, so it has no progress to persist and nothing to retry: it is
   // waiting on an answer only a person can give. restated marks one asked a second time.
   | {
@@ -425,6 +425,7 @@ export async function syncOnce(
     ok: true,
     snapshot: { ...final, vaultId: identity.vaultId },
     changeCount: actions.length,
+    conflictCount: conflictsIn(executed.completed),
   };
 }
 
@@ -446,4 +447,17 @@ export function unexplainedBlobs(objects: ObjectMeta[], local: Snapshot): string
   }
 
   return unexplained;
+}
+
+// conflictsIn counts the actions that renamed a local file aside, which is the one thing a
+// successful pass does that nobody would find on their own.
+function conflictsIn(completed: SyncAction[]): number {
+  let count = 0;
+  for (const action of completed) {
+    if (action.kind === "conflict") {
+      count += 1;
+    }
+  }
+
+  return count;
 }

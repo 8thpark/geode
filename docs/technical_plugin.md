@@ -14,6 +14,7 @@ of Geode testable without a running app.
 - [What The Plugin Owns](#what-the-plugin-owns)
 - [The First Sync Dialog](#the-first-sync-dialog)
 - [The Mass Change Dialog](#the-mass-change-dialog)
+- [Toasts](#toasts)
 - [Guards](#guards)
 - [Writing Files Safely](#writing-files-safely)
 - [Deleting Files](#deleting-files)
@@ -56,7 +57,7 @@ path pulled down for the first time has no `TFile` for the Vault API to operate 
 - Loading settings, the device identity, and whether this vault has synced before
 - Registering the vault event listeners that mark local work pending
 - Ticking the scheduler and starting a pass when one is due
-- The status bar, the log view, and the commands
+- The status bar, the log view, the toasts, and the commands
 - Translating a failed pass into what the scheduler should do about it
 
 That last one is the whole of the contract between two modules that otherwise know nothing about
@@ -133,6 +134,37 @@ planning exactly that (see [the guard](technical_sync.md#the-mass-change-guard))
 the dialog opens again, and says so: a second identical looking prompt with no explanation reads as
 a bug, and someone who has already clicked through one is exactly the person who will click through
 the next without reading it.
+
+### Toasts
+
+The status bar is a cloud icon and a tooltip, which is enough to answer "what is it doing" and
+nothing like enough to say something you have to act on. Toasts are the other half, and every one
+geode raises comes from a single table in `notify/notify.ts`, so the wording, the duration, and the
+silences are all pinned by one test rather than scattered across the plugin class.
+
+| Occasion                          | Says                                                     | Stays |
+| --------------------------------- | -------------------------------------------------------- | ----- |
+| Automatic sync halted             | The reason, since nothing will happen until you act       | Until dismissed |
+| A large change is waiting on you  | That nothing has synced, for whoever dismissed the dialog | 10s |
+| Any pass failed                   | The reason                                                | 10s |
+| Conflict copies were made         | How many, and that your copy is beside the remote one     | 10s |
+| A pass applied changes            | How many                                                  | 5s |
+| A manual pass found nothing to do | That you were already up to date                          | 5s |
+| Syncing recovered                 | That it is working again                                  | 5s |
+| Paused, resumed, settings saved   | That it happened                                          | 5s |
+
+One thing stays silent: an automatic pass that applied nothing. That is the product working, it
+happens every few minutes forever, and a notice you cannot stop is not information. `log.ts` drops
+those lines for the same reason.
+
+Precedence within a pass is worst news first. A halt outranks the failure it arrived as, a mass
+change outranks the halt, and a conflict outranks the change count it came with, because the count
+is the part you would have guessed.
+
+The halt toast is the only sticky one, and it is held so the next thing geode says can take it
+down. A "stopped syncing" notice still on screen after you have fixed the credentials is worse than
+no notice at all, and a sticky toast outlives the plugin that raised it, so disabling geode retires
+it too.
 
 ### Guards
 
