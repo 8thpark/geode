@@ -14,6 +14,7 @@ of Geode testable without a running app.
 - [What The Plugin Owns](#what-the-plugin-owns)
 - [The First Sync Dialog](#the-first-sync-dialog)
 - [The Mass Change Dialog](#the-mass-change-dialog)
+- [The Status Bar](#the-status-bar)
 - [Toasts](#toasts)
 - [Guards](#guards)
 - [Writing Files Safely](#writing-files-safely)
@@ -136,12 +137,54 @@ the dialog opens again, and says so: a second identical looking prompt with no e
 a bug, and someone who has already clicked through one is exactly the person who will click through
 the next without reading it.
 
+### The Status Bar
+
+The status bar is the only thing Geode has on screen all the time, so it has to answer two questions
+without being clicked: is it doing something right now, and when did it last work. A spinner with no
+counts reads as hung after the first minute, and an idle cloud cannot tell "synced ten seconds ago"
+from "has not synced since Tuesday". Automatic sync is what made both of those required rather than
+cosmetic: the click used to be the feedback, and there is no click any more.
+
+An icon, a label beside it, and a tooltip. Every state is one row of a table in `status/status.ts`,
+so the wording is pinned by a test rather than assembled inside the plugin class.
+
+| State                | Says             | The tooltip adds                                |
+| -------------------- | ---------------- | ----------------------------------------------- |
+| Nothing synced yet   | `Not synced yet` | That clicking syncs                             |
+| Resting              | `Synced 2m ago`  | The same age, and that clicking syncs           |
+| A pass with no plan  | `Checking...`    | That it is looking for changes                  |
+| A pass applying one  | `Syncing 12/340` | The same count, spelled out                     |
+| A pass failed        | `Sync failed`    | The reason, and when the vault was last current |
+| Automatic sync off   | `Sync paused`    | That clicking still syncs once                  |
+
+The count is the plan, reported before the first action runs and once per action after it, whether
+that action worked or not. Reporting it up front matters because the first action of a large pull
+can outlast anyone's patience on its own, and counting failures matters because a number that stops
+moving on the first bad file reads as exactly the hang it is there to disprove.
+
+`Checking...` is not a placeholder. A first sync spends most of its time reading the manifest and
+hashing the vault, before there is any plan to count, and that is the stretch the old spinner was
+worst at. Saying "0/0" there would be a number pretending to be progress.
+
+Ages are coarse on purpose, minutes then hours then days: nothing finer would be read, and nothing
+coarser answers the question. The bar redraws on the scheduler's tick rather than only when
+something happens, since "2m ago" is a claim that goes stale on its own.
+
+The time itself lives in vault scoped localStorage, alongside the pause flag and the device ID and
+for the same reason: when this laptop last synced is a fact about this laptop, not about the vault.
+Repointing at a bucket this vault has never synced forgets it, because the old time is then about
+somewhere else, and a confident wrong answer is worse than no answer. A pass that applied nothing
+still counts as synced, since it proves the vault and the bucket agree, which is the whole of what
+the question asks.
+
+The mobile app has no status bar at all, which is half of why toasts exist.
+
 ### Toasts
 
-The status bar is a cloud icon and a tooltip, which is enough to answer "what is it doing" and
-nothing like enough to say something you have to act on. Toasts are the other half, and every one
-geode raises comes from a single table in `notify/notify.ts`, so the wording, the duration, and the
-silences are all pinned by one test rather than scattered across the plugin class.
+The status bar says what is happening and when it last did, which is nothing like enough to say
+something you have to act on. Toasts are the other half, and every one geode raises comes from a
+single table in `notify/notify.ts`, so the wording, the duration, and the silences are all pinned by
+one test rather than scattered across the plugin class.
 
 | Occasion                          | Says                                                     | Stays |
 | --------------------------------- | -------------------------------------------------------- | ----- |

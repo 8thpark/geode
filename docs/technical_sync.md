@@ -74,8 +74,9 @@ laptop should never quietly pause your desktop. That is why the pause flag lives
 vault scoped localStorage rather than in `data.json`, the same reasoning the device ID uses (see
 [Device](technical_device.md)).
 
-While paused, the status bar shows a dimmed cloud with a line through it. Clicking it still syncs
-once, and the **Sync** command still works. Pause stops the timer, never the escape hatch.
+While paused, the status bar shows a dimmed cloud with a line through it, reading `Sync paused`.
+Clicking it still syncs once, and the **Sync** command still works. Pause stops the timer, never the
+escape hatch.
 
 ### The Scheduler
 
@@ -145,6 +146,10 @@ One pass, in order:
 The caller owns persistence. The previous snapshot is passed in and the new one handed back rather
 than read or written internally, so a pass stays pure over its inputs and tests can drive it with
 their own store.
+
+Step 7 reports its progress to whoever asked for the pass, once before the first action and once per
+action after it, so a long pass can be counted down rather than spun at (see
+[Plugin](technical_plugin.md#the-status-bar)).
 
 A pass that planned nothing and found a manifest already describing exactly that skips step 8.
 Writing it anyway is not merely a wasted request: every manifest upload is a compare and swap, so a

@@ -21,6 +21,10 @@ const HASH_MISMATCH_MESSAGE = "fetched bytes do not match manifest hash; sync ag
 const MANIFEST_DRIFT_MESSAGE = "changed remotely mid sync; sync again to reconcile";
 const MANIFEST_MISSING_HASH_MESSAGE = "manifest missing expected hash for this path";
 
+// NO_PROGRESS is the default for a caller with nothing watching, so the loop reports unconditionally
+// rather than asking whether anyone is listening.
+const NO_PROGRESS: Progress = () => undefined;
+
 // ExecuteResult reports what executeSyncPlan carried out: completed and failed actions, per file
 // failures, and pushedFiles, the FileState of every blob a bucket write actually landed, whether
 // or not the action it belonged to ultimately failed.
@@ -38,6 +42,10 @@ export type LocalWriter = {
   deleteFile: (path: string) => Promise<void>;
   renameFile: (path: string, newPath: string) => Promise<void>;
 };
+
+// Progress is called once per action, completed or failed, so a caller can say how far along a
+// long pass is while it runs rather than showing a spinner for minutes.
+export type Progress = (done: number, total: number) => void;
 
 // StagedWrite is pulled content already written to a staging file beside its destination, waiting
 // to either claim that path on commit or be thrown away by discard.
@@ -79,6 +87,7 @@ export async function executeSyncPlan(
   remote: Snapshot = { files: [] },
   manifestEtag: string | null = null,
   deviceId = "",
+  onProgress: Progress = NO_PROGRESS,
 ): Promise<ExecuteResult> {
   const completed: SyncAction[] = [];
   const failed: SyncAction[] = [];
@@ -104,12 +113,15 @@ export async function executeSyncPlan(
     }
     if (actionResult.failures.length === 0) {
       completed.push(action);
-      continue;
+    } else {
+      failed.push(action);
+      for (const failure of actionResult.failures) {
+        failures.push(failure);
+      }
     }
-    failed.push(action);
-    for (const failure of actionResult.failures) {
-      failures.push(failure);
-    }
+    // Counted as attempted rather than succeeded: a pass that failed halfway still moved, and a
+    // progress count that stalls on the first failure reads as the hang it is reporting on.
+    onProgress(completed.length + failed.length, actions.length);
   }
 
   return { completed, failed, failures, pushedFiles };
