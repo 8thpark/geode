@@ -61,6 +61,38 @@ export function agoLabel(then: number, now: number): string {
   return `${Math.floor(elapsed / DAY_MS)}d ago`;
 }
 
+// lastSyncedFrom returns the time held in a stored value, reading anything that is not a positive
+// number as never, so an absent or damaged one says "not synced yet" rather than lying about a date.
+export function lastSyncedFrom(stored: unknown): number {
+  if (typeof stored === "number" && stored > 0) {
+    return stored;
+  }
+
+  return 0;
+}
+
+// noteKind moves the status bar to kind, dropping any count with it: a count belongs to the pass
+// that reported it, and one left behind would describe a pass that has already ended.
+export function noteKind(status: Status, kind: Kind, detail: string): Status {
+  return { ...status, detail, kind, progress: null };
+}
+
+// noteProgress records how far through its plan the running pass has got.
+export function noteProgress(status: Status, done: number, total: number): Status {
+  return { ...status, progress: { done, total } };
+}
+
+// noteSynced records a pass completing, which is the one event the resting label is about.
+export function noteSynced(status: Status, at: number): Status {
+  return { ...status, lastSyncedAt: at };
+}
+
+// noteUnsynced forgets when this device last synced, for a vault repointed at a bucket it has never
+// synced: the old time is then about somewhere else, and a confident wrong answer is the worst one.
+export function noteUnsynced(status: Status): Status {
+  return { ...status, lastSyncedAt: 0 };
+}
+
 // view returns what the status bar shows for status at now.
 export function view(status: Status, now: number): View {
   return {

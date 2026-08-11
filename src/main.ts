@@ -32,7 +32,18 @@ import {
   prefixError,
 } from "./settings/settings";
 import { GeodeSettingTab } from "./settings/tab";
-import { DEFAULT_STATUS, type Kind, LAST_SYNCED_KEY, type Status, view } from "./status/status";
+import {
+  DEFAULT_STATUS,
+  type Kind,
+  LAST_SYNCED_KEY,
+  lastSyncedFrom,
+  noteKind,
+  noteProgress,
+  noteSynced,
+  noteUnsynced,
+  type Status,
+  view,
+} from "./status/status";
 import { obsidianTransport } from "./storage/obsidian";
 import { createS3Client, probeConditionalWrites } from "./storage/storage";
 import type { MassChange } from "./sync/guard";
@@ -71,6 +82,10 @@ type AppWithSetting = App & {
 // PassOutcome pairs what the scheduler needs from a pass with what everything watching one needs,
 // since neither answer contains the other: "stop" is not a message, and a message is not a policy.
 type PassOutcome = { pass: Pass; result: PassResult };
+
+// StateRead is what reading state.json found: this bucket has synced before, it has not, or the
+// file could not be read at all, which is a different answer from "it has not".
+type StateRead = "synced" | "unreadable" | "unsynced";
 
 // deviceLabel returns the human recognisable half of this device's ID, asking "phone or tablet"
 // before "which desktop OS" because an iPad reports itself as macOS on some builds.
@@ -235,7 +250,7 @@ export default class GeodePlugin extends Plugin {
     this.status = {
       ...DEFAULT_STATUS,
       kind: this.restingKind(),
-      lastSyncedAt: this.loadLastSyncedAt(),
+      lastSyncedAt: lastSyncedFrom(this.app.loadLocalStorage(LAST_SYNCED_KEY)),
     };
     this.renderStatus();
 
@@ -391,6 +406,26 @@ export default class GeodePlugin extends Plugin {
     this.toaster.show(toastFor({ kind: "resumed" }));
   }
 
+  // applyStatus puts the status a transition returned on screen, the one place the held value and
+  // the bar move together.
+  private applyStatus(next: Status): void {
+    this.status = next;
+    this.renderStatus();
+  }
+
+  // forgetSynced drops the last synced time, on screen and on this device.
+  private forgetSynced(): void {
+    this.applyStatus(noteUnsynced(this.status));
+    this.app.saveLocalStorage(LAST_SYNCED_KEY, null);
+  }
+
+  // rememberSynced records a pass completing per device, so a restart never reads as a vault that
+  // has synced nothing.
+  private rememberSynced(at: number): void {
+    this.applyStatus(noteSynced(this.status, at));
+    this.app.saveLocalStorage(LAST_SYNCED_KEY, at);
+  }
+
   // renderStatus draws the current status into the bar. The icon is redrawn only when it changes,
   // since setIcon rebuilds the SVG and would restart the spin every time the count ticks over.
   private renderStatus(): void {
@@ -405,11 +440,9 @@ export default class GeodePlugin extends Plugin {
     setTooltip(this.statusBarEl, rendered.tooltip);
   }
 
-  // setStatus moves the status bar to kind, carrying detail for the error case and dropping any
-  // count, which belongs to the pass that has just ended.
+  // setStatus moves the status bar to kind, carrying detail for the error case.
   private setStatus(kind: Kind, detail = ""): void {
-    this.status = { ...this.status, detail, kind, progress: null };
-    this.renderStatus();
+    this.applyStatus(noteKind(this.status, kind, detail));
   }
 
   // tick asks the scheduler, every TICK_MS, whether a pass is due. Both questions it asks are
@@ -554,7 +587,7 @@ export default class GeodePlugin extends Plugin {
       () => crypto.randomUUID(),
       this.deviceId,
       confirmed,
-      (done, total) => this.noteProgress(done, total),
+      (done, total) => this.applyStatus(noteProgress(this.status, done, total)),
     );
     if (!outcome.ok && outcome.fault === "blocked") {
       this.logger.warn(`sync: ${outcome.message}`);
@@ -590,7 +623,7 @@ export default class GeodePlugin extends Plugin {
     this.syncedBefore = true;
     // A pass that applied nothing still counts: it proves the vault matches the bucket, which is
     // the whole of what "last synced" is asked to answer.
-    this.noteSynced(Date.now());
+    this.rememberSynced(Date.now());
     // An idle pass logs nothing, since a line each would flush the capped file inside two days, but
     // a pass someone asked for always reports.
     if (outcome.changeCount > 0 || trigger === "manual") {
@@ -623,60 +656,35 @@ export default class GeodePlugin extends Plugin {
     return minted;
   }
 
-  // loadLastSyncedAt returns when a pass last completed on this device, treating anything else
-  // stored under the key as never.
-  private loadLastSyncedAt(): number {
-    const stored: unknown = this.app.loadLocalStorage(LAST_SYNCED_KEY);
-    if (typeof stored === "number" && stored > 0) {
-      return stored;
-    }
-
-    return 0;
-  }
-
   async loadSettings() {
     this.settings = normalizeSettings(await this.loadData());
   }
 
-  // loadSyncedBefore records whether this bucket has completed a pass already. The state store
-  // refuses a file written against different settings, so repointing reads back as never synced.
-  private async loadSyncedBefore(): Promise<void> {
+  // loadSyncedBefore records whether this bucket has completed a pass already, reporting what the
+  // read found rather than only what it decided, since a file it could not read is evidence of
+  // nothing. The store refuses one written against other settings, so repointing reads as unsynced.
+  private async loadSyncedBefore(): Promise<StateRead> {
     const dir = this.manifest.dir;
     if (dir === undefined) {
-      return;
+      return "unreadable";
     }
     const store = createObsidianStore(this.app.vault.adapter, `${dir}/state.json`, this.settings);
     try {
       const snapshot = await store.read();
       this.syncedBefore = snapshot.vaultId !== undefined;
+      if (this.syncedBefore) {
+        return "synced";
+      }
+
+      return "unsynced";
     } catch (err) {
+      // Automatic sync still stands down, since an unreadable state file is no basis for a pass,
+      // but nothing is forgotten over it.
       this.syncedBefore = false;
       this.logger.error(`could not read sync state: ${err}`);
+
+      return "unreadable";
     }
-  }
-
-  // noteProgress records how far through its plan the running pass is, so the bar counts down
-  // instead of spinning at a vault that may still be five minutes from finishing.
-  private noteProgress(done: number, total: number): void {
-    this.status = { ...this.status, progress: { done, total } };
-    this.renderStatus();
-  }
-
-  // noteSynced records a pass completing, which is the one event the resting label is about, and
-  // remembers it per device so a restart never reads as a vault that has synced nothing.
-  private noteSynced(at: number): void {
-    this.status = { ...this.status, lastSyncedAt: at };
-    this.app.saveLocalStorage(LAST_SYNCED_KEY, at);
-    this.renderStatus();
-  }
-
-  // noteUnsynced forgets when this device last synced, for a vault repointed at a bucket it has
-  // never synced: the old time is about somewhere else, and a wrong "synced 2m ago" is worse than
-  // no time at all.
-  private noteUnsynced(): void {
-    this.status = { ...this.status, lastSyncedAt: 0 };
-    this.app.saveLocalStorage(LAST_SYNCED_KEY, null);
-    this.renderStatus();
   }
 
   // noteVaultChanged records a local file appearing, changing, moving, or going away, which is
@@ -694,9 +702,10 @@ export default class GeodePlugin extends Plugin {
     // Saving settings is the one action most likely to have fixed whatever a halt was about, and
     // it may also have repointed the vault at a bucket it has never synced.
     this.schedule = noteResumed(this.schedule);
-    await this.loadSyncedBefore();
-    if (!this.syncedBefore) {
-      this.noteUnsynced();
+    // Only a state file that was read can say this vault now points somewhere it has never synced.
+    // A read that failed is not that answer, and forgetting on it would erase a time still true.
+    if ((await this.loadSyncedBefore()) === "unsynced") {
+      this.forgetSynced();
     }
     this.logger.info("settings saved");
     this.toaster.show(toastFor({ kind: "settingsSaved" }));

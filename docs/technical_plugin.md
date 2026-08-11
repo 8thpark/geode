@@ -146,7 +146,8 @@ from "has not synced since Tuesday". Automatic sync is what made both of those r
 cosmetic: the click used to be the feedback, and there is no click any more.
 
 An icon, a label beside it, and a tooltip. Every state is one row of a table in `status/status.ts`,
-so the wording is pinned by a test rather than assembled inside the plugin class.
+and every move between them is a pure transition in the same module, so the plugin holds the value
+and draws it and decides none of it.
 
 | State                | Says             | The tooltip adds                                |
 | -------------------- | ---------------- | ----------------------------------------------- |
@@ -173,9 +174,11 @@ something happens, since "2m ago" is a claim that goes stale on its own.
 The time itself lives in vault scoped localStorage, alongside the pause flag and the device ID and
 for the same reason: when this laptop last synced is a fact about this laptop, not about the vault.
 Repointing at a bucket this vault has never synced forgets it, because the old time is then about
-somewhere else, and a confident wrong answer is worse than no answer. A pass that applied nothing
-still counts as synced, since it proves the vault and the bucket agree, which is the whole of what
-the question asks.
+somewhere else, and a confident wrong answer is worse than no answer. Only a state file that was
+actually read can say that, though: a read that failed forgets nothing, since "I could not tell"
+is not the same answer as "never synced here", and one transient failure should not erase a history
+that is still true. A pass that applied nothing still counts as synced, since it proves the vault
+and the bucket agree, which is the whole of what the question asks.
 
 The mobile app has no status bar at all, which is half of why toasts exist.
 

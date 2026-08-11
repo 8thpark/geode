@@ -1,6 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { agoLabel, DEFAULT_STATUS, type Status, type View, view } from "./status.ts";
+import {
+  agoLabel,
+  DEFAULT_STATUS,
+  lastSyncedFrom,
+  noteKind,
+  noteProgress,
+  noteSynced,
+  noteUnsynced,
+  type Status,
+  type View,
+  view,
+} from "./status.ts";
 
 // NOW is the clock every case below is read against, a round number so the ages in each row are
 // arithmetic anyone can check by eye.
@@ -131,4 +142,38 @@ test("agoLabel: each unit holds up to the boundary of the next one", () => {
 
 test("agoLabel: a clock that moved backwards reads as now rather than as a negative age", () => {
   assert.equal(agoLabel(NOW + 60_000, NOW), "just now");
+});
+
+test("noteKind: moving to a new state drops the count belonging to the pass that reported it", () => {
+  const syncing = noteProgress(status({ kind: "syncing" }), 12, 340);
+
+  assert.deepEqual(noteKind(syncing, "idle", ""), status());
+  assert.deepEqual(noteKind(syncing, "error", "2 file(s) failed to sync"), {
+    ...status(),
+    detail: "2 file(s) failed to sync",
+    kind: "error",
+  });
+});
+
+test("noteSynced and noteUnsynced move the time and nothing else", () => {
+  const failed = status({ detail: "storage is unwell", kind: "error" });
+  const synced = noteSynced(failed, NOW);
+
+  assert.deepEqual(synced, { ...failed, lastSyncedAt: NOW });
+  assert.deepEqual(noteUnsynced(synced), failed);
+});
+
+test("lastSyncedFrom: only a positive number is a time, everything else is never", () => {
+  const cases: { name: string; stored: unknown; want: number }[] = [
+    { name: "a stored time", stored: NOW, want: NOW },
+    { name: "nothing stored yet", stored: null, want: 0 },
+    { name: "a key that was cleared", stored: undefined, want: 0 },
+    { name: "a zero written by an older build", stored: 0, want: 0 },
+    { name: "a clock that wrote a negative", stored: -1, want: 0 },
+    { name: "something that is not a number at all", stored: "yesterday", want: 0 },
+  ];
+
+  for (const testCase of cases) {
+    assert.equal(lastSyncedFrom(testCase.stored), testCase.want, testCase.name);
+  }
 });
