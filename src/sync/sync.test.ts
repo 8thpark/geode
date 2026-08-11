@@ -1426,3 +1426,31 @@ test("revertFailedPaths: a path the ancestor never knew is dropped, so it re-pla
 
   assert.deepEqual(result, empty);
 });
+
+test("syncOnce: the plan's size is reported before the first action, and its end when it lands", async () => {
+  // The first action of a big pull can outlast anyone's patience on its own, so the count has to
+  // exist before it starts rather than only once it finishes.
+  const reader = fakeReader({ "a.md": "alpha", "b.md": "beta" });
+  const { writer } = fakeLocalWriter();
+  const { storage } = fakeStorage();
+  const reported: number[][] = [];
+
+  const outcome = await syncOnce(
+    empty,
+    reader,
+    writer,
+    storage,
+    1,
+    () => "minted-id",
+    "",
+    null,
+    (done, total) => reported.push([done, total]),
+  );
+
+  assert.ok(outcome.ok);
+  assert.deepEqual(reported, [
+    [0, 2],
+    [1, 2],
+    [2, 2],
+  ]);
+});

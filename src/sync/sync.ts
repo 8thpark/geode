@@ -9,7 +9,7 @@ import {
   type Snapshot,
   takeSnapshot,
 } from "../vault/vault.ts";
-import { executeSyncPlan, type LocalWriter, type SyncFailure } from "./execute.ts";
+import { executeSyncPlan, type LocalWriter, type Progress, type SyncFailure } from "./execute.ts";
 import { type MassChange, massChangeApproved, massChangeFor, massChangeHalts } from "./guard.ts";
 import {
   BLOB_PREFIX,
@@ -233,6 +233,7 @@ export async function syncOnce(
   newVaultId: () => string = () => crypto.randomUUID(),
   deviceId = "",
   confirmed: MassChange | null = null,
+  onProgress: Progress = () => undefined,
 ): Promise<SyncOutcome> {
   const [remote, sentinelResult] = await Promise.all([
     readRemoteManifest(storage),
@@ -335,6 +336,9 @@ export async function syncOnce(
     };
   }
 
+  // Reported before the first action rather than after it: the plan's size is the answer to "is
+  // this hung", and the first action of a big pull can take longer than the patience it is spending.
+  onProgress(0, actions.length);
   const executed = await executeSyncPlan(
     actions,
     local,
@@ -345,6 +349,7 @@ export async function syncOnce(
     remoteView,
     manifestEtag,
     deviceId,
+    onProgress,
   );
 
   // The manifest is derived from what the plan just did to the bucket, never a fresh disk snapshot,

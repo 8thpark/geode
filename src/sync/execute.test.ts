@@ -1509,3 +1509,46 @@ test("executeSyncPlan: conflict with hash mismatch on remote restore leaves the 
   assert.deepEqual(completed, []);
   assert.deepEqual(pushedFiles, []);
 });
+
+test("executeSyncPlan: progress is reported once per action, whether it worked or not", async () => {
+  // A count that stalls on the first failed file reads as the hang it is there to disprove, so
+  // every action reports, and the total is the plan rather than what succeeded.
+  const reader = fakeReader({ "a.md": "one", "b.md": "two" });
+  const { writer } = fakeLocalWriter();
+  const { storage } = fakeStorage();
+  const unwell = blobKeyFor(await hashOf("two"));
+  const put = storage.putObject;
+  storage.putObject = async (key, body, condition) => {
+    if (key === unwell) {
+      return { ok: false, status: "server", message: "storage is unwell" };
+    }
+
+    return put(key, body, condition);
+  };
+  const reported: number[][] = [];
+
+  const { completed, failed } = await executeSyncPlan(
+    [
+      { kind: "push", path: "a.md" },
+      { kind: "push", path: "b.md" },
+      { kind: "pushDelete", path: "c.md" },
+    ],
+    empty,
+    reader,
+    writer,
+    storage,
+    1,
+    empty,
+    null,
+    "",
+    (done, total) => reported.push([done, total]),
+  );
+
+  assert.equal(completed.length, 2);
+  assert.equal(failed.length, 1);
+  assert.deepEqual(reported, [
+    [1, 3],
+    [2, 3],
+    [3, 3],
+  ]);
+});

@@ -160,6 +160,18 @@
   white-space: pre-wrap;
 }
 
+.geode-status-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4em;
+}
+
+/* The icon box is sized to the icon so the label beside it does not shift as the icon changes. */
+.geode-status-icon {
+  display: inline-flex;
+  align-items: center;
+}
+
 .geode-status-bar.is-error {
   color: var(--text-error);
 }
