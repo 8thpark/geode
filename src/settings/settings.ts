@@ -15,7 +15,7 @@ export const DEFAULT_SETTINGS: GeodeSettings = {
 export type ConnectionStatus = "unknown" | "checking" | "ok" | "error";
 
 // Provider identifies a supported S3 compatible storage configuration.
-export type Provider = "r2" | "s3" | "custom";
+export type Provider = "r2" | "s3" | "custom" | "minio";
 
 // GeodeSettings is the persisted shape of a Geode plugin's user configuration; see
 // docs/technical_settings.md for why each field is normalized where it is used rather than saved.
@@ -109,7 +109,7 @@ export function normalizeEndpoint(endpoint: string): string {
 
 // endpointFor returns the storage endpoint URL for settings, or "" when none can be derived; an
 // Amazon S3 region lands in the URL authority, so an unrecognised one yields no endpoint rather
-// than a host we never meant to sign a request against.
+// than a host we never meant to sign against; MinIO and custom take their endpoint as typed.
 export function endpointFor(settings: GeodeSettings): string {
   if (settings.provider === "r2") {
     return `https://${accountIdFor(settings)}.r2.cloudflarestorage.com`;
@@ -136,6 +136,7 @@ export function hasConnectionConfig(settings: GeodeSettings): boolean {
   if (settings.provider === "s3") {
     return isAwsRegion(regionFor(settings));
   }
+  // MinIO and a custom provider both take their endpoint as typed, with a region for signing.
   return normalizeEndpoint(settings.endpoint) !== "" && regionFor(settings) !== "";
 }
 
@@ -221,22 +222,27 @@ export function prefixError(raw: string): string {
 // providerOptions returns user-facing providers, including Custom only for local development.
 export function providerOptions(localDev: boolean): Record<string, string> {
   if (localDev) {
-    return { r2: "Cloudflare R2", s3: "Amazon S3", custom: "Custom" };
+    return {
+      r2: "Cloudflare R2",
+      s3: "Amazon S3",
+      minio: "MinIO",
+      custom: "Custom",
+    };
   }
 
-  return { r2: "Cloudflare R2", s3: "Amazon S3" };
+  return { r2: "Cloudflare R2", s3: "Amazon S3", minio: "MinIO" };
 }
 
 // providerOr returns a known provider, defaulting unknown values to "r2".
 export function providerOr(v: unknown): Provider {
-  if (v === "s3" || v === "custom") {
+  if (v === "s3" || v === "custom" || v === "minio") {
     return v;
   }
   return "r2";
 }
 
 // regionFor returns the signing region for settings, trimmed at the point of use; R2 always signs
-// with "auto", so only Amazon S3 and a custom provider need one specified.
+// with "auto", so Amazon S3, MinIO, and a custom provider need one specified.
 export function regionFor(settings: GeodeSettings): string {
   if (settings.provider === "r2") {
     return "auto";
