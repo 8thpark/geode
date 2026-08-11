@@ -159,6 +159,42 @@ function renderActions(tab: GeodeSettingTab, containerEl: HTMLElement): void {
   tab.refreshActionsUI();
 }
 
+// renderEndpointAndRegion draws the endpoint and region fields an S3 compatible provider whose
+// endpoint is typed rather than derived needs, with copy tailored to that provider.
+function renderEndpointAndRegion(
+  tab: GeodeSettingTab,
+  containerEl: HTMLElement,
+  endpointDesc: string,
+  endpointPlaceholder: string,
+  regionDesc: string,
+): void {
+  new Setting(containerEl)
+    .setName("Endpoint")
+    .setDesc(endpointDesc)
+    .addText((text) =>
+      text
+        .setPlaceholder(endpointPlaceholder)
+        .setValue(tab.draft.endpoint)
+        .onChange((value) => {
+          tab.draft.endpoint = value;
+          onFieldChanged(tab);
+        }),
+    );
+
+  new Setting(containerEl)
+    .setName("Region")
+    .setDesc(regionDesc)
+    .addText((text) =>
+      text
+        .setPlaceholder("us-east-1")
+        .setValue(tab.draft.region)
+        .onChange((value) => {
+          tab.draft.region = value;
+          onFieldChanged(tab);
+        }),
+    );
+}
+
 // renderHeader draws the plugin title, subtitle, and external link buttons. The title is a plain
 // div rather than an h1: Obsidian's settings pane suppresses nested h1 elements.
 function renderHeader(containerEl: HTMLElement): void {
@@ -223,31 +259,24 @@ function renderProviderFields(tab: GeodeSettingTab, containerEl: HTMLElement): v
     return;
   }
 
-  new Setting(containerEl)
-    .setName("Endpoint")
-    .setDesc("The S3 compatible endpoint URL for your storage.")
-    .addText((text) =>
-      text
-        .setPlaceholder("https://s3.example.com")
-        .setValue(tab.draft.endpoint)
-        .onChange((value) => {
-          tab.draft.endpoint = value;
-          onFieldChanged(tab);
-        }),
+  if (tab.draft.provider === "minio") {
+    renderEndpointAndRegion(
+      tab,
+      containerEl,
+      "Your MinIO server's S3 endpoint URL.",
+      "https://minio.example.com",
+      "The region your MinIO bucket lives in.",
     );
+    return;
+  }
 
-  new Setting(containerEl)
-    .setName("Region")
-    .setDesc("The region your bucket lives in.")
-    .addText((text) =>
-      text
-        .setPlaceholder("us-east-1")
-        .setValue(tab.draft.region)
-        .onChange((value) => {
-          tab.draft.region = value;
-          onFieldChanged(tab);
-        }),
-    );
+  renderEndpointAndRegion(
+    tab,
+    containerEl,
+    "The S3 compatible endpoint URL for your storage.",
+    "https://s3.example.com",
+    "The region your bucket lives in.",
+  );
 }
 
 // renderSecretRow draws the secret access key control; SecretComponent can't force a new entry

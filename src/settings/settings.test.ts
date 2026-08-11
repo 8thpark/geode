@@ -223,6 +223,11 @@ const normalizeCases: { name: string; input: unknown; want: GeodeSettings }[] = 
     want: { ...DEFAULT_SETTINGS, provider: "custom", endpoint: "https://s3.example.com" },
   },
   {
+    name: "provider minio preserved",
+    input: { provider: "minio", endpoint: "http://localhost:9000" },
+    want: { ...DEFAULT_SETTINGS, provider: "minio", endpoint: "http://localhost:9000" },
+  },
+  {
     name: "secretId missing defaults to empty string",
     input: {},
     want: DEFAULT_SETTINGS,
@@ -310,6 +315,26 @@ const endpointCases: { name: string; input: GeodeSettings; want: string }[] = [
     name: "custom with surrounding whitespace is trimmed",
     input: { ...DEFAULT_SETTINGS, provider: "custom", endpoint: "  https://s3.example.com  " },
     want: "https://s3.example.com",
+  },
+  {
+    name: "minio",
+    input: { ...DEFAULT_SETTINGS, provider: "minio", endpoint: "http://localhost:9000" },
+    want: "http://localhost:9000",
+  },
+  {
+    name: "minio with no scheme is prefixed with https",
+    input: { ...DEFAULT_SETTINGS, provider: "minio", endpoint: "minio.example.com" },
+    want: "https://minio.example.com",
+  },
+  {
+    name: "minio with a trailing slash is stripped",
+    input: { ...DEFAULT_SETTINGS, provider: "minio", endpoint: "https://minio.example.com/" },
+    want: "https://minio.example.com",
+  },
+  {
+    name: "minio with surrounding whitespace is trimmed",
+    input: { ...DEFAULT_SETTINGS, provider: "minio", endpoint: "  https://minio.example.com  " },
+    want: "https://minio.example.com",
   },
   {
     name: "amazon s3 with a region carrying URL authority delimiters yields no endpoint",
@@ -524,6 +549,7 @@ test("providerOptions: production excludes the custom provider", () => {
   assert.deepStrictEqual(providerOptions(false), {
     r2: "Cloudflare R2",
     s3: "Amazon S3",
+    minio: "MinIO",
   });
 });
 
@@ -531,6 +557,7 @@ test("providerOptions: local development includes the custom provider", () => {
   assert.deepStrictEqual(providerOptions(true), {
     r2: "Cloudflare R2",
     s3: "Amazon S3",
+    minio: "MinIO",
     custom: "Custom",
   });
 });
@@ -704,6 +731,69 @@ const hasConnectionConfigCases: { name: string; input: GeodeSettings; want: bool
       ...DEFAULT_SETTINGS,
       provider: "custom",
       endpoint: "https://s3.example.com",
+      region: "   ",
+      bucket: "b",
+      accessKeyId: "a",
+      secretId: "s",
+    },
+    want: false,
+  },
+  {
+    name: "minio missing endpoint is incomplete",
+    input: {
+      ...DEFAULT_SETTINGS,
+      provider: "minio",
+      region: "us-east-1",
+      bucket: "b",
+      accessKeyId: "a",
+      secretId: "s",
+    },
+    want: false,
+  },
+  {
+    name: "minio missing region is incomplete",
+    input: {
+      ...DEFAULT_SETTINGS,
+      provider: "minio",
+      endpoint: "http://localhost:9000",
+      bucket: "b",
+      accessKeyId: "a",
+      secretId: "s",
+    },
+    want: false,
+  },
+  {
+    name: "minio with all fields is complete",
+    input: {
+      ...DEFAULT_SETTINGS,
+      provider: "minio",
+      endpoint: "http://localhost:9000",
+      region: "us-east-1",
+      bucket: "b",
+      accessKeyId: "a",
+      secretId: "s",
+    },
+    want: true,
+  },
+  {
+    name: "minio with a whitespace only endpoint is incomplete",
+    input: {
+      ...DEFAULT_SETTINGS,
+      provider: "minio",
+      endpoint: "   ",
+      region: "us-east-1",
+      bucket: "b",
+      accessKeyId: "a",
+      secretId: "s",
+    },
+    want: false,
+  },
+  {
+    name: "minio with a whitespace only region is incomplete",
+    input: {
+      ...DEFAULT_SETTINGS,
+      provider: "minio",
+      endpoint: "http://localhost:9000",
       region: "   ",
       bucket: "b",
       accessKeyId: "a",
