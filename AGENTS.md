@@ -36,6 +36,23 @@ Current documentation:
 - `CONTRIBUTING.md`
 - `docs/*.md`
 
+The `docs/*.md` directory is a flat list of files, using the `TOPIC_PAGE-TITLE.md` filename format,
+e.g. `technical_similar-projects.md`.
+
+Documentation within `docs/*.md` is written in Markdown, in a casual, conversational tone, with the
+end user in mind, and with the goal of being easy to understand and follow. It should start with a
+TL;DR style introduction, followed by a table of contents, and then the content of the page. Pages
+should start simple in complexity, and then build in to more complex and detailed sections as
+needed. Be concise and to the point, and documentation across the project should feel consistent.
+
+Note that `docs/technical_*.md` pages can be more technically focused and complex, with more detail
+aimed at contributors and advanced users wanting to understand the inner workings of the project.
+
+If something can better and more concisely be explained via a simple ASCII, Mermaid diagram, or
+Markdown table, then use one. However ensure not to add sprawling or complex diagrams, e.g. a flow
+diagram with a lot of elements, keep things simple and easy to parse! The aim here is less words,
+via relevent simple diagrams.
+
 ## Remember
 
 Less is always more, simple is always better, boring is best, avoid the magic! Whilst still meeting
@@ -43,8 +60,9 @@ requirements, being secure, and delivering value to our users.
 
 ## Code Style
 
-It is critically important that you abide by all the rules set out in the `typescript-as-go` skill
-(`.agents/skills/typescript-as-go/SKILL.md`) when writing TypeScript, no exceptions.
+The `typescript-as-go` skill (`.agents/skills/typescript-as-go/SKILL.md`) is the source of truth for
+how TypeScript is written here, comments included. Abide by every rule in it, no exceptions, and
+enforce it on any code you write, change, or review.
 
 Additional rules for the project:
 

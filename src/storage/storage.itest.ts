@@ -1,7 +1,5 @@
-// Integration tests: exercise a real S3 compatible server (MinIO, via `docker compose`) rather
-// than mocking fetch or hand-rolling a fake — highest confidence that requests are actually well
-// formed. Requires `docker compose up -d` (or `npm run dev:s3` in another terminal) running
-// first; not part of `npm test`, run separately via `npm run test:integration`.
+// Integration tests against a real S3 compatible server (MinIO), for confidence that requests are
+// actually well formed. Needs Docker; run via `npm run test:integration`.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DEFAULT_SETTINGS, type GeodeSettings } from "../settings/settings.ts";
@@ -11,7 +9,7 @@ const SECRET_ACCESS_KEY = "geodedev";
 
 const liveSettings: GeodeSettings = {
   ...DEFAULT_SETTINGS,
-  provider: "custom",
+  provider: "minio",
   endpoint: "http://localhost:4568",
   region: "us-east-1",
   bucket: "geode-test",
@@ -260,4 +258,72 @@ test("putObject/getObject round-trips a key containing a hash and percent", asyn
   const getResult = await client.getObject("encode-test/100% #special.md");
   assert.equal(getResult.ok, true);
   assert.deepEqual(getResult.body, body);
+});
+
+// prefixedSettings point a client at a folder inside the same shared bucket, written the untidy way
+// a user would type it so the round trip proves canonicalization happens at the point of use.
+const prefixedSettings: GeodeSettings = {
+  ...liveSettings,
+  prefix: "/vaults/personal/",
+};
+
+test("a prefixed client round-trips against a real server and hides the prefix", async () => {
+  const client = createS3Client(prefixedSettings, SECRET_ACCESS_KEY, fetchTransport);
+  const root = createS3Client(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
+  const key = "prefix-test/note.md";
+  const body = new TextEncoder().encode("inside a folder");
+
+  try {
+    assert.equal((await client.putObject(key, body)).ok, true);
+    assert.deepEqual((await client.getObject(key)).body, body);
+    assert.equal((await client.headObject(key)).ok, true);
+
+    // What the bucket really holds: the object sits under the prefix and nothing lands beside it
+    // at the root, so two vaults can share one bucket without ever seeing each other.
+    assert.equal((await root.getObject(`vaults/personal/${key}`)).ok, true);
+    assert.equal((await root.getObject(key)).status, "not_found");
+  } finally {
+    await client.deleteObject(key);
+  }
+});
+
+test("a prefixed client lists keys relative to its own root", async () => {
+  const client = createS3Client(prefixedSettings, SECRET_ACCESS_KEY, fetchTransport);
+  const body = new TextEncoder().encode("x");
+
+  try {
+    await client.putObject("prefix-list/a.md", body);
+    await client.putObject("prefix-list/b.md", body);
+
+    const result = await client.listObjects("prefix-list/");
+    assert.equal(result.ok, true);
+    const keys: string[] = [];
+    for (const object of result.objects) {
+      keys.push(object.key);
+    }
+    keys.sort();
+    assert.deepEqual(keys, ["prefix-list/a.md", "prefix-list/b.md"]);
+  } finally {
+    await client.deleteObject("prefix-list/a.md");
+    await client.deleteObject("prefix-list/b.md");
+  }
+});
+
+test("a prefixed client cannot see an object sitting at the bucket root", async () => {
+  // The isolation sync depends on when two vaults share a bucket: a listing that leaked a
+  // neighbour's key would be read as content this vault cannot explain and fail its first sync.
+  const client = createS3Client(prefixedSettings, SECRET_ACCESS_KEY, fetchTransport);
+  const root = createS3Client(liveSettings, SECRET_ACCESS_KEY, fetchTransport);
+  const key = "prefix-isolation/neighbour.md";
+
+  try {
+    await root.putObject(key, new TextEncoder().encode("not mine"));
+
+    assert.equal((await client.getObject(key)).status, "not_found");
+    const result = await client.listObjects("prefix-isolation/");
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.objects, []);
+  } finally {
+    await root.deleteObject(key);
+  }
 });

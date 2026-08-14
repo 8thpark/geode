@@ -6,6 +6,7 @@ export const DEFAULT_SETTINGS: GeodeSettings = {
   endpoint: "",
   region: "",
   bucket: "",
+  prefix: "",
   accessKeyId: "",
   secretId: "",
   ignorePatterns: [],
@@ -14,19 +15,24 @@ export const DEFAULT_SETTINGS: GeodeSettings = {
 // ConnectionStatus is the current in-memory state of a Test Connection check.
 export type ConnectionStatus = "unknown" | "checking" | "ok" | "error";
 
-// GeodeSettings is the persisted shape of a Geode plugin's user configuration.
+// Provider identifies a supported S3 compatible storage configuration.
+export type Provider = "r2" | "s3" | "custom" | "minio";
+
+// GeodeSettings is the persisted shape of a Geode plugin's user configuration; see
+// docs/technical_settings.md for why each field is normalized where it is used rather than saved.
 export type GeodeSettings = {
   version: number;
-  provider: "r2" | "custom";
+  provider: Provider;
   accountId: string;
   endpoint: string;
   region: string;
   bucket: string;
+  // prefix is the folder inside the bucket the vault lives under, stored exactly as typed and
+  // canonicalized at the point of use rather than on save.
+  prefix: string;
   accessKeyId: string;
-  // secretId is a SecretStorage reference name, not the secret value itself. Obsidian's
-  // SecretComponent picker lets a user pick or create a secret under any name of their choosing;
-  // it does not support forcing new entries onto a fixed ID, so we have to remember whichever
-  // one they picked.
+  // secretId is a SecretStorage reference name, not the secret value itself; Obsidian's picker
+  // won't force a new entry onto a fixed ID, so we remember whichever name was picked.
   secretId: string;
   // ignorePatterns is a list of glob patterns for vault paths that should be excluded from sync.
   // The built-in local_ prefix convention is always applied regardless of this list.
@@ -42,6 +48,24 @@ export type SaveTarget = {
   saveSettings(): Promise<void>;
 };
 
+// accessKeyIdFor returns the access key a connection signs with, trimmed so a stray space cannot
+// turn a valid key into a signature mismatch.
+export function accessKeyIdFor(settings: GeodeSettings): string {
+  return settings.accessKeyId.trim();
+}
+
+// accountIdFor returns the Cloudflare account an R2 endpoint is built from, trimmed so a stray
+// space cannot land in the endpoint host.
+export function accountIdFor(settings: GeodeSettings): string {
+  return settings.accountId.trim();
+}
+
+// bucketFor returns the bucket a connection addresses, trimmed so an accidental leading space
+// cannot turn a valid bucket into a 400.
+export function bucketFor(settings: GeodeSettings): string {
+  return settings.bucket.trim();
+}
+
 // canSave reports whether the current draft may be persisted.
 export function canSave(dirty: boolean, connectionStatus: ConnectionStatus): boolean {
   if (!dirty) {
@@ -51,11 +75,8 @@ export function canSave(dirty: boolean, connectionStatus: ConnectionStatus): boo
   return connectionStatus === "unknown" || connectionStatus === "ok";
 }
 
-// draftForDisplay returns the draft a settings tab should show for a given render.
-// When auto is true (Obsidian is opening the tab), the draft is re-seeded from saved
-// settings so an external data.json update cannot leave a stale draft and phantom
-// "Unsaved changes". When auto is false (an internal re-render such as a provider
-// switch), the in-progress draft is kept.
+// draftForDisplay returns the draft to show for a render: re-seeded from saved settings when auto
+// (Obsidian opening the tab), kept as is otherwise.
 export function draftForDisplay(
   auto: boolean,
   currentDraft: GeodeSettings,
@@ -67,24 +88,66 @@ export function draftForDisplay(
   return currentDraft;
 }
 
-// endpointFor returns the storage endpoint URL to use for the given settings.
-export function endpointFor(settings: GeodeSettings): string {
-  if (settings.provider === "r2") {
-    return `https://${settings.accountId}.r2.cloudflarestorage.com`;
+// normalizeEndpoint ensures the endpoint has an explicit scheme and no trailing slash.
+export function normalizeEndpoint(endpoint: string): string {
+  let normalized = endpoint.trim();
+  if (!normalized) {
+    return "";
   }
 
-  return settings.endpoint;
+  // Require an explicit scheme to prevent generic network errors
+  const hasScheme =
+    normalized.toLowerCase().startsWith("http://") ||
+    normalized.toLowerCase().startsWith("https://");
+  if (!hasScheme) {
+    normalized = `https://${normalized}`;
+  }
+
+  // Strip trailing slashes to prevent double-slash SigV4 canonical path issues
+  while (normalized.endsWith("/")) {
+    normalized = normalized.slice(0, -1);
+  }
+
+  return normalized;
+}
+
+// endpointFor returns the storage endpoint URL for settings, or "" when none can be derived; an
+// Amazon S3 region lands in the URL authority, so an unrecognised one yields no endpoint rather
+// than a host we never meant to sign against; MinIO and custom take their endpoint as typed.
+export function endpointFor(settings: GeodeSettings): string {
+  if (settings.provider === "r2") {
+    return `https://${accountIdFor(settings)}.r2.cloudflarestorage.com`;
+  }
+  if (settings.provider === "s3") {
+    const region = regionFor(settings);
+    if (!isAwsRegion(region)) {
+      return "";
+    }
+    return `https://s3.${region}.amazonaws.com`;
+  }
+
+  return normalizeEndpoint(settings.endpoint);
 }
 
 // hasConnectionConfig reports whether settings have enough filled in to attempt a connection.
 export function hasConnectionConfig(settings: GeodeSettings): boolean {
-  if (settings.bucket === "" || settings.accessKeyId === "" || settings.secretId === "") {
+  if (bucketFor(settings) === "" || accessKeyIdFor(settings) === "" || settings.secretId === "") {
     return false;
   }
   if (settings.provider === "r2") {
-    return settings.accountId !== "";
+    return accountIdFor(settings) !== "";
   }
-  return settings.endpoint !== "" && settings.region !== "";
+  if (settings.provider === "s3") {
+    return isAwsRegion(regionFor(settings));
+  }
+  // MinIO and a custom provider both take their endpoint as typed, with a region for signing.
+  return normalizeEndpoint(settings.endpoint) !== "" && regionFor(settings) !== "";
+}
+
+// isAwsRegion reports whether region looks like an AWS region identifier; only the restricted
+// alphabet matters for safety, since it admits no character that can redirect a URL authority.
+export function isAwsRegion(region: string): boolean {
+  return /^[a-z]{2}(-[a-z]+){1,2}-\d{1,2}$/.test(region);
 }
 
 // isCurrentConnectionResult reports whether a completed test still describes the current draft.
@@ -99,6 +162,20 @@ export function isCurrentConnectionResult(
   }
 
   return settingsEqual(testedSettings, currentSettings);
+}
+
+// normalizePrefix returns the canonical bucket key prefix: whitespace trimmed and empty segments
+// dropped, so equivalent slash variants all address the same place.
+export function normalizePrefix(raw: string): string {
+  const segments: string[] = [];
+  for (const segment of raw.trim().split("/")) {
+    if (segment === "") {
+      continue;
+    }
+    segments.push(segment);
+  }
+
+  return segments.join("/");
 }
 
 // normalizeSettings returns a complete GeodeSettings from whatever loadData produced,
@@ -117,28 +194,66 @@ export function normalizeSettings(raw: unknown): GeodeSettings {
     endpoint: stringOr(source.endpoint, DEFAULT_SETTINGS.endpoint),
     region: stringOr(source.region, DEFAULT_SETTINGS.region),
     bucket: stringOr(source.bucket, DEFAULT_SETTINGS.bucket),
+    prefix: stringOr(source.prefix, DEFAULT_SETTINGS.prefix),
     accessKeyId: stringOr(source.accessKeyId, DEFAULT_SETTINGS.accessKeyId),
     secretId: stringOr(source.secretId, DEFAULT_SETTINGS.secretId),
     ignorePatterns: stringArrayOr(source.ignorePatterns, DEFAULT_SETTINGS.ignorePatterns),
   };
 }
 
-// providerOr returns "custom" if v is "custom", otherwise "r2".
-export function providerOr(v: unknown): "r2" | "custom" {
-  if (v === "custom") {
-    return "custom";
+// prefixError returns why raw cannot be used as a bucket prefix, or "" when it can, so a typo is
+// caught while typing rather than as a baffling provider error later.
+export function prefixError(raw: string): string {
+  const prefix = normalizePrefix(raw);
+  if (prefix === "") {
+    return "";
+  }
+  if (prefix.includes("\\")) {
+    return "Prefix separates folders with /, not \\";
+  }
+  if (hasControlCharacter(prefix)) {
+    return "Prefix can't contain control characters";
+  }
+
+  for (const segment of prefix.split("/")) {
+    if (segment === "." || segment === "..") {
+      return "Prefix can't use . or .. as a folder";
+    }
+  }
+
+  return "";
+}
+
+// providerOptions returns user-facing providers, including Custom only for local development.
+export function providerOptions(localDev: boolean): Record<string, string> {
+  if (localDev) {
+    return {
+      r2: "Cloudflare R2",
+      s3: "Amazon S3",
+      minio: "MinIO",
+      custom: "Custom",
+    };
+  }
+
+  return { r2: "Cloudflare R2", s3: "Amazon S3", minio: "MinIO" };
+}
+
+// providerOr returns a known provider, defaulting unknown values to "r2".
+export function providerOr(v: unknown): Provider {
+  if (v === "s3" || v === "custom" || v === "minio") {
+    return v;
   }
   return "r2";
 }
 
-// regionFor returns the signing region to use for the given settings. R2 always signs with
-// "auto" regardless of what a user might type, so custom is the only provider that needs one.
+// regionFor returns the signing region for settings, trimmed at the point of use; R2 always signs
+// with "auto", so Amazon S3, MinIO, and a custom provider need one specified.
 export function regionFor(settings: GeodeSettings): string {
   if (settings.provider === "r2") {
     return "auto";
   }
 
-  return settings.region;
+  return settings.region.trim();
 }
 
 // arraysEqual reports whether two string arrays have the same length and elements in order.
@@ -168,9 +283,8 @@ export async function saveDraft(
   await target.saveSettings();
 }
 
-// settingsEqual reports whether two settings values are identical field for field. Used to
-// derive whether a draft has unsaved changes by comparing it to the last saved settings, rather
-// than tracking a dirty flag that can't self-correct when an edit is reverted by hand.
+// settingsEqual reports whether two settings values are identical field for field, letting dirty
+// state be derived by comparison rather than tracked as a flag that can't self-correct.
 export function settingsEqual(a: GeodeSettings, b: GeodeSettings): boolean {
   return (
     a.provider === b.provider &&
@@ -178,10 +292,27 @@ export function settingsEqual(a: GeodeSettings, b: GeodeSettings): boolean {
     a.endpoint === b.endpoint &&
     a.region === b.region &&
     a.bucket === b.bucket &&
+    a.prefix === b.prefix &&
     a.accessKeyId === b.accessKeyId &&
     a.secretId === b.secretId &&
     arraysEqual(a.ignorePatterns, b.ignorePatterns)
   );
+}
+
+// hasControlCharacter reports whether value holds any C0 or DEL character, none of which can be
+// carried through a request URL as itself.
+function hasControlCharacter(value: string): boolean {
+  for (const char of value) {
+    const code = char.codePointAt(0);
+    if (code === undefined) {
+      continue;
+    }
+    if (code < 0x20 || code === 0x7f) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 // stringOr returns v if it is a string, otherwise fallback.

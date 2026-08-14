@@ -3,33 +3,40 @@ import {
   type Change,
   diffSnapshots,
   type FileState,
+  SNAPSHOT_VERSION,
   type Snapshot,
 } from "../vault/vault.ts";
 
-// BLOB_PREFIX is where every file's content lives, keyed by its own SHA-256 hash rather than its
-// vault path: a rename touches no bytes (the manifest's path just points at the same key), a
-// duplicate attachment stores once (two paths, one key), and a delete never destroys bytes (the
-// manifest simply stops pointing at them; the blob is recoverable for as long as any retained
-// manifest, past or present, still names its hash). It sits under RESERVED_PREFIX, so blobs never
-// re-enter a sync as vault files.
+// BLOB_PREFIX is where every file's content lives, keyed by an address derived from its own bytes
+// rather than its vault path, so a rename or a duplicate attachment costs no extra storage.
 export const BLOB_PREFIX = ".geode/blobs/";
 
-// MANIFEST_KEY is the well known remote object holding the last synced snapshot, geode's source
-// of truth for both "what does the other side think exists" and, since a FileState already pairs
-// a path with its content hash, "which blob a path's content lives at". Reserved: never treated
-// as a real vault path, on either side, even if a vault happens to contain a file at this exact
-// path.
+// MANIFEST_KEY is the well known remote object holding the last synced snapshot.
 export const MANIFEST_KEY = ".geode/manifest.json";
 
-// RESERVED_PREFIX namespaces geode's own bookkeeping in the bucket: the manifest and the content
-// addressed blobs. Nothing under it is ever a real vault file to sync, list as an orphan, or
-// diff, on either side, even if a vault happens to hold a file at a colliding path.
+// RESERVED_PREFIX namespaces geode's own bookkeeping (the manifest and content addressed blobs),
+// so nothing under it is ever synced, diffed, or reported as an orphaned vault file.
 export const RESERVED_PREFIX = ".geode/";
 
-// SyncAction is one thing a sync needs to do to bring local and remote back in step. A conflict
-// carries deletedSide so executeSyncPlan never has to guess, from a failed read, whether a deleted
-// side is why there's nothing there: "local" means there's no local content to preserve, "remote"
-// means there's nothing remote to pull, "none" means both sides have real, differing content.
+// SENTINEL_KEY marks a bucket as having completed its first sync, independent of whether the
+// manifest still exists.
+export const SENTINEL_KEY = ".geode/sentinel.json";
+
+// DecodedSentinel is the result of parsing a serialized sentinel: the sentinel itself, or why it
+// cannot be used.
+export type DecodedSentinel =
+  | { ok: true; sentinel: Sentinel }
+  | { ok: false; reason: "corrupt" | "unsupportedVersion" };
+
+// Sentinel is the durable marker written once at SENTINEL_KEY. vaultId is minted the moment a
+// bucket's first sync completes; createdAt is purely informational.
+export type Sentinel = {
+  vaultId: string;
+  createdAt: number;
+};
+
+// SyncAction is one thing a sync needs to do to bring local and remote back into step; deletedSide
+// lets executeSyncPlan tell a genuine absence from a failed read rather than guessing.
 export type SyncAction =
   | { kind: "push"; path: string }
   | { kind: "pushDelete"; path: string }
@@ -37,35 +44,77 @@ export type SyncAction =
   | { kind: "pullDelete"; path: string }
   | { kind: "conflict"; path: string; deletedSide: "local" | "remote" | "none" };
 
-// blobKeyFor returns the reserved key content with the given hash lives at, the same key
+// VaultIdentityCheck is the result of resolveVaultIdentity: either the vaultId to trust and, if
+// newly minted or newly adopted, persist locally, or why the pass must refuse rather than guess.
+export type VaultIdentityCheck = { ok: true; vaultId: string } | { ok: false; message: string };
+
+// blobKeyFor returns the reserved key content with the given address lives at, the same key
 // regardless of which path, or how many paths, currently point at it.
-export function blobKeyFor(hash: string): string {
-  return `${BLOB_PREFIX}${hash}`;
+export function blobKeyFor(address: string): string {
+  return `${BLOB_PREFIX}${address}`;
 }
 
-// conflictCopyPath returns the name a locally diverged file is renamed to before the remote
-// version claims the original path, so neither edit is ever silently discarded. The extension,
-// if any, is preserved so the renamed copy still opens in whatever app handles that file type.
-export function conflictCopyPath(path: string, now: number): string {
-  const stamp = new Date(now).toISOString().replace(/[:.]/g, "-");
+// conflictCopyPath returns the name a locally diverged file is renamed to before the remote version
+// claims the original path, preserving the extension so the copy still opens in the right app.
+export function conflictCopyPath(path: string, now: number, deviceId = ""): string {
+  const iso = new Date(now).toISOString();
+  const date = `${iso.slice(0, 4)}${iso.slice(5, 7)}${iso.slice(8, 10)}`;
+  const time = `${iso.slice(11, 13)}${iso.slice(14, 16)}${iso.slice(17, 19)}`;
+  const millis = iso.slice(20, 23);
+  let marker = `conflict_${date}-${time}-${millis}`;
+  if (deviceId !== "") {
+    marker = `conflict_${deviceId}_${date}-${time}-${millis}`;
+  }
   const lastSlash = path.lastIndexOf("/");
   const lastDot = path.lastIndexOf(".");
   if (lastDot === -1 || lastDot <= lastSlash + 1) {
-    return `${path} (conflicted copy ${stamp})`;
+    return `${path}_${marker}`;
   }
-  return `${path.slice(0, lastDot)} (conflicted copy ${stamp})${path.slice(lastDot)}`;
+  return `${path.slice(0, lastDot)}_${marker}${path.slice(lastDot)}`;
 }
 
-// manifestAfterSync returns the snapshot of what the bucket holds once the pass has run: remote
-// as it was read, minus every path a completed pushDelete removed, plus an entry for every
-// FileState pushed carries, keyed by the exact bytes executeSyncPlan actually wrote to the bucket
-// rather than a pre-push snapshot or an action's own success. A conflict's copy push can succeed
-// even when the conflict as a whole later fails to restore the remote version (the pull, its
-// integrity check, or the local write can each fail on their own); the copy still landed in the
-// bucket, and pushed carries its entry regardless, so leaving it out here would strand that
-// object, invisible to every other device, until this same device happened to sync again,
-// indefinitely if it never did. completed is only consulted for pushDelete, since a failed
-// pushDelete means the live object may still be there and its entry must stand.
+// decodeSentinel parses a serialized sentinel and checks its format version, the same posture
+// decodeSnapshot takes for the manifest: an unrecognized version means "needs a different build",
+// never corrupt.
+export function decodeSentinel(raw: string): DecodedSentinel {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { ok: false, reason: "corrupt" };
+  }
+  if (typeof parsed !== "object" || parsed === null) {
+    return { ok: false, reason: "corrupt" };
+  }
+  const obj = parsed as { version?: unknown; vaultId?: unknown; createdAt?: unknown };
+  if (obj.version !== SNAPSHOT_VERSION) {
+    return { ok: false, reason: "unsupportedVersion" };
+  }
+  if (typeof obj.vaultId !== "string" || obj.vaultId === "") {
+    return { ok: false, reason: "corrupt" };
+  }
+  if (typeof obj.createdAt !== "number") {
+    return { ok: false, reason: "corrupt" };
+  }
+
+  return { ok: true, sentinel: { vaultId: obj.vaultId, createdAt: obj.createdAt } };
+}
+
+// encodeSentinel serializes a sentinel for persistence, stamping the same format version marker
+// every other geode bucket object carries.
+export function encodeSentinel(sentinel: Sentinel): string {
+  const result: { version: number; vaultId: string; createdAt: number } = {
+    version: SNAPSHOT_VERSION,
+    vaultId: sentinel.vaultId,
+    createdAt: sentinel.createdAt,
+  };
+
+  return JSON.stringify(result);
+}
+
+// manifestAfterSync returns what the bucket holds once the pass has run, keyed by the bytes pushed
+// actually wrote rather than a pre-push snapshot or an action's own success; completed is only
+// consulted for pushDelete, since a push's entry must stand even when its own conflict later fails.
 export function manifestAfterSync(
   remote: Snapshot,
   completed: SyncAction[],
@@ -85,11 +134,8 @@ export function manifestAfterSync(
   return { files: [...files.values()] };
 }
 
-// planSync compares what changed locally since the last successful sync against what changed
-// remotely since that same sync, and decides what to push, what to pull, and what's a genuine
-// conflict: a path that changed on both sides to different content. previous is the snapshot
-// from the end of the last successful sync, the common ancestor both comparisons are made
-// against.
+// planSync compares what changed locally and remotely since previous, the common ancestor, and
+// decides what to push, pull, or flag as a genuine conflict; see docs/technical_sync.md.
 export function planSync(previous: Snapshot, local: Snapshot, remote: Snapshot): SyncAction[] {
   const localChanges = diffSnapshots(previous, local);
   const remoteChanges = diffSnapshots(previous, remote);
@@ -116,9 +162,6 @@ export function planSync(previous: Snapshot, local: Snapshot, remote: Snapshot):
       continue;
     }
 
-    // Changed on both sides since the last sync. A delete on either side, or content that
-    // ended up different, is a genuine conflict; landing on identical content (both edited
-    // to the same bytes, or both deleted it) needs no reconciliation.
     if (change.kind === "deleted" && remoteChange.kind === "deleted") {
       continue;
     }
@@ -150,6 +193,41 @@ export function planSync(previous: Snapshot, local: Snapshot, remote: Snapshot):
   }
 
   return actions;
+}
+
+// resolveVaultIdentity decides whether this pass may proceed and which vaultId to trust, by
+// comparing what the bucket says (firstSync, sentinel) against what this device already believed
+// (localVaultId).
+export function resolveVaultIdentity(
+  firstSync: boolean,
+  sentinel: Sentinel | null,
+  localVaultId: string | undefined,
+  newVaultId: () => string,
+): VaultIdentityCheck {
+  if (sentinel !== null) {
+    if (localVaultId !== undefined && localVaultId !== sentinel.vaultId) {
+      return {
+        ok: false,
+        message: "this bucket belongs to a different vault than the one last synced here",
+      };
+    }
+    return { ok: true, vaultId: sentinel.vaultId };
+  }
+
+  if (!firstSync) {
+    if (localVaultId !== undefined) {
+      return { ok: true, vaultId: localVaultId };
+    }
+    return { ok: true, vaultId: newVaultId() };
+  }
+  if (localVaultId !== undefined) {
+    return {
+      ok: false,
+      message: "the bucket looks empty but this device has synced here before",
+    };
+  }
+
+  return { ok: true, vaultId: newVaultId() };
 }
 
 // changesByPath builds a lookup from path to change, for matching a local change against a

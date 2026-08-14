@@ -85,6 +85,17 @@ const missingFieldCases: {
     want: "Fill in account ID first",
   },
   {
+    name: "missing region for Amazon S3",
+    settings: {
+      ...DEFAULT_SETTINGS,
+      provider: "s3",
+      bucket: "my-vault",
+      accessKeyId: "AKIA123",
+    },
+    secretAccessKey: "shh",
+    want: "Fill in region first",
+  },
+  {
     name: "missing endpoint for custom",
     settings: {
       ...DEFAULT_SETTINGS,
@@ -102,6 +113,105 @@ const missingFieldCases: {
       ...DEFAULT_SETTINGS,
       provider: "custom",
       endpoint: "https://s3.example.com",
+      bucket: "my-vault",
+      accessKeyId: "AKIA123",
+    },
+    secretAccessKey: "shh",
+    want: "Fill in region first",
+  },
+  {
+    name: "whitespace only bucket",
+    settings: { ...DEFAULT_SETTINGS, bucket: "   ", accessKeyId: "AKIA123" },
+    secretAccessKey: "shh",
+    want: "Fill in bucket first",
+  },
+  {
+    name: "whitespace only access key ID",
+    settings: { ...DEFAULT_SETTINGS, bucket: "my-vault", accessKeyId: "   " },
+    secretAccessKey: "shh",
+    want: "Fill in access key ID first",
+  },
+  {
+    name: "whitespace only account ID for R2",
+    settings: {
+      ...DEFAULT_SETTINGS,
+      accountId: "   ",
+      bucket: "my-vault",
+      accessKeyId: "AKIA123",
+    },
+    secretAccessKey: "shh",
+    want: "Fill in account ID first",
+  },
+  {
+    name: "whitespace only endpoint for custom",
+    settings: {
+      ...DEFAULT_SETTINGS,
+      provider: "custom",
+      endpoint: "   ",
+      region: "us-east-1",
+      bucket: "my-vault",
+      accessKeyId: "AKIA123",
+    },
+    secretAccessKey: "shh",
+    want: "Fill in endpoint first",
+  },
+  {
+    name: "whitespace only region for custom",
+    settings: {
+      ...DEFAULT_SETTINGS,
+      provider: "custom",
+      endpoint: "https://s3.example.com",
+      region: "   ",
+      bucket: "my-vault",
+      accessKeyId: "AKIA123",
+    },
+    secretAccessKey: "shh",
+    want: "Fill in region first",
+  },
+  {
+    name: "missing endpoint for minio",
+    settings: {
+      ...DEFAULT_SETTINGS,
+      provider: "minio",
+      region: "us-east-1",
+      bucket: "my-vault",
+      accessKeyId: "AKIA123",
+    },
+    secretAccessKey: "shh",
+    want: "Fill in endpoint first",
+  },
+  {
+    name: "missing region for minio",
+    settings: {
+      ...DEFAULT_SETTINGS,
+      provider: "minio",
+      endpoint: "http://localhost:9000",
+      bucket: "my-vault",
+      accessKeyId: "AKIA123",
+    },
+    secretAccessKey: "shh",
+    want: "Fill in region first",
+  },
+  {
+    name: "whitespace only endpoint for minio",
+    settings: {
+      ...DEFAULT_SETTINGS,
+      provider: "minio",
+      endpoint: "   ",
+      region: "us-east-1",
+      bucket: "my-vault",
+      accessKeyId: "AKIA123",
+    },
+    secretAccessKey: "shh",
+    want: "Fill in endpoint first",
+  },
+  {
+    name: "whitespace only region for minio",
+    settings: {
+      ...DEFAULT_SETTINGS,
+      provider: "minio",
+      endpoint: "http://localhost:9000",
+      region: "   ",
       bucket: "my-vault",
       accessKeyId: "AKIA123",
     },
@@ -293,6 +403,179 @@ test("getObject: a read with no known size falls back to the base budget", async
   assert.match(result.message, /timed out/);
 });
 
+// rootedSettings point a client at a folder inside the bucket. The prefix is deliberately written
+// the sloppy way a user would type it, so these also prove the client canonicalizes at the point of
+// use rather than trusting what was stored.
+const rootedSettings: GeodeSettings = {
+  ...deadlineSettings,
+  prefix: "/vaults/personal/",
+};
+
+// recordingTransport captures the URL of every request dispatched through it and answers each with
+// body, so a test can assert on the key a client actually addressed without touching a network.
+function recordingTransport(body = ""): { transport: Transport; urls: string[] } {
+  const urls: string[] = [];
+  const transport: Transport = async (request) => {
+    urls.push(request.url);
+    return {
+      ok: true,
+      status: 200,
+      body: new TextEncoder().encode(body),
+      header: () => '"etag"',
+    };
+  };
+
+  return { transport, urls };
+}
+
+// listingXml renders a ListObjectsV2 response holding exactly keys, for the prefix stripping tests.
+function listingXml(keys: string[]): string {
+  let contents = "";
+  for (const key of keys) {
+    contents += `<Contents><Key>${key}</Key>`;
+    contents += "<LastModified>2026-07-13T00:00:00.000Z</LastModified><Size>3</Size></Contents>";
+  }
+
+  return `<?xml version="1.0" encoding="UTF-8"?><ListBucketResult>${contents}</ListBucketResult>`;
+}
+
+test("createS3Client: every key is addressed under the configured prefix (#154)", async () => {
+  const { transport, urls } = recordingTransport();
+  const client = createS3Client(rootedSettings, "shh", transport);
+
+  await client.putObject(".geode/manifest.json", new Uint8Array([1]));
+  await client.getObject(".geode/manifest.json");
+  await client.headObject(".geode/blobs/abc");
+  await client.deleteObject(".geode/blobs/abc");
+
+  assert.deepEqual(urls, [
+    "https://s3.example.com/vault/vaults/personal/.geode/manifest.json",
+    "https://s3.example.com/vault/vaults/personal/.geode/manifest.json",
+    "https://s3.example.com/vault/vaults/personal/.geode/blobs/abc",
+    "https://s3.example.com/vault/vaults/personal/.geode/blobs/abc",
+  ]);
+});
+
+test("createS3Client: no prefix leaves every key at the bucket root", async () => {
+  // The default, and what every bucket synced before prefixes existed already holds, so rooting a
+  // client at "" has to produce byte for byte the URL it always did.
+  const { transport, urls } = recordingTransport();
+  const client = createS3Client(deadlineSettings, "shh", transport);
+
+  await client.getObject(".geode/manifest.json");
+
+  assert.deepEqual(urls, ["https://s3.example.com/vault/.geode/manifest.json"]);
+});
+
+test("listObjects: lists under the prefix and hands keys back relative to it (#154)", async () => {
+  // The round trip that matters: sync reads a blob's hash by slicing BLOB_PREFIX off a listed key,
+  // so a key still carrying the bucket prefix would parse as a hash that matches nothing local and
+  // be reported as content the vault can't explain.
+  const listed = listingXml(["vaults/personal/.geode/blobs/aaa"]);
+  const { transport, urls } = recordingTransport(listed);
+  const client = createS3Client(rootedSettings, "shh", transport);
+
+  const result = await client.listObjects(".geode/blobs/");
+
+  assert.ok(result.ok);
+  assert.deepEqual(
+    result.objects.map((object) => object.key),
+    [".geode/blobs/aaa"],
+  );
+  assert.match(urls[0], /prefix=vaults%2Fpersonal%2F\.geode%2Fblobs%2F/);
+});
+
+test("listObjects: no prefix argument still lists only under the client's root", async () => {
+  const { transport, urls } = recordingTransport(listingXml(["vaults/personal/note"]));
+  const client = createS3Client(rootedSettings, "shh", transport);
+
+  const result = await client.listObjects();
+
+  assert.ok(result.ok);
+  assert.deepEqual(
+    result.objects.map((object) => object.key),
+    ["note"],
+  );
+  assert.match(urls[0], /prefix=vaults%2Fpersonal%2F/);
+});
+
+test("listObjects: a key outside the prefix fails the listing, it is never mis-sliced", async () => {
+  // Every key was asked for under the prefix, so one that arrives outside it means the provider
+  // answered a different question. Slicing it anyway would invent a plausible looking key, and a
+  // listing that quietly disagrees with the bucket is what sync reads as remote deletions.
+  const { transport } = recordingTransport(listingXml(["someone-elses/note"]));
+  const client = createS3Client(rootedSettings, "shh", transport);
+
+  const result = await client.listObjects();
+
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "server");
+  assert.match(result.message, /outside the configured prefix/);
+});
+
+test("createS3Client: an unusable prefix refuses every operation (#154)", async () => {
+  // Settings reach the client straight from data.json, so the settings tab's validation is not on
+  // this path. stubTransport throws, so anything reaching the network fails rather than refuses.
+  const client = createS3Client(
+    { ...rootedSettings, prefix: "../elsewhere" },
+    "shh",
+    stubTransport,
+  );
+  const want = "Prefix can't use . or .. as a folder";
+
+  assert.deepEqual(await client.putObject("k", new Uint8Array([1])), {
+    ok: false,
+    status: "client",
+    message: want,
+  });
+  assert.deepEqual(await client.getObject("k"), {
+    ok: false,
+    status: "client",
+    message: want,
+    body: null,
+    etag: null,
+  });
+  assert.deepEqual(await client.headObject("k"), {
+    ok: false,
+    status: "client",
+    message: want,
+    etag: null,
+  });
+  assert.deepEqual(await client.deleteObject("k"), {
+    ok: false,
+    status: "client",
+    message: want,
+  });
+  assert.deepEqual(await client.listObjects(), {
+    ok: false,
+    status: "client",
+    message: want,
+    objects: [],
+  });
+});
+
+test("createS3Client: a leading .. can never address a different bucket (#154)", async () => {
+  // The concrete danger, and why an unusable prefix cannot simply be dropped: signing normalizes
+  // the URL, so "https://host/vault/../evil/x" resolves to bucket "evil". A client that built this
+  // request at all would read and write someone else's bucket while reporting success.
+  const { transport, urls } = recordingTransport();
+  const client = createS3Client({ ...rootedSettings, prefix: "../evil" }, "shh", transport);
+
+  const result = await client.putObject(".geode/manifest.json", new Uint8Array([1]));
+
+  assert.equal(result.ok, false);
+  assert.deepEqual(urls, []);
+});
+
+test("testConnection: an unusable prefix is refused before any request is signed", async () => {
+  const settings: GeodeSettings = { ...rootedSettings, prefix: "vaults/../escape" };
+
+  const result = await testConnection(settings, "shh", stubTransport);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.message, "Prefix can't use . or .. as a folder");
+});
+
 test("parseListObjectsXml decodes XML entities in object keys", () => {
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <ListBucketResult>
@@ -379,10 +662,8 @@ test("parseListObjectsXml treats a bare KeyCount marker as an empty bucket", () 
 });
 
 test("parseListObjectsXml fails loudly on a body with no recognizable listing markers", () => {
-  // A provider whose response uses a namespace prefix on <Contents> (or attributes this parser's
-  // bare-tag regex doesn't match) would otherwise parse to zero objects, indistinguishable from a
-  // genuinely empty bucket. That would let a first sync proceed and silently orphan every file the
-  // listing failed to surface (#109), so this shape must be refused rather than guessed at.
+  // A namespace prefixed <Contents> would parse to zero objects, indistinguishable from an empty
+  // bucket, so a first sync would orphan every file the listing failed to surface.
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
   <ns:Contents>
@@ -397,12 +678,8 @@ test("parseListObjectsXml fails loudly on a body with no recognizable listing ma
 });
 
 test("parseListObjectsXml fails on an attribute-bearing Contents despite IsTruncated", () => {
-  // A namespace prefix isn't the only way a provider can dodge the strict <Contents> pattern: an
-  // attribute on the opening tag does too, and unlike a wholly unrecognized body, the rest of the
-  // response can still look completely ordinary, IsTruncated included. Checking only for
-  // IsTruncated's presence would wave this through as an empty bucket and orphan the entry it
-  // dropped, so the parser must instead notice that a Contents-shaped tag existed but never made
-  // it into the parsed objects.
+  // An attribute on the opening tag dodges the strict pattern too, and the rest of the response
+  // still looks ordinary, so the parser must notice a Contents shaped tag it never parsed.
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <ListBucketResult>
   <Contents encoding-type="url">

@@ -1,5 +1,6 @@
 import { ItemView, type WorkspaceLeaf } from "obsidian";
 import type { LogBus, LogEntry, LogSink } from "./log.ts";
+import { nextRender, selectionOverlaps } from "./selection.ts";
 
 // LOG_VIEW_TYPE identifies geode's log pane to Obsidian's workspace leaf API.
 export const LOG_VIEW_TYPE = "geode-log-view";
@@ -28,11 +29,8 @@ function renderRow(list: HTMLElement, entry: LogEntry): void {
   row.createSpan({ cls: "geode-log-message", text: entry.message });
 }
 
-// GeodeLogView renders geode's persisted log as a plain, most recent first list, updating live as
-// entries are logged. The pane is always a straight render of what the sink holds: every change
-// re-reads and redraws rather than mutating the DOM in place, so the pane can never drift from the
-// persisted log. Read only: it has no way to write log entries, only display what the sink
-// recorded.
+// GeodeLogView renders the persisted log, most recent first, always as a straight redraw of what
+// the sink holds rather than a DOM mutation; see docs/technical_logging.md.
 export class GeodeLogView extends ItemView {
   private sink: LogSink;
   private bus: LogBus;
@@ -40,6 +38,7 @@ export class GeodeLogView extends ItemView {
   // refreshQueued records that another pass is owed because an entry arrived while one was running.
   private refreshInFlight: Promise<void> | null = null;
   private refreshQueued = false;
+  private renderDeferred = false;
 
   constructor(leaf: WorkspaceLeaf, sink: LogSink, bus: LogBus) {
     super(leaf);
@@ -65,10 +64,22 @@ export class GeodeLogView extends ItemView {
     // then still triggers a refresh, rather than being missed until the pane is reopened. register
     // runs the unsubscribe on pane close, so a closed view stops receiving entries.
     this.register(this.bus.subscribe(() => void this.refresh()));
+    this.registerDomEvent(document, "selectionchange", () => {
+      if (!this.renderDeferred) {
+        return;
+      }
+      const selected = selectionOverlaps(this.contentEl, document.getSelection());
+      const decision = nextRender(this.renderDeferred, "selectionchange", selected);
+      this.renderDeferred = decision.deferred;
+      if (decision.action !== "refresh") {
+        return;
+      }
+      void this.refresh();
+    });
     await this.refresh();
   }
 
-  // clear empties the persisted log, then re-renders from the sink like any other change, so the
+  // clear empties the persisted log, then rerenders from the sink like any other change, so the
   // pane reflects whatever actually survived, including any entry that landed mid-clear.
   private async clear(): Promise<void> {
     await this.sink.clear();
@@ -88,12 +99,8 @@ export class GeodeLogView extends ItemView {
     return this.refreshInFlight;
   }
 
-  // runRefresh reads and draws in a loop until no further pass was requested mid-render. The queued
-  // flag is reset before each read and checked immediately after, and the guard is released in the
-  // same synchronous tick as that final check, with no await in between. So an entry logged while a
-  // read is in flight always forces one more read: it either lands before this read's snapshot (and
-  // is drawn now) or sets the flag (and the loop runs again), never slipping through the gap as the
-  // run finishes.
+  // runRefresh loops until no further pass was requested mid render, releasing the guard in the
+  // same tick as its final check so an entry can never slip through the gap.
   private async runRefresh(): Promise<void> {
     try {
       do {
@@ -108,6 +115,12 @@ export class GeodeLogView extends ItemView {
   // render does the actual read and draw, split out so runRefresh can own the coalescing loop.
   private async render(): Promise<void> {
     const entries = await this.sink.read();
+    const selected = selectionOverlaps(this.contentEl, document.getSelection());
+    const decision = nextRender(this.renderDeferred, "render", selected);
+    this.renderDeferred = decision.deferred;
+    if (decision.action !== "draw") {
+      return;
+    }
     renderLogView(this.contentEl, entries);
   }
 }

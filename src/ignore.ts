@@ -10,11 +10,9 @@ export function hasLocalPrefix(path: string): boolean {
   return false;
 }
 
-// globToRegex converts a simplified glob pattern to a regular expression. Supported syntax:
-//   *  — matches any characters within one path segment (stops at /)
-//   ** — matches zero or more path segments
-//   ?  — matches exactly one character (not /)
-//   All other characters match literally. A leading / in the pattern is stripped.
+// globToRegex converts a simplified glob pattern to a regex: * and ? match within one path
+// segment, ** matches across segments, and every other character is literal. A leading / is
+// stripped from the pattern.
 function globToRegex(pattern: string): RegExp {
   const pat = pattern.startsWith("/") ? pattern.slice(1) : pattern;
   const body = pat.replace(/\*\*\/|\*\*|\*|\?|[.+^${}()|[\]\\]/g, (token) => {

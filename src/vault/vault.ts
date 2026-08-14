@@ -1,22 +1,46 @@
-import { endpointFor, type GeodeSettings, regionFor } from "../settings/settings.ts";
+import {
+  accountIdFor,
+  bucketFor,
+  endpointFor,
+  type GeodeSettings,
+  normalizePrefix,
+  regionFor,
+} from "../settings/settings.ts";
 
-// SNAPSHOT_VERSION is the format version stamped into every serialized snapshot, remote manifest
-// and local state.json alike, so a future format change (encryption, chunked upload) has
-// something to branch on when it meets an existing bucket (#91). A serialized snapshot with no
-// version field predates the marker and is version 1, plaintext path keyed storage. Version 2
-// moved file content off the vault path and onto a content addressed key under the manifest's own
-// bucket (`.geode/blobs/<hash>`, see sync/plan.ts); a version 1 manifest is refused rather than
-// read, since its paths point at objects this build never looks for again, and reading it as
-// version 2 would plan every push and pull against keys that were never written. There is no
-// migration path at this version: a bucket written before this change needs a fresh bucket, not an
-// upgrade.
-export const SNAPSHOT_VERSION = 2;
+// SNAPSHOT_VERSION is the current serialized snapshot format; see docs/technical_vault.md for what
+// each version was and which are refused.
+export const SNAPSHOT_VERSION = 3;
 
-// SNAPSHOT_BYTE_BUDGET caps how many bytes takeSnapshot buffers across its concurrent reads, low
-// enough that a vault of large attachments cannot pile eight full files into memory at once and
-// breach a mobile memory ceiling mid snapshot. A single file larger than this is still read (it
-// has to be, there is no streaming read on the platform), just never alongside another.
+// SNAPSHOT_BYTE_BUDGET keeps a vault of large attachments from piling full reads into memory at
+// once.
 const SNAPSHOT_BYTE_BUDGET = 64 * 1024 * 1024;
+
+// WINDOWS_RESERVED_NAMES are device names Windows treats as reserved regardless of extension
+// (`con.txt` is still `con`).
+const WINDOWS_RESERVED_NAMES = new Set([
+  "aux",
+  "com1",
+  "com2",
+  "com3",
+  "com4",
+  "com5",
+  "com6",
+  "com7",
+  "com8",
+  "com9",
+  "con",
+  "lpt1",
+  "lpt2",
+  "lpt3",
+  "lpt4",
+  "lpt5",
+  "lpt6",
+  "lpt7",
+  "lpt8",
+  "lpt9",
+  "nul",
+  "prn",
+]);
 
 // Change describes one path whose state differs between two snapshots.
 export type Change = {
@@ -25,11 +49,13 @@ export type Change = {
 };
 
 // DecodedSnapshot is the result of parsing a serialized snapshot: the snapshot itself, or why it
-// cannot be used — bytes that don't parse into the expected shape, or a format version this
-// build does not know how to read.
+// could not be used.
 export type DecodedSnapshot =
   | { ok: true; snapshot: Snapshot }
-  | { ok: false; reason: "corrupt" | "unsupportedVersion" };
+  | {
+      ok: false;
+      reason: "caseCollision" | "corrupt" | "duplicatePath" | "unsafePath" | "unsupportedVersion";
+    };
 
 // FileInfo is one file as seen live in the vault, before hashing.
 export type FileInfo = {
@@ -38,10 +64,8 @@ export type FileInfo = {
   mtime: number;
 };
 
-// FileStat is everything the vault index knows about one path without reading it: whether anything
-// is there at all, and the size and mtime it carries if so. An absent path is present false with
-// zero values rather than a null to unpack, so callers compare fields instead of branching on
-// absence first.
+// FileStat is everything the vault index knows about a path without reading it, present false with
+// zero values when the path is absent rather than null to unpack.
 export type FileStat = {
   present: boolean;
   size: number;
@@ -54,17 +78,11 @@ export type FileState = {
   size: number;
   mtime: number;
   hash: string;
+  blob: string;
 };
 
-// Reader lists files present in the vault right now, reads their bytes, and reports what the index
-// already knows about a single path without touching its content. stat answers all three of the
-// questions sync asks between reads: whether the path is there at all (so a failed read on a
-// present file is never mistaken for absence), how big it is right now (fresher than the listing,
-// so a snapshot reserves memory against what it is about to read rather than a size that may have
-// grown since), and when it last changed (so a pull can confirm nothing moved underneath it
-// without rereading the file, see confirmLocalUnchanged in sync/execute.ts). A vanished path
-// reports a zero stat, letting the read that follows raise the real disappearance error. The real
-// implementation wraps Obsidian's Vault API (see obsidian.ts); tests use an in-memory fake.
+// Reader lists files present in the vault, reads their bytes, and reports the index's view of a
+// single path without touching its content.
 export type Reader = {
   listFiles: () => Promise<FileInfo[]>;
   readFile: (path: string) => Promise<Uint8Array>;
@@ -75,25 +93,24 @@ export type Reader = {
 export type Snapshot = {
   files: FileState[];
   settingsFingerprint?: string;
+  vaultId?: string;
 };
 
-// Store reads and writes the persisted snapshot. The real implementation stores it inside
-// the plugin's own data directory (see obsidian.ts); tests use an in-memory fake.
+// Store reads and writes the persisted snapshot, backed by the plugin's data directory in the real
+// implementation and an in memory fake in tests.
 export type Store = {
   read: () => Promise<Snapshot>;
   write: (snapshot: Snapshot) => Promise<void>;
 };
 
-// Hold is a live byteSemaphore reservation: resize reconciles it to the bytes actually read, since
-// a file can grow between listing and read, and release returns them to the budget.
+// Hold is a live byteSemaphore reservation, resizable as a read's actual size becomes known and
+// released back to the budget when done.
 type Hold = {
   release: () => void;
   resize: (bytes: number) => void;
 };
 
-// byPath builds a lookup from path to file state, for matching a live file against what the
-// previous snapshot last saw at that same path. Exported for sync.ts, which needs the same
-// lookup to compare a local snapshot against a remote one.
+// byPath builds a lookup from path to file state, shared with sync.ts for comparing snapshots.
 export function byPath(files: FileState[]): Map<string, FileState> {
   const result = new Map<string, FileState>();
   for (const file of files) {
@@ -102,16 +119,8 @@ export function byPath(files: FileState[]): Map<string, FileState> {
   return result;
 }
 
-// decodeSnapshot parses a serialized snapshot (a remote manifest, a local state.json) and checks
-// its format version. An explicit version other than SNAPSHOT_VERSION is refused before the shape
-// is even looked at: a future format is free to change the shape itself (files as an encrypted
-// blob, say), and its snapshots must still read as "needs a different build", never as corrupt.
-// A missing version field means version 1, the format every build before the marker existed
-// wrote, and shares version 2's JSON shape exactly (`{files: [...]}`), so the two can only be
-// told apart by the marker itself; that check runs after the shape check, so a merely malformed
-// payload with no version field still reads as corrupt rather than as a well formed old manifest.
-// The returned snapshot carries only the in-memory shape; the version is a wire concern that
-// encodeSnapshot stamps back on at the next write.
+// decodeSnapshot parses a serialized snapshot, checking its format version and every entry's path
+// before handing it back.
 export function decodeSnapshot(raw: string): DecodedSnapshot {
   let parsed: unknown;
   try {
@@ -132,11 +141,46 @@ export function decodeSnapshot(raw: string): DecodedSnapshot {
   if (version === undefined) {
     return { ok: false, reason: "unsupportedVersion" };
   }
+  const files: FileState[] = [];
+  const normalizedPaths = new Set<string>();
+  const foldedPaths = new Set<string>();
+  for (const file of parsed.files) {
+    // isSnapshot only confirms files is an array; each entry still needs its own shape checked
+    // before .path is read off it.
+    if (typeof file !== "object" || file === null || typeof file.path !== "string") {
+      return { ok: false, reason: "corrupt" };
+    }
+
+    if (!isSafeAddress(file.blob)) {
+      return { ok: false, reason: "corrupt" };
+    }
+
+    // Normalizing here first is what makes the case check below mean what it claims.
+    const path = normalizePath(file.path);
+    if (!isSafePath(path)) {
+      return { ok: false, reason: "unsafePath" };
+    }
+    if (normalizedPaths.has(path)) {
+      return { ok: false, reason: "duplicatePath" };
+    }
+    const folded = path.toLowerCase();
+    if (foldedPaths.has(folded)) {
+      return { ok: false, reason: "caseCollision" };
+    }
+    normalizedPaths.add(path);
+    foldedPaths.add(folded);
+    files.push({ ...file, path });
+  }
   const settingsFingerprint = (parsed as { settingsFingerprint?: unknown }).settingsFingerprint;
   const fingerprintStr = typeof settingsFingerprint === "string" ? settingsFingerprint : undefined;
-  const snapshot: Snapshot = { files: parsed.files };
+  const vaultId = (parsed as { vaultId?: unknown }).vaultId;
+  const vaultIdStr = typeof vaultId === "string" ? vaultId : undefined;
+  const snapshot: Snapshot = { files };
   if (fingerprintStr !== undefined) {
     snapshot.settingsFingerprint = fingerprintStr;
+  }
+  if (vaultIdStr !== undefined) {
+    snapshot.vaultId = vaultIdStr;
   }
 
   return { ok: true, snapshot };
@@ -171,30 +215,35 @@ export function diffSnapshots(previous: Snapshot, current: Snapshot): Change[] {
 // encodeSnapshot serializes a snapshot for persistence, stamping the format version so every
 // manifest and state.json written from here on carries the marker decodeSnapshot branches on.
 export function encodeSnapshot(snapshot: Snapshot): string {
-  const result: { version: number; files: FileState[]; settingsFingerprint?: string } = {
+  const result: {
+    version: number;
+    files: FileState[];
+    settingsFingerprint?: string;
+    vaultId?: string;
+  } = {
     version: SNAPSHOT_VERSION,
     files: snapshot.files,
   };
   if (snapshot.settingsFingerprint !== undefined) {
     result.settingsFingerprint = snapshot.settingsFingerprint;
   }
+  if (snapshot.vaultId !== undefined) {
+    result.vaultId = snapshot.vaultId;
+  }
 
   return JSON.stringify(result);
 }
 
-// fingerprintSettings returns a stable string identifying the sync target, so we can detect when
-// that target changes and invalidate old state (#89). It covers only where the vault lives, the
-// fields normalized through endpointFor/regionFor to match what a connection actually uses.
-// Credentials (accessKeyId, secretId) are deliberately excluded: they authorize access to a
-// target, they do not identify one, so rotating a key must not invalidate state and force a full
-// re-hash. A genuine target change always moves one of the fields below.
+// fingerprintSettings returns a stable identifier for the sync target, so a change to where the
+// vault lives invalidates old state.
 export function fingerprintSettings(settings: GeodeSettings): string {
   return JSON.stringify({
     provider: settings.provider,
-    accountId: settings.accountId,
+    accountId: accountIdFor(settings),
     endpoint: endpointFor(settings),
     region: regionFor(settings),
-    bucket: settings.bucket,
+    bucket: bucketFor(settings),
+    prefix: normalizePrefix(settings.prefix),
   });
 }
 
@@ -210,27 +259,45 @@ export async function hashBytes(data: Uint8Array): Promise<string> {
   return hex;
 }
 
-// isSnapshot reports whether a value parsed from untrusted JSON (a remote manifest, a local
-// state.json) is shaped like a snapshot: a non-null object with a files array. Callers use this
-// instead of a blind `as Snapshot` cast, so a body that parses but is the wrong shape becomes
-// a handled corrupt/empty case rather than a TypeError when planSync later iterates files. The
-// check stops at the array itself: a malformed entry degrades rather than crashes downstream.
+// isSafePath reports whether path is safe to write to disk from untrusted input, refusing
+// traversal, absolute paths, and the reserved .geode and .obsidian roots.
+export function isSafePath(path: string): boolean {
+  if (path === "" || path.startsWith("/") || path.includes("\\")) {
+    return false;
+  }
+  const root = path.split("/", 1)[0].toLowerCase();
+  if (root === ".obsidian" || root === ".geode") {
+    return false;
+  }
+  for (const segment of path.split("/")) {
+    if (segment === "" || segment === "." || segment === "..") {
+      return false;
+    }
+    if (segment.endsWith(".") || segment.endsWith(" ")) {
+      return false;
+    }
+    if (isWindowsReservedName(segment)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+// isSnapshot reports whether a value parsed from untrusted JSON is shaped like a snapshot, so a
+// malformed body fails as a handled case rather than crashing later.
 export function isSnapshot(value: unknown): value is Snapshot {
   return typeof value === "object" && value !== null && Array.isArray((value as Snapshot).files);
 }
 
-// takeSnapshot walks every file the reader currently sees and returns their content hashes. A
-// file whose size and mtime both match the previous snapshot reuses that hash instead of
-// rereading content — the same stat gated hashing rsync, git, and Syncthing all use, since mtime
-// and size alone aren't reliable enough to trust as identity, but are cheap enough to skip a
-// rehash when neither has moved. Reads run at most concurrency at a time and reserve against a
-// size read just before each read, so a vault of large attachments serialises rather than piling
-// full files into memory at once; a stat gated skip reads nothing and reserves nothing.
-//
-// The byte bound is not absolute. size and readFile are separate operations, so a file that grows
-// in the window between them still allocates its whole buffer past the reservation, and no whole
-// file reader can prevent that without a streaming read the mobile platform does not offer. The
-// concurrency cap is the hard backstop: at most that many buffers are ever resident at once.
+// normalizePath returns path with Unicode NFC normalization applied, so the same visible filename
+// is always the same byte sequence regardless of which platform composed it.
+export function normalizePath(path: string): string {
+  return path.normalize("NFC");
+}
+
+// takeSnapshot walks every file the reader currently sees and returns their content hashes, reusing
+// a previous hash when a file's size and mtime are unchanged.
 export async function takeSnapshot(
   reader: Reader,
   previous: Snapshot,
@@ -242,26 +309,28 @@ export async function takeSnapshot(
   const budget = byteSemaphore(byteBudget);
 
   const files = await mapWithConcurrency(liveFiles, concurrency, async (file) => {
-    const known = previousByPath.get(file.path);
+    const normalizedPath = normalizePath(file.path);
+    const known = previousByPath.get(normalizedPath);
     if (known !== undefined && known.size === file.size && known.mtime === file.mtime) {
       return known;
     }
 
-    // Reserve against the size read now, not the one listed at the start of the pass, so a file
-    // that has since grown cannot slip past the budget on a stale, smaller number; resize then
-    // corrects for any change in the narrow window between this probe and the read itself. A path
-    // that has vanished reserves nothing and lets the read raise the real error.
+    // Reserving against a size read now, not the one listed at the start of the pass, keeps a
+    // grown file from slipping past the budget on a stale number.
     const live = await reader.stat(file.path);
     const hold = await budget.acquire(live.size);
     try {
       const bytes = await reader.readFile(file.path);
       hold.resize(bytes.length);
+      // Unencrypted, a blob is addressed by its own digest.
+      const hash = await hashBytes(bytes);
 
       return {
-        path: file.path,
+        path: normalizedPath,
         size: file.size,
         mtime: file.mtime,
-        hash: await hashBytes(bytes),
+        hash,
+        blob: hash,
       };
     } finally {
       hold.release();
@@ -271,13 +340,8 @@ export async function takeSnapshot(
   return { files };
 }
 
-// byteSemaphore caps the bytes held by in-flight readers to budget. acquire reserves the caller's
-// size and resolves once it fits, returning a hold whose resize reconciles that reservation to the
-// bytes actually read and whose release hands the room back. Waiters are admitted strictly in
-// arrival order — a later small read never jumps a queued large one — and a file larger than the
-// whole budget is admitted only when nothing else is held, so it runs alone rather than blocking
-// forever. The bound holds only as far as the reserved size is honest, which is why takeSnapshot
-// reserves against a freshly read size rather than a stale listed one.
+// byteSemaphore caps the bytes held by in flight readers to budget, admitting waiters strictly in
+// arrival order.
 function byteSemaphore(budget: number): { acquire: (bytes: number) => Promise<Hold> } {
   let available = budget;
   const waiters: Array<{ need: number; wake: () => void }> = [];
@@ -336,6 +400,28 @@ function byteSemaphore(budget: number): { acquire: (bytes: number) => Promise<Ho
       });
     },
   };
+}
+
+// isSafeAddress reports whether value is safe to use as the last segment of a blob key, refusing a
+// separator or relative segment that could steer a request outside the blob prefix.
+function isSafeAddress(value: unknown): boolean {
+  if (typeof value !== "string" || value === "") {
+    return false;
+  }
+  if (value.includes("/") || value.includes("\\")) {
+    return false;
+  }
+
+  return value !== "." && value !== "..";
+}
+
+// isWindowsReservedName reports whether segment is a Windows reserved device name, matched case
+// insensitively and ignoring any extension.
+function isWindowsReservedName(segment: string): boolean {
+  const dot = segment.indexOf(".");
+  const base = dot === -1 ? segment : segment.slice(0, dot);
+
+  return WINDOWS_RESERVED_NAMES.has(base.toLowerCase());
 }
 
 // mapWithConcurrency runs fn over each item with at most limit concurrent invocations, preserving
