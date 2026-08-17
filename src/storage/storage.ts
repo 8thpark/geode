@@ -403,6 +403,7 @@ async function s3DeleteObject(
       message: `Storage rejected the delete (${response.status})`,
     };
   }
+
   return { ok: true, status: "ok", message: "" };
 }
 
@@ -478,6 +479,7 @@ async function s3HeadObject(
       etag: null,
     };
   }
+
   return { ok: true, status: "ok", message: "", etag: response.header("etag") };
 }
 
@@ -569,6 +571,7 @@ async function s3PutObject(
       message: `Storage rejected the write (${response.status})`,
     };
   }
+
   return { ok: true, status: "ok", message: "" };
 }
 

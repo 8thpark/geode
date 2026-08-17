@@ -52,6 +52,7 @@ export function fakeLocalWriter(): { writer: LocalWriter; files: Map<string, str
       }
     },
   };
+
   return { writer, files };
 }
 
@@ -77,6 +78,7 @@ export function fakeReader(
       for (const [path, content] of Object.entries(files)) {
         list.push({ path, size: content.length, mtime: mtimeOf(path) });
       }
+
       return list;
     },
     readFile: async (path) => {
@@ -84,6 +86,7 @@ export function fakeReader(
       if (content === undefined) {
         throw new Error(`no such file: ${path}`);
       }
+
       return new TextEncoder().encode(content);
     },
     stat: async (path) => {
@@ -144,6 +147,7 @@ export function fakeStorage(objects: Record<string, string> = {}): {
       if (stored !== undefined) {
         etag = stored;
       }
+
       return {
         ok: true,
         status: "ok",
@@ -166,6 +170,7 @@ export function fakeStorage(objects: Record<string, string> = {}): {
       if (stored !== undefined) {
         etag = stored;
       }
+
       return { ok: true, status: "ok", message: "", etag };
     },
     deleteObject: async (key): Promise<DeleteResult> => {
@@ -181,9 +186,11 @@ export function fakeStorage(objects: Record<string, string> = {}): {
         }
         objects.push({ key, size: content.length, lastModified: "" });
       }
+
       return { ok: true, status: "ok", message: "", objects };
     },
   };
+
   return { storage, objects: store };
 }
 

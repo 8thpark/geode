@@ -1,13 +1,13 @@
 import type { App } from "obsidian";
 import { Platform, Plugin, setIcon, setTooltip } from "obsidian";
-import { DEVICE_ID_KEY, deviceIdFrom, deviceSuffixFrom } from "./device/device";
-import { createLogSink } from "./log/adapter";
-import { createLogBus, createLogger, type LogBus, type Logger, type LogSink } from "./log/log";
-import { GeodeLogView, LOG_VIEW_TYPE } from "./log/view";
-import { DEFAULT_PASS, type Pass, toastFor } from "./notify/notify";
-import { createToaster, type Toaster } from "./notify/obsidian";
-import { type Actions, GeodeOnboardingModal } from "./onboarding/modal";
-import { type RemoteRead, readRemote, type SyncReport } from "./onboarding/onboarding";
+import { DEVICE_ID_KEY, deviceIdFrom, deviceSuffixFrom } from "./device/device.ts";
+import { createLogSink } from "./log/adapter.ts";
+import { createLogBus, createLogger, type LogBus, type Logger, type LogSink } from "./log/log.ts";
+import { GeodeLogView, LOG_VIEW_TYPE } from "./log/view.ts";
+import { DEFAULT_PASS, type Pass, toastFor } from "./notify/notify.ts";
+import { createToaster, type Toaster } from "./notify/obsidian.ts";
+import { type Actions, GeodeOnboardingModal } from "./onboarding/modal.ts";
+import { type RemoteRead, readRemote, type SyncReport } from "./onboarding/onboarding.ts";
 import {
   armed,
   DEFAULT_STATE,
@@ -23,15 +23,15 @@ import {
   type State,
   TICK_MS,
   type Trigger,
-} from "./schedule/schedule";
+} from "./schedule/schedule.ts";
 import {
   DEFAULT_SETTINGS,
   type GeodeSettings,
   hasConnectionConfig,
   normalizeSettings,
   prefixError,
-} from "./settings/settings";
-import { GeodeSettingTab } from "./settings/tab";
+} from "./settings/settings.ts";
+import { GeodeSettingTab } from "./settings/tab.ts";
 import {
   DEFAULT_STATUS,
   type Kind,
@@ -43,18 +43,22 @@ import {
   noteUnsynced,
   type Status,
   view,
-} from "./status/status";
-import { obsidianTransport } from "./storage/obsidian";
-import { createS3Client, probeConditionalWrites } from "./storage/storage";
-import type { MassChange } from "./sync/guard";
-import { GeodeMassChangeModal } from "./sync/modal";
-import { type SyncFault, syncOnce } from "./sync/sync";
+} from "./status/status.ts";
+import { obsidianTransport } from "./storage/obsidian.ts";
+import { createS3Client, probeConditionalWrites } from "./storage/storage.ts";
+import type { MassChange } from "./sync/guard.ts";
+import { GeodeMassChangeModal } from "./sync/modal.ts";
+import { type SyncFault, syncOnce } from "./sync/sync.ts";
 import {
   createObsidianLocalWriter,
   createObsidianReader,
   createObsidianStore,
   flushOpenEditors,
-} from "./vault/obsidian";
+} from "./vault/obsidian.ts";
+
+// DEVICE_SUFFIX_BYTES is how much randomness separates two devices carrying the same platform
+// label. Five bytes encode to exactly eight base32 characters with nothing left over.
+const DEVICE_SUFFIX_BYTES = 5;
 
 // LOG_MIN_LEVEL is fixed rather than user configurable: there's no meaningful "quiet" mode to
 // offer today, so a verbosity setting would be a toggle with no observable effect.
@@ -63,10 +67,6 @@ const LOG_MIN_LEVEL = "debug";
 // MAX_LOG_LINES caps how many lines geode.log keeps on disk, so a long running session can't
 // grow it unbounded.
 const MAX_LOG_LINES = 500;
-
-// DEVICE_SUFFIX_BYTES is how much randomness separates two devices carrying the same platform
-// label. Five bytes encode to exactly eight base32 characters with nothing left over.
-const DEVICE_SUFFIX_BYTES = 5;
 
 // AppWithSetting adds Obsidian's internal, undocumented settings-window API (there is no public
 // equivalent) so the Settings command can jump straight to Geode's tab, and opening the log view
@@ -206,6 +206,7 @@ export default class GeodePlugin extends Plugin {
         if (!checking) {
           this.offerOnboarding();
         }
+
         return true;
       },
     });
@@ -221,6 +222,7 @@ export default class GeodePlugin extends Plugin {
         if (!checking) {
           this.setPaused(true);
         }
+
         return true;
       },
     });
@@ -234,6 +236,7 @@ export default class GeodePlugin extends Plugin {
         if (!checking) {
           this.setPaused(false);
         }
+
         return true;
       },
     });
@@ -342,6 +345,7 @@ export default class GeodePlugin extends Plugin {
         for (const file of files) {
           paths.push(file.path);
         }
+
         return paths;
       },
       openLogs: () => void this.openLogView(),

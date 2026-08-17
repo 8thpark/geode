@@ -17,15 +17,6 @@ export function messageFor(err: unknown): string {
   );
 }
 
-// detailFor extracts the raw message from a caught error, or "" when there is nothing to quote.
-function detailFor(err: unknown): string {
-  if (err instanceof Error) {
-    return err.message;
-  }
-
-  return "";
-}
-
 // statusForHttp maps an HTTP code onto a result status, treating anything unrecognised as
 // retryable. 409 joins 412 as a conflict, since Amazon S3 returns it for a lost conditional write.
 export function statusForHttp(code: number): ResultStatus {
@@ -41,5 +32,15 @@ export function statusForHttp(code: number): ResultStatus {
   if (code === 412 || code === 409) {
     return "conflict";
   }
+
   return "server";
+}
+
+// detailFor extracts the raw message from a caught error, or "" when there is nothing to quote.
+function detailFor(err: unknown): string {
+  if (err instanceof Error) {
+    return err.message;
+  }
+
+  return "";
 }

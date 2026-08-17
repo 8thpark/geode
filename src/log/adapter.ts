@@ -23,6 +23,7 @@ export function createLogSink(
   if (dir === undefined) {
     return createMemorySink(maxLines);
   }
+
   return createObsidianLogSink(adapter, `${dir}/geode.log`, maxLines);
 }
 
@@ -74,6 +75,7 @@ export function createObsidianLogSink(
           entries.push(entry);
         }
       }
+
       return entries;
     },
     clear: async () => {

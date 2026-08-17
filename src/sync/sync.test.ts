@@ -90,7 +90,7 @@ test("faultFor: trying again is worth something, or it never will be, and a race
   }
 });
 
-test("syncOnce: a rejected access key halts rather than being retried forever (#93)", async () => {
+test("syncOnce: a rejected access key halts rather than being retried forever", async () => {
   // A rejected access key must be reported as permanent, not transient, so it is never retried
   // forever on a timer.
   const { storage } = fakeStorage();
@@ -229,7 +229,7 @@ test("readRemoteManifest: a manifest from a format version this build doesn't kn
   });
 });
 
-test("readRemoteManifest: a manifest entry with a traversal path refuses the pass (#132)", async () => {
+test("readRemoteManifest: a manifest entry with a traversal path refuses the pass", async () => {
   // A remote manifest is untrusted input anyone who can write to the bucket can shape, so a
   // crafted path must never reach a local file operation.
   const raw = JSON.stringify({
@@ -247,7 +247,7 @@ test("readRemoteManifest: a manifest entry with a traversal path refuses the pas
   });
 });
 
-test("readRemoteManifest: two paths differing only by case refuse the pass (#94)", async () => {
+test("readRemoteManifest: two paths differing only by case refuse the pass", async () => {
   // Bucket keys are case sensitive while macOS, Windows, and Android are not by default, so
   // pulling both would silently let one overwrite the other with no conflict ever raised.
   const raw = JSON.stringify({
@@ -387,7 +387,7 @@ test("syncOnce: a manifest format this build doesn't know halts the pass before 
   });
 });
 
-test("syncOnce: a genuinely new bucket writes a sentinel too (#183)", async () => {
+test("syncOnce: a genuinely new bucket writes a sentinel too", async () => {
   const reader = fakeReader({ "a.md": "alpha" });
   const { writer } = fakeLocalWriter();
   const { storage, objects } = fakeStorage();
@@ -405,7 +405,7 @@ test("syncOnce: a genuinely new bucket writes a sentinel too (#183)", async () =
   assert.equal(JSON.parse(unwrapped(written as string)).vaultId, "minted-id");
 });
 
-test("syncOnce: a pass with nothing to do writes nothing at all (#102)", async () => {
+test("syncOnce: a pass with nothing to do writes nothing at all", async () => {
   // Ancestor, local vault, and remote manifest all agree, so planning finds nothing to do.
   const ancestor: Snapshot = { files: [file("a.md", "h1")], vaultId: "known-id" };
   const remoteManifest = wrapped(encodeSnapshot(snapshot(file("a.md", "h1"))));
@@ -437,7 +437,7 @@ test("syncOnce: a pass with nothing to do writes nothing at all (#102)", async (
   assert.equal(outcome.snapshot.vaultId, "known-id");
 });
 
-test("syncOnce: a first sync with nothing to do still writes the manifest (#102)", async () => {
+test("syncOnce: a first sync with nothing to do still writes the manifest", async () => {
   // Even with nothing to plan, the manifest still must land: its existence is what ends first sync
   // state for every later pass.
   const reader = fakeReader({});
@@ -491,7 +491,7 @@ test("syncOnce: a pass with nothing to do still writes a missing sentinel (#102,
   assert.equal(outcome.snapshot.vaultId, "minted-id");
 });
 
-test("syncOnce: a device pointed at a different vault's sentinel refuses (#183)", async () => {
+test("syncOnce: a device pointed at a different vault's sentinel refuses", async () => {
   // This device already trusts a different vaultId from a prior sync, and the bucket now belongs to
   // a genuinely different vault; whether that vault's manifest exists is irrelevant, the mismatch
   // alone is what must refuse.
@@ -525,7 +525,7 @@ test("syncOnce: a device pointed at a different vault's sentinel refuses (#183)"
   });
 });
 
-test("syncOnce: a never-synced device proceeds without a manifest (#109)", async () => {
+test("syncOnce: a never-synced device proceeds without a manifest", async () => {
   // The sentinel proves this bucket has synced before, but this device has no history of its own to
   // compare against, so it falls through to the first sync path rather than refuse.
   const reader = fakeReader({ "a.md": "alpha" });
@@ -776,6 +776,7 @@ test("syncOnce: a manifest overwritten by another device mid sync fails the pass
       await inner(blobKeyFor(beeHash), new TextEncoder().encode(wrapped("bee")));
       await inner(MANIFEST_KEY, new TextEncoder().encode(wrapped(bManifest)));
     }
+
     return inner(key, body, condition);
   };
   // a.md matches the ancestor's size and mtime so takeSnapshot reuses its hash and sees no local
@@ -832,6 +833,7 @@ test("syncOnce: retry adopts an identical orphaned upload with a HEAD, not anoth
       raceManifest = false;
       await inner(MANIFEST_KEY, new TextEncoder().encode(wrapped(encodeSnapshot(ancestor))));
     }
+
     return inner(key, body, condition);
   };
   const reader = fakeReader({ "a.md": "ours!" });
@@ -895,6 +897,7 @@ test("syncOnce: a file changed mid sync is not recorded in the manifest and is p
       readerFiles["a.md"] = "edited mid sync";
       readerFiles["c.md"] = "created mid sync";
     }
+
     return inner(key, body, condition);
   };
 
@@ -969,6 +972,7 @@ test("syncOnce: a file edited mid sync is never overwritten by a pull, and the r
       readerFiles["b.md"] = "edited mid sync";
       files.set("b.md", "edited mid sync");
     }
+
     return inner(key);
   };
   const now = Date.parse("2026-07-14T10:00:00.000Z");
@@ -1003,7 +1007,7 @@ test("syncOnce: a file edited mid sync is never overwritten by a pull, and the r
   assert.equal(files.get("b.md"), "b v2");
 });
 
-test("syncOnce: a conflict copy carries the device that made the edit (#103)", async () => {
+test("syncOnce: a conflict copy carries the device that made the edit", async () => {
   // Both sides changed relative to the ancestor, so the local edit is preserved under a conflict
   // copy. On a three device vault a timestamp alone leaves whose edit it holds to be guessed, so
   // the device this pass ran on has to be in the name, on disk and in the uploaded manifest.
@@ -1116,6 +1120,7 @@ test("syncOnce: a manifest that moves on mid pull is caught before stale content
         new TextEncoder().encode(wrapped(encodeSnapshot(snapshot(file("a.md", aV3Hash))))),
       );
     }
+
     return inner(key);
   };
 
@@ -1154,6 +1159,7 @@ test("syncOnce: a failed push doesn't discard the progress of the rest of the pa
     if (key === blobKeyFor(worldHash)) {
       bPushes++;
     }
+
     return inner(key, body, condition);
   };
 
@@ -1263,6 +1269,7 @@ test("syncOnce: the failure message counts files, not operation failures", async
     if (key === copyBlobKey) {
       return { ok: false, status: "server", message: "Storage rejected the write (500)" };
     }
+
     return inner(key, body, condition);
   };
   const reader = fakeReader({ "a.md": "a local" });
@@ -1310,6 +1317,7 @@ test("syncOnce: a failed pull records progress without the ancestor ever advanci
     if (key === blobKeyFor(aV1Hash)) {
       aPushes++;
     }
+
     return inner(key, body, condition);
   };
   const readerFiles: Record<string, string> = { "a.md": "a v1" };
@@ -1371,6 +1379,7 @@ test("syncOnce: two first syncs racing for an empty bucket, the loser fails inst
       raced = true;
       await inner(MANIFEST_KEY, new TextEncoder().encode(wrapped(otherManifest)));
     }
+
     return inner(key, body, condition);
   };
   const reader = fakeReader({ "a.md": "alpha" });

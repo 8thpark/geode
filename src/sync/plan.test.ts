@@ -310,7 +310,7 @@ test("conflictCopyPath: two passes in the same second get different copies", () 
   assert.notEqual(first, second);
 });
 
-test("conflictCopyPath: two devices never name the same copy at the same instant (#103)", () => {
+test("conflictCopyPath: two devices never name the same copy at the same instant", () => {
   const mine = conflictCopyPath("a.md", Date.parse("2026-07-14T14:37:22.123Z"), "mac-abc");
   const theirs = conflictCopyPath("a.md", Date.parse("2026-07-14T14:37:22.123Z"), "ios-xyz");
 

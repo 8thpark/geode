@@ -4,7 +4,7 @@ import { conflictCopyPath } from "../sync/plan.ts";
 import { isSafePath } from "../vault/vault.ts";
 import { DEVICE_ID_KEY, deviceIdFrom, deviceSuffixFrom } from "./device.ts";
 
-test("deviceSuffixFrom: five bytes encode to eight base32 characters (#103)", () => {
+test("deviceSuffixFrom: five bytes encode to eight base32 characters", () => {
   // 40 bits split into eight 5-bit groups holding 0 through 7 in order, so the expected output
   // reads straight off the front of the alphabet.
   const suffix = deviceSuffixFrom(new Uint8Array([0x00, 0x44, 0x32, 0x14, 0xc7]));
@@ -12,7 +12,7 @@ test("deviceSuffixFrom: five bytes encode to eight base32 characters (#103)", ()
   assert.equal(suffix, "01234567");
 });
 
-test("deviceSuffixFrom: the alphabet is lowercase and skips the ambiguous letters (#103)", () => {
+test("deviceSuffixFrom: the alphabet is lowercase and skips the ambiguous letters", () => {
   // One case throughout is what stops two device IDs colliding by case alone, and i, l, o and u
   // are absent so a suffix read off a filename cannot be transcribed back wrong.
   const every = deviceSuffixFrom(new Uint8Array([255, 255, 255, 255, 255]));
@@ -44,7 +44,7 @@ test("deviceIdFrom: an empty half degrades to the other rather than leaving a st
   assert.equal(deviceIdFrom("mac", ""), "mac");
 });
 
-test("deviceIdFrom: every generated ID is safe in a conflict copy path (#103)", () => {
+test("deviceIdFrom: every generated ID is safe in a conflict copy path", () => {
   // The ID lands in a filename written to disk, so it has to clear the same rules a pulled
   // manifest entry does, and must never introduce uppercase that could let two devices collide by
   // case alone.

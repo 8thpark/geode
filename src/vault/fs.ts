@@ -82,18 +82,25 @@ function abs(root: string, path: string): string {
 // excluding dot prefixed entries (.obsidian, staged .geode-tmp writes), mirroring how Obsidian's
 // Vault.getFiles() never indexes hidden files.
 function walk(root: string, dir = ""): string[] {
-  const here = dir === "" ? root : abs(root, dir);
+  let here = root;
+  if (dir !== "") {
+    here = abs(root, dir);
+  }
   const out: string[] = [];
   for (const entry of readdirSync(here, { withFileTypes: true })) {
     if (entry.name.startsWith(".")) {
       continue;
     }
-    const rel = dir === "" ? entry.name : `${dir}/${entry.name}`;
+    let rel = entry.name;
+    if (dir !== "") {
+      rel = `${dir}/${entry.name}`;
+    }
     if (entry.isDirectory()) {
       out.push(...walk(root, rel));
       continue;
     }
     out.push(normalizePath(rel));
   }
+
   return out;
 }
