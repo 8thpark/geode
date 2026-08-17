@@ -17,7 +17,7 @@ export const DEFAULT_STATUS: Status = {
 export const LAST_SYNCED_KEY = "geode-last-synced-at";
 
 // DAY_MS, HOUR_MS, and MINUTE_MS are the three thresholds a relative time steps through; a fourth
-// unit would mean weeks, and "synced 2w ago" is a sentence nobody should ever read from a sync tool.
+// unit would mean weeks, and "synced 2w ago" is a sentence nobody should read from a sync tool.
 const DAY_MS = 86_400_000;
 const HOUR_MS = 3_600_000;
 const MINUTE_MS = 60_000;
@@ -62,7 +62,8 @@ export function agoLabel(then: number, now: number): string {
 }
 
 // lastSyncedFrom returns the time held in a stored value, reading anything that is not a positive
-// number as never, so an absent or damaged one says "not synced yet" rather than lying about a date.
+// number as never, so an absent or damaged one says "not synced yet" rather than lying about a
+// date.
 export function lastSyncedFrom(stored: unknown): number {
   if (typeof stored === "number" && stored > 0) {
     return stored;
@@ -140,6 +141,16 @@ function labelFor(status: Status, now: number): string {
   return `Synced ${agoLabel(status.lastSyncedAt, now)}`;
 }
 
+// sinceClause returns the trailing ", last synced ..." a state carries when the news it leads with
+// is something other than the time, and nothing at all before the first pass has ever landed.
+function sinceClause(status: Status, now: number): string {
+  if (status.lastSyncedAt === 0) {
+    return "";
+  }
+
+  return `, last synced ${agoLabel(status.lastSyncedAt, now)}`;
+}
+
 // tooltipFor returns the hover text, which says the same thing as the label plus the part that does
 // not fit: the failure, or how a click behaves in this state.
 function tooltipFor(status: Status, now: number): string {
@@ -167,14 +178,4 @@ function tooltipFor(status: Status, now: number): string {
   }
 
   return `Geode: last synced ${agoLabel(status.lastSyncedAt, now)}; click to sync`;
-}
-
-// sinceClause returns the trailing ", last synced ..." a state carries when the news it leads with
-// is something other than the time, and nothing at all before the first pass has ever landed.
-function sinceClause(status: Status, now: number): string {
-  if (status.lastSyncedAt === 0) {
-    return "";
-  }
-
-  return `, last synced ${agoLabel(status.lastSyncedAt, now)}`;
 }

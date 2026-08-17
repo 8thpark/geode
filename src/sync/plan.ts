@@ -70,6 +70,7 @@ export function conflictCopyPath(path: string, now: number, deviceId = ""): stri
   if (lastDot === -1 || lastDot <= lastSlash + 1) {
     return `${path}_${marker}`;
   }
+
   return `${path.slice(0, lastDot)}_${marker}${path.slice(lastDot)}`;
 }
 
@@ -237,6 +238,7 @@ function changesByPath(changes: Change[]): Map<string, Change> {
   for (const change of changes) {
     result.set(change.path, change);
   }
+
   return result;
 }
 

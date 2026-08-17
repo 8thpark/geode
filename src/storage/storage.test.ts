@@ -47,6 +47,7 @@ function probeStub(over: Partial<StorageClient>): StorageClient {
     deleteObject: async () => ({ ok: true, status: "ok", message: "" }),
     listObjects: async () => ({ ok: true, status: "ok", message: "", objects: [] }),
   };
+
   return { ...base, ...over };
 }
 
@@ -354,6 +355,7 @@ function stallingTransport(): { transport: Transport; dispatched: Promise<void> 
     signal();
     return new Promise<HttpResponse>(() => {});
   };
+
   return { transport, dispatched };
 }
 
@@ -439,7 +441,7 @@ function listingXml(keys: string[]): string {
   return `<?xml version="1.0" encoding="UTF-8"?><ListBucketResult>${contents}</ListBucketResult>`;
 }
 
-test("createS3Client: every key is addressed under the configured prefix (#154)", async () => {
+test("createS3Client: every key is addressed under the configured prefix", async () => {
   const { transport, urls } = recordingTransport();
   const client = createS3Client(rootedSettings, "shh", transport);
 
@@ -467,7 +469,7 @@ test("createS3Client: no prefix leaves every key at the bucket root", async () =
   assert.deepEqual(urls, ["https://s3.example.com/vault/.geode/manifest.json"]);
 });
 
-test("listObjects: lists under the prefix and hands keys back relative to it (#154)", async () => {
+test("listObjects: lists under the prefix and hands keys back relative to it", async () => {
   // The round trip that matters: sync reads a blob's hash by slicing BLOB_PREFIX off a listed key,
   // so a key still carrying the bucket prefix would parse as a hash that matches nothing local and
   // be reported as content the vault can't explain.
@@ -513,7 +515,7 @@ test("listObjects: a key outside the prefix fails the listing, it is never mis-s
   assert.match(result.message, /outside the configured prefix/);
 });
 
-test("createS3Client: an unusable prefix refuses every operation (#154)", async () => {
+test("createS3Client: an unusable prefix refuses every operation", async () => {
   // Settings reach the client straight from data.json, so the settings tab's validation is not on
   // this path. stubTransport throws, so anything reaching the network fails rather than refuses.
   const client = createS3Client(
@@ -554,7 +556,7 @@ test("createS3Client: an unusable prefix refuses every operation (#154)", async 
   });
 });
 
-test("createS3Client: a leading .. can never address a different bucket (#154)", async () => {
+test("createS3Client: a leading .. can never address a different bucket", async () => {
   // The concrete danger, and why an unusable prefix cannot simply be dropped: signing normalizes
   // the URL, so "https://host/vault/../evil/x" resolves to bucket "evil". A client that built this
   // request at all would read and write someone else's bucket while reporting success.

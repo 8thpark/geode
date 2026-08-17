@@ -24,6 +24,10 @@ import {
   type SyncAction,
 } from "./plan.ts";
 
+// SyncFault says how a failed pass should be treated by whatever decides when to try again, since
+// a message alone can't answer that; see docs/technical_sync.md for what each value means.
+export type SyncFault = "transient" | "raced" | "permanent";
+
 // SyncOutcome is the result of a single sync pass: on success the new snapshot to persist, how many
 // actions ran, and how many of them moved a local file aside, on failure a message and any per file
 // failures, with snapshot carrying progress worth keeping rather than always null.
@@ -47,10 +51,6 @@ export type SyncOutcome =
       failures: SyncFailure[];
       snapshot: Snapshot | null;
     };
-
-// SyncFault says how a failed pass should be treated by whatever decides when to try again, since
-// a message alone can't answer that; see docs/technical_sync.md for what each value means.
-export type SyncFault = "transient" | "raced" | "permanent";
 
 // adoptLiveStats swaps in the live vault's entry for any manifest entry whose hash still matches,
 // so state.json carries local size and mtime and the next snapshot can stat skip the rehash.
@@ -337,7 +337,7 @@ export async function syncOnce(
   }
 
   // Reported before the first action rather than after it: the plan's size is the answer to "is
-  // this hung", and the first action of a big pull can take longer than the patience it is spending.
+  // this hung", and the first action of a big pull can outlast the patience it is spending.
   onProgress(0, actions.length);
   const executed = await executeSyncPlan(
     actions,

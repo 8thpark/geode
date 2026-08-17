@@ -1041,6 +1041,7 @@ test("executeSyncPlan: a pull stages its payload, then checks cheapest-last, and
     if (key === MANIFEST_KEY) {
       ops.push("checkManifest");
     }
+
     return innerHead(key);
   };
   const manifestHead = await storage.headObject(MANIFEST_KEY);
@@ -1105,6 +1106,7 @@ test("executeSyncPlan: a pull whose local file is edited while the manifest chec
     if (key === MANIFEST_KEY) {
       readerFiles["a.md"] = "edited during the manifest check";
     }
+
     return innerHead(key);
   };
   const remote = snapshot(file("a.md", hash));
@@ -1155,6 +1157,7 @@ test("executeSyncPlan: a pull refused when the edit landing during the manifest 
       readerFiles["a.md"] = "hello werld";
       readerMtimes["a.md"] = 2;
     }
+
     return innerHead(key);
   };
   const remote = snapshot(file("a.md", hash));
@@ -1201,6 +1204,7 @@ test("executeSyncPlan: a pullDelete refused when the edit landing during the man
       readerFiles["a.md"] = "hello werld";
       readerMtimes["a.md"] = 2;
     }
+
     return innerHead(key);
   };
 
@@ -1242,6 +1246,7 @@ test("executeSyncPlan: a pullDelete whose local file is edited while the manifes
     if (key === MANIFEST_KEY) {
       readerFiles["a.md"] = "edited during the manifest check";
     }
+
     return innerHead(key);
   };
 
@@ -1303,6 +1308,7 @@ test("executeSyncPlan: a conflict fetches, stages and checks the manifest before
     if (key === MANIFEST_KEY) {
       ops.push("checkManifest");
     }
+
     return innerHead(key);
   };
   const innerPut = storage.putObject;

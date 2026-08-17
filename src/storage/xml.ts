@@ -49,6 +49,7 @@ export function parseListObjectsXml(xml: string): ParsedListPage {
   if (truncated && token !== "") {
     nextContinuationToken = token;
   }
+
   return {
     ok: true,
     page: { objects, nextContinuationToken },
@@ -88,6 +89,7 @@ function decodeXmlText(text: string): string {
       if (named === "apos") {
         return "'";
       }
+
       return match;
     },
   );
@@ -101,6 +103,7 @@ function fieldFrom(block: string, tag: string): string {
   if (found === null) {
     return "";
   }
+
   return found[1];
 }
 
@@ -118,5 +121,6 @@ function looseTagCount(xml: string, tag: string): number {
   if (found === null) {
     return 0;
   }
+
   return found.length;
 }

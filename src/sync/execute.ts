@@ -21,8 +21,8 @@ const HASH_MISMATCH_MESSAGE = "fetched bytes do not match manifest hash; sync ag
 const MANIFEST_DRIFT_MESSAGE = "changed remotely mid sync; sync again to reconcile";
 const MANIFEST_MISSING_HASH_MESSAGE = "manifest missing expected hash for this path";
 
-// NO_PROGRESS is the default for a caller with nothing watching, so the loop reports unconditionally
-// rather than asking whether anyone is listening.
+// NO_PROGRESS is the default for a caller with nothing watching, so the loop reports
+// unconditionally rather than asking whether anyone is listening.
 const NO_PROGRESS: Progress = () => undefined;
 
 // ExecuteResult reports what executeSyncPlan carried out: completed and failed actions, per file
@@ -440,6 +440,7 @@ function localFailureMessage(err: unknown): string {
   if (err instanceof Error) {
     return err.message;
   }
+
   return "local file operation failed";
 }
 

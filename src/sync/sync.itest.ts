@@ -82,7 +82,10 @@ async function readLocal(d: Device, path: string): Promise<string | undefined> {
 // contentOf returns the payload inside an object's envelope, so an assertion compares content
 // rather than framing. A body that is not a geode object throws, since it can only be a test bug.
 function contentOf(body: Uint8Array | null): string {
-  const opened = unwrapObject(body ?? new Uint8Array());
+  if (body === null) {
+    throw new Error("not a geode object: no body");
+  }
+  const opened = unwrapObject(body);
   if (!opened.ok) {
     throw new Error(`not a geode object: ${opened.reason}`);
   }
@@ -359,6 +362,7 @@ test("sync: two devices syncing at overlapping times never silently delete a fil
           interleaved = true;
           assert.equal((await sync(b)).ok, true);
         }
+
         return storage.putObject(key, body, condition);
       },
     };
@@ -482,7 +486,7 @@ test("sync: an edit on one device and a delete on another preserves the edit as 
   }
 });
 
-test("sync: two devices converge inside a bucket prefix (#154)", async () => {
+test("sync: two devices converge inside a bucket prefix", async () => {
   // The whole spine against a client rooted inside the bucket, which is what proves nothing above
   // the storage client knows a prefix exists.
   await resetRemote();

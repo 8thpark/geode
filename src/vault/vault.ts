@@ -116,6 +116,7 @@ export function byPath(files: FileState[]): Map<string, FileState> {
   for (const file of files) {
     result.set(file.path, file);
   }
+
   return result;
 }
 
@@ -172,15 +173,13 @@ export function decodeSnapshot(raw: string): DecodedSnapshot {
     files.push({ ...file, path });
   }
   const settingsFingerprint = (parsed as { settingsFingerprint?: unknown }).settingsFingerprint;
-  const fingerprintStr = typeof settingsFingerprint === "string" ? settingsFingerprint : undefined;
   const vaultId = (parsed as { vaultId?: unknown }).vaultId;
-  const vaultIdStr = typeof vaultId === "string" ? vaultId : undefined;
   const snapshot: Snapshot = { files };
-  if (fingerprintStr !== undefined) {
-    snapshot.settingsFingerprint = fingerprintStr;
+  if (typeof settingsFingerprint === "string") {
+    snapshot.settingsFingerprint = settingsFingerprint;
   }
-  if (vaultIdStr !== undefined) {
-    snapshot.vaultId = vaultIdStr;
+  if (typeof vaultId === "string") {
+    snapshot.vaultId = vaultId;
   }
 
   return { ok: true, snapshot };
@@ -256,6 +255,7 @@ export async function hashBytes(data: Uint8Array): Promise<string> {
   for (const byte of new Uint8Array(digest)) {
     hex += byte.toString(16).padStart(2, "0");
   }
+
   return hex;
 }
 
@@ -419,7 +419,10 @@ function isSafeAddress(value: unknown): boolean {
 // insensitively and ignoring any extension.
 function isWindowsReservedName(segment: string): boolean {
   const dot = segment.indexOf(".");
-  const base = dot === -1 ? segment : segment.slice(0, dot);
+  let base = segment;
+  if (dot !== -1) {
+    base = segment.slice(0, dot);
+  }
 
   return WINDOWS_RESERVED_NAMES.has(base.toLowerCase());
 }

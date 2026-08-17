@@ -28,6 +28,7 @@ function fakeReader(files: Record<string, { content: string; mtime: number }>): 
       for (const [path, file] of Object.entries(files)) {
         list.push({ path, size: file.content.length, mtime: file.mtime });
       }
+
       return list;
     },
     readFile: async (path) => {
@@ -36,6 +37,7 @@ function fakeReader(files: Record<string, { content: string; mtime: number }>): 
       if (file === undefined) {
         throw new Error(`no such file: ${path}`);
       }
+
       return new TextEncoder().encode(file.content);
     },
     stat: async (path) => {
@@ -43,9 +45,11 @@ function fakeReader(files: Record<string, { content: string; mtime: number }>): 
       if (file === undefined) {
         return { present: false, size: 0, mtime: 0 };
       }
+
       return { present: true, size: file.content.length, mtime: file.mtime };
     },
   };
+
   return { reader, readCount: () => reads };
 }
 
@@ -325,6 +329,7 @@ test("takeSnapshot: concurrency is bounded by the limit", async () => {
       for (const [path, file] of Object.entries(files)) {
         list.push({ path, size: file.content.length, mtime: file.mtime });
       }
+
       return list;
     },
     readFile: async (path) => {
@@ -338,6 +343,7 @@ test("takeSnapshot: concurrency is bounded by the limit", async () => {
       if (file === undefined) {
         throw new Error(`no such file: ${path}`);
       }
+
       return new TextEncoder().encode(file.content);
     },
     stat: async (path) => {
@@ -345,6 +351,7 @@ test("takeSnapshot: concurrency is bounded by the limit", async () => {
       if (file === undefined) {
         return { present: false, size: 0, mtime: 0 };
       }
+
       return { present: true, size: file.content.length, mtime: file.mtime };
     },
   };
@@ -377,7 +384,7 @@ for (const { name, input, want } of normalizePathCases) {
   });
 }
 
-test("takeSnapshot: an NFD path from the reader is recorded as NFC (#134)", async () => {
+test("takeSnapshot: an NFD path from the reader is recorded as NFC", async () => {
   // macOS decomposes filenames to NFD; the reader hands back whatever the platform holds, but the
   // snapshot records the composed form so every device agrees on one identity for the file.
   const { reader } = fakeReader({ "café.md": { content: "hello", mtime: 1 } });
@@ -388,7 +395,7 @@ test("takeSnapshot: an NFD path from the reader is recorded as NFC (#134)", asyn
   assert.equal(snapshot.files[0].path, "café.md");
 });
 
-test("diffSnapshots: an NFC and NFD pair for one file is not a change (#134)", async () => {
+test("diffSnapshots: an NFC and NFD pair for one file is not a change", async () => {
   // The payoff: the same note snapshotted on Linux and then on macOS must not read as a rename,
   // which is a delete plus a create, and would push a duplicate out to every other device.
   const { reader: nfc } = fakeReader({ "café.md": { content: "hello", mtime: 1 } });
@@ -400,7 +407,7 @@ test("diffSnapshots: an NFC and NFD pair for one file is not a change (#134)", a
   assert.deepEqual(diffSnapshots(previous, current), []);
 });
 
-test("decodeSnapshot: an NFD path in a manifest decodes to NFC (#134)", () => {
+test("decodeSnapshot: an NFD path in a manifest decodes to NFC", () => {
   const nfdFile = { path: "café.md", size: 5, mtime: 1, hash: "abc", blob: "abc" };
   const raw = JSON.stringify({ version: SNAPSHOT_VERSION, files: [nfdFile] });
 
@@ -412,7 +419,7 @@ test("decodeSnapshot: an NFD path in a manifest decodes to NFC (#134)", () => {
   }
 });
 
-test("decodeSnapshot: an NFC and NFD entry for one path is refused (#134)", () => {
+test("decodeSnapshot: an NFC and NFD entry for one path is refused", () => {
   // Two entries, one file. Deciding which wins would silently drop an edit, and normalizing them
   // together would leave two manifest rows fighting over the same path on every later pass.
   const nfcFile = { path: "café.md", size: 5, mtime: 1, hash: "abc", blob: "abc" };
@@ -436,7 +443,7 @@ test("decodeSnapshot: a duplicate path is refused even when the content matches"
   assert.deepEqual(decoded, { ok: false, reason: "duplicatePath" });
 });
 
-test("decodeSnapshot: NFC folding happens before the case fold, so both are caught (#134)", () => {
+test("decodeSnapshot: NFC folding happens before the case fold, so both are caught", () => {
   // Normalizing first is what makes the case check mean what it says: on the raw bytes an NFD
   // "Café.md" and an NFC "café.md" fold to different lowercase strings and both slip through.
   const upper = { path: "CAFÉ.md", size: 5, mtime: 1, hash: "abc", blob: "abc" };
@@ -462,6 +469,7 @@ test("takeSnapshot: in-flight bytes are bounded by the byte budget", async () =>
       for (const [path, file] of Object.entries(files)) {
         list.push({ path, size: file.content.length, mtime: file.mtime });
       }
+
       return list;
     },
     readFile: async (path) => {
@@ -483,6 +491,7 @@ test("takeSnapshot: in-flight bytes are bounded by the byte budget", async () =>
       if (file === undefined) {
         return { present: false, size: 0, mtime: 0 };
       }
+
       return { present: true, size: file.content.length, mtime: file.mtime };
     },
   };
@@ -562,6 +571,7 @@ test("takeSnapshot: growth since listing is bounded by the fresh size", async ()
       for (const [path, file] of Object.entries(files)) {
         list.push({ path, size: file.listed, mtime: file.mtime });
       }
+
       return list;
     },
     readFile: async (path) => {
@@ -583,6 +593,7 @@ test("takeSnapshot: growth since listing is bounded by the fresh size", async ()
       if (file === undefined) {
         return { present: false, size: 0, mtime: 0 };
       }
+
       return { present: true, size: file.actual, mtime: file.mtime };
     },
   };

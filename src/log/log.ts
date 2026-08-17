@@ -145,7 +145,24 @@ export function parseLogLine(line: string): LogEntry | undefined {
   if (Number.isNaN(time) || !isLogLevel(rawLevel)) {
     return undefined;
   }
+
   return { time, level: rawLevel, message: unescapeMessage(rest.join("\t")) };
+}
+
+// trimLogLines keeps only the last maxLines lines of a log, dropping the oldest. The result keeps
+// the same trailing newline the input had: appending assumes the file already ends in one, and
+// dropping it here would glue the next appended line onto the last one still kept.
+export function trimLogLines(text: string, maxLines: number): string {
+  const lines = linesOf(text);
+  let kept = lines;
+  if (lines.length > maxLines) {
+    kept = lines.slice(lines.length - maxLines);
+  }
+  if (kept.length === 0) {
+    return "";
+  }
+
+  return `${kept.join("\n")}\n`;
 }
 
 // unescapeMessage reverses escapeMessage. Unlike escape, unescape must
@@ -175,21 +192,6 @@ export function unescapeMessage(msg: string): string {
   return result;
 }
 
-// trimLogLines keeps only the last maxLines lines of a log, dropping the oldest. The result keeps
-// the same trailing newline the input had: appending assumes the file already ends in one, and
-// dropping it here would glue the next appended line onto the last one still kept.
-export function trimLogLines(text: string, maxLines: number): string {
-  const lines = linesOf(text);
-  let kept = lines;
-  if (lines.length > maxLines) {
-    kept = lines.slice(lines.length - maxLines);
-  }
-  if (kept.length === 0) {
-    return "";
-  }
-  return `${kept.join("\n")}\n`;
-}
-
 // consoleFor returns the console method matching level, so console and persisted output agree on
 // severity.
 function consoleFor(level: LogLevel): (message: string) => void {
@@ -199,6 +201,7 @@ function consoleFor(level: LogLevel): (message: string) => void {
   if (level === "error") {
     return (message) => console.error(message);
   }
+
   return (message) => console.log(message);
 }
 
@@ -217,6 +220,7 @@ function linesOf(text: string): string[] {
   if (parts[parts.length - 1] === "") {
     return parts.slice(0, -1);
   }
+
   return parts;
 }
 

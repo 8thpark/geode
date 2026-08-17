@@ -18,6 +18,7 @@ function fakeAdapter(seed: Record<string, string> = {}): DataAdapter {
       if (content === undefined) {
         throw new Error(`no such file: ${path}`);
       }
+
       return content;
     },
     write: async (path: string, data: string) => {
@@ -32,6 +33,7 @@ function fakeAdapter(seed: Record<string, string> = {}): DataAdapter {
       files.set(newPath, data);
     },
   };
+
   return adapter as unknown as DataAdapter;
 }
 
@@ -390,7 +392,7 @@ test("createObsidianStore: a well shaped snapshot round-trips through write and 
   assert.deepEqual(await store.read(), want);
 });
 
-test("createObsidianStore: an interrupted write leaves the previous state.json untouched, never torn (#136)", async () => {
+test("createObsidianStore: an interrupted write leaves the previous state.json untouched, never torn", async () => {
   // The write must be staged and installed via rename, the same atomic pattern pulled vault
   // content already uses, so a failure between the two steps never leaves a half written file for
   // the next sync to misread as a corrupt or empty ancestor.
@@ -422,7 +424,7 @@ test("createObsidianStore: a fingerprint mismatch reads back as empty", async ()
   assert.deepEqual(await store2.read(), { files: [] });
 });
 
-test("createObsidianStore: repointing at a bucket prefix reads back as empty (#154)", async () => {
+test("createObsidianStore: repointing at a bucket prefix reads back as empty", async () => {
   // A prefix is where the vault lives, so moving it lands on a folder with its own manifest and its
   // own sentinel. Carrying the old ancestor across would diff this vault against a stranger's.
   const adapter = fakeAdapter();
@@ -437,7 +439,7 @@ test("createObsidianStore: repointing at a bucket prefix reads back as empty (#1
   assert.deepEqual(await store2.read(), { files: [] });
 });
 
-test("fingerprintSettings: a prefix only written differently is the same target (#154)", () => {
+test("fingerprintSettings: a prefix only written differently is the same target", () => {
   // The prefix is stored exactly as typed, so the same folder can be spelled several ways. Treating
   // those as different targets would throw away a good ancestor and force a full re-hash over a
   // trailing slash.
@@ -501,9 +503,11 @@ function fakeWorkspace(views: unknown[]): Workspace {
       if (type !== "markdown") {
         return [];
       }
+
       return views.map((view) => ({ view }));
     },
   };
+
   return workspace as unknown as Workspace;
 }
 
