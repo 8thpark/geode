@@ -279,9 +279,9 @@ function conditionHeaders(condition: PutCondition | undefined): Record<string, s
   return { "If-Match": condition.etag };
 }
 
-// missingFieldFor returns the name of the first field testConnection needs but doesn't have, or
-// "" when everything required is present; R2 derives endpoint and region from the account ID and
-// Amazon S3 from the region, so only MinIO and a custom provider need both explicitly.
+// missingFieldFor returns the name of the first field testConnection needs but doesn't have, or ""
+// when everything required is present; only a custom provider needs both an endpoint and a region,
+// since every other provider derives at least one of them.
 function missingFieldFor(settings: GeodeSettings, secretAccessKey: string): string {
   if (bucketFor(settings) === "") {
     return "bucket";

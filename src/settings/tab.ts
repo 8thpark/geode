@@ -162,31 +162,33 @@ function renderActions(tab: GeodeSettingTab, containerEl: HTMLElement): void {
   tab.refreshActionsUI();
 }
 
-// renderEndpointAndRegion draws the endpoint and region fields an S3 compatible provider whose
-// endpoint is typed rather than derived needs, with copy tailored to that provider.
-function renderEndpointAndRegion(
+// renderEndpointField draws the endpoint field an S3 compatible provider whose endpoint is typed
+// rather than derived needs, with copy tailored to that provider.
+function renderEndpointField(
   tab: GeodeSettingTab,
   containerEl: HTMLElement,
-  endpointDesc: string,
-  endpointPlaceholder: string,
-  regionDesc: string,
+  desc: string,
+  placeholder: string,
 ): void {
   new Setting(containerEl)
     .setName("Endpoint")
-    .setDesc(endpointDesc)
+    .setDesc(desc)
     .addText((text) =>
       text
-        .setPlaceholder(endpointPlaceholder)
+        .setPlaceholder(placeholder)
         .setValue(tab.draft.endpoint)
         .onChange((value) => {
           tab.draft.endpoint = value;
           onFieldChanged(tab);
         }),
     );
+}
 
+// renderRegionField draws the signing region field, for the providers that can't derive one.
+function renderRegionField(tab: GeodeSettingTab, containerEl: HTMLElement, desc: string): void {
   new Setting(containerEl)
     .setName("Region")
-    .setDesc(regionDesc)
+    .setDesc(desc)
     .addText((text) =>
       text
         .setPlaceholder("us-east-1")
@@ -247,39 +249,28 @@ function renderProviderFields(tab: GeodeSettingTab, containerEl: HTMLElement): v
   }
 
   if (tab.draft.provider === "s3") {
-    new Setting(containerEl)
-      .setName("Region")
-      .setDesc("The AWS region your bucket lives in.")
-      .addText((text) =>
-        text
-          .setPlaceholder("us-east-1")
-          .setValue(tab.draft.region)
-          .onChange((value) => {
-            tab.draft.region = value;
-            onFieldChanged(tab);
-          }),
-      );
+    renderRegionField(tab, containerEl, "The AWS region your bucket lives in.");
     return;
   }
 
+  // MinIO signs with its own default region, so it asks for nothing but the endpoint.
   if (tab.draft.provider === "minio") {
-    renderEndpointAndRegion(
+    renderEndpointField(
       tab,
       containerEl,
       "Your MinIO server's S3 endpoint URL.",
       "https://minio.example.com",
-      "The region your MinIO bucket lives in.",
     );
     return;
   }
 
-  renderEndpointAndRegion(
+  renderEndpointField(
     tab,
     containerEl,
     "The S3 compatible endpoint URL for your storage.",
     "https://s3.example.com",
-    "The region your bucket lives in.",
   );
+  renderRegionField(tab, containerEl, "The region your bucket lives in.");
 }
 
 // renderSecretRow draws the secret access key control; SecretComponent can't force a new entry

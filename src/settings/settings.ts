@@ -11,6 +11,10 @@ export const DEFAULT_SETTINGS: GeodeSettings = {
   secretId: "",
 };
 
+// MINIO_REGION is the region MinIO signs with out of the box; it ignores the value entirely unless
+// the server sets MINIO_REGION, so asking the user for one buys nothing.
+export const MINIO_REGION = "us-east-1";
+
 // ConnectionStatus is the current in-memory state of a Test Connection check.
 export type ConnectionStatus = "unknown" | "checking" | "ok" | "error";
 
@@ -21,6 +25,8 @@ export type GeodeSettings = {
   provider: Provider;
   accountId: string;
   endpoint: string;
+  // region is the signing region for Amazon S3 and a custom provider; R2 and MinIO supply their
+  // own, so the value is left untouched while one of those is selected.
   region: string;
   bucket: string;
   // prefix is the folder inside the bucket the vault lives under, stored exactly as typed and
@@ -115,7 +121,8 @@ export function hasConnectionConfig(settings: GeodeSettings): boolean {
     return isAwsRegion(regionFor(settings));
   }
 
-  // MinIO and a custom provider both take their endpoint as typed, with a region for signing.
+  // MinIO and a custom provider both take their endpoint as typed; only the custom one also needs
+  // a region, which regionFor supplies for MinIO.
   return normalizeEndpoint(settings.endpoint) !== "" && regionFor(settings) !== "";
 }
 
@@ -245,10 +252,14 @@ export function providerOr(v: unknown): Provider {
 }
 
 // regionFor returns the signing region for settings, trimmed at the point of use; R2 always signs
-// with "auto", so Amazon S3, MinIO, and a custom provider need one specified.
+// with "auto" and MinIO with its own default, so only Amazon S3 and a custom provider need one
+// specified. A MinIO server pinned to another region is a custom provider.
 export function regionFor(settings: GeodeSettings): string {
   if (settings.provider === "r2") {
     return "auto";
+  }
+  if (settings.provider === "minio") {
+    return MINIO_REGION;
   }
 
   return settings.region.trim();
