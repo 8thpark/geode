@@ -117,7 +117,7 @@
 
 .geode-log-row {
   display: flex;
-  gap: 0.75em;
+  gap: 0.6em;
   align-items: baseline;
   padding: 0.35em 0.5em;
   border-radius: var(--radius-s, 4px);
@@ -133,9 +133,9 @@
   color: var(--text-faint);
 }
 
+/* Every level tag is three letters, so a single space column keeps messages aligned. */
 .geode-log-level {
   flex-shrink: 0;
-  width: 4em;
   font-weight: 700;
 }
 

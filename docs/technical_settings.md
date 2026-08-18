@@ -25,7 +25,7 @@ Settings persist to `data.json` in the plugin's own folder.
 | `provider`    | `r2`, `s3`, `custom`, or `minio`                              |
 | `accountId`   | Cloudflare account, which R2 derives endpoint and region from  |
 | `endpoint`    | The S3 compatible endpoint, for a MinIO or custom provider     |
-| `region`      | The region, for Amazon S3, a MinIO server, or a custom provider |
+| `region`      | The region, for Amazon S3 or a custom provider                 |
 | `bucket`      | The bucket name                                                |
 | `prefix`      | The folder inside the bucket the vault lives under             |
 | `accessKeyId` | The access key                                                 |
@@ -45,13 +45,14 @@ is the same S3 API for all four.
 | ------------------ | --------------------------------- | --------------------- |
 | `r2` Cloudflare R2 | Derived from `accountId`          | Always `auto`         |
 | `s3` Amazon S3     | Derived from `region`             | The `region` as typed |
-| `minio` MinIO      | Typed in full                     | The `region` as typed |
+| `minio` MinIO      | Typed in full                     | Always `us-east-1`    |
 | `custom`           | Typed in full                     | The `region` as typed |
 
-MinIO is a real provider for the self-hosted audience the project serves: pick it, type your server's
-endpoint, and the region it signs with (usually `us-east-1`). Custom only appears in development
-builds, where esbuild defines `NODE_ENV`. It exists as an escape hatch for any other S3 compatible
-endpoint, while the named providers cover the setups worth naming.
+MinIO is a real provider for the self-hosted audience the project serves: pick it, type your
+server's endpoint, and you're done. It asks for no region, because MinIO ignores the one it is sent
+unless the server sets `MINIO_REGION`; a server pinned to another region is a custom provider.
+Custom only appears in development builds, where esbuild defines `NODE_ENV`. It exists as an escape
+hatch for any other S3 compatible endpoint, while the named providers cover the setups worth naming.
 
 Amazon S3 puts the region straight into the endpoint host, so the region is the endpoint. A value
 carrying URL authority delimiters, `x@attacker.example:443#`, would otherwise send signed requests

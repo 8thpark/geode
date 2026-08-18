@@ -31,7 +31,6 @@ const liveSettings: GeodeSettings = {
   ...DEFAULT_SETTINGS,
   provider: "minio",
   endpoint: "http://localhost:4568",
-  region: "us-east-1",
   // This file owns the bucket outright, since a first sync refuses over blobs it cannot explain
   // and a shared bucket's leftovers would eventually trip that.
   bucket: "geode-sync-test",

@@ -11,7 +11,6 @@ const liveSettings: GeodeSettings = {
   ...DEFAULT_SETTINGS,
   provider: "minio",
   endpoint: "http://localhost:4568",
-  region: "us-east-1",
   bucket: "geode-test",
   accessKeyId: "geodedev",
 };

@@ -174,24 +174,11 @@ const missingFieldCases: {
     settings: {
       ...DEFAULT_SETTINGS,
       provider: "minio",
-      region: "us-east-1",
       bucket: "my-vault",
       accessKeyId: "AKIA123",
     },
     secretAccessKey: "shh",
     want: "Fill in endpoint first",
-  },
-  {
-    name: "missing region for minio",
-    settings: {
-      ...DEFAULT_SETTINGS,
-      provider: "minio",
-      endpoint: "http://localhost:9000",
-      bucket: "my-vault",
-      accessKeyId: "AKIA123",
-    },
-    secretAccessKey: "shh",
-    want: "Fill in region first",
   },
   {
     name: "whitespace only endpoint for minio",
@@ -199,25 +186,11 @@ const missingFieldCases: {
       ...DEFAULT_SETTINGS,
       provider: "minio",
       endpoint: "   ",
-      region: "us-east-1",
       bucket: "my-vault",
       accessKeyId: "AKIA123",
     },
     secretAccessKey: "shh",
     want: "Fill in endpoint first",
-  },
-  {
-    name: "whitespace only region for minio",
-    settings: {
-      ...DEFAULT_SETTINGS,
-      provider: "minio",
-      endpoint: "http://localhost:9000",
-      region: "   ",
-      bucket: "my-vault",
-      accessKeyId: "AKIA123",
-    },
-    secretAccessKey: "shh",
-    want: "Fill in region first",
   },
 ];
 

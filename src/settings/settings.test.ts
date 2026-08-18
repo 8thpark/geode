@@ -13,6 +13,7 @@ import {
   hasConnectionConfig,
   isAwsRegion,
   isCurrentConnectionResult,
+  MINIO_REGION,
   normalizePrefix,
   normalizeSettings,
   prefixError,
@@ -396,6 +397,11 @@ const regionCases: { name: string; input: GeodeSettings; want: string }[] = [
     input: { ...DEFAULT_SETTINGS, provider: "custom", region: "  eu-west-2  " },
     want: "eu-west-2",
   },
+  {
+    name: "minio signs with its own region, ignoring a stale configured one",
+    input: { ...DEFAULT_SETTINGS, provider: "minio", region: "eu-west-2" },
+    want: MINIO_REGION,
+  },
 ];
 
 for (const { name, input, want } of regionCases) {
@@ -547,19 +553,25 @@ for (const { name, input, want } of prefixErrorCases) {
 
 test("providerOptions: production excludes the custom provider", () => {
   assert.deepStrictEqual(providerOptions(false), {
+    minio: "MinIO",
     r2: "Cloudflare R2",
     s3: "Amazon S3",
-    minio: "MinIO",
   });
 });
 
 test("providerOptions: local development includes the custom provider", () => {
   assert.deepStrictEqual(providerOptions(true), {
+    minio: "MinIO",
     r2: "Cloudflare R2",
     s3: "Amazon S3",
-    minio: "MinIO",
     custom: "Custom",
   });
+});
+
+// The dropdown renders in insertion order, so the order itself is part of the contract.
+test("providerOptions: lists providers in the order they are offered", () => {
+  assert.deepStrictEqual(Object.keys(providerOptions(false)), ["minio", "r2", "s3"]);
+  assert.deepStrictEqual(Object.keys(providerOptions(true)), ["minio", "r2", "s3", "custom"]);
 });
 
 const settingsEqualCases: { name: string; a: GeodeSettings; b: GeodeSettings; want: boolean }[] = [
@@ -743,7 +755,6 @@ const hasConnectionConfigCases: { name: string; input: GeodeSettings; want: bool
     input: {
       ...DEFAULT_SETTINGS,
       provider: "minio",
-      region: "us-east-1",
       bucket: "b",
       accessKeyId: "a",
       secretId: "s",
@@ -751,24 +762,11 @@ const hasConnectionConfigCases: { name: string; input: GeodeSettings; want: bool
     want: false,
   },
   {
-    name: "minio missing region is incomplete",
+    name: "minio needs no region of its own",
     input: {
       ...DEFAULT_SETTINGS,
       provider: "minio",
       endpoint: "http://localhost:9000",
-      bucket: "b",
-      accessKeyId: "a",
-      secretId: "s",
-    },
-    want: false,
-  },
-  {
-    name: "minio with all fields is complete",
-    input: {
-      ...DEFAULT_SETTINGS,
-      provider: "minio",
-      endpoint: "http://localhost:9000",
-      region: "us-east-1",
       bucket: "b",
       accessKeyId: "a",
       secretId: "s",
@@ -781,20 +779,6 @@ const hasConnectionConfigCases: { name: string; input: GeodeSettings; want: bool
       ...DEFAULT_SETTINGS,
       provider: "minio",
       endpoint: "   ",
-      region: "us-east-1",
-      bucket: "b",
-      accessKeyId: "a",
-      secretId: "s",
-    },
-    want: false,
-  },
-  {
-    name: "minio with a whitespace only region is incomplete",
-    input: {
-      ...DEFAULT_SETTINGS,
-      provider: "minio",
-      endpoint: "http://localhost:9000",
-      region: "   ",
       bucket: "b",
       accessKeyId: "a",
       secretId: "s",
