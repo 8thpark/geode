@@ -1,3 +1,12 @@
+// LEVEL_LABELS are the tags the log view shows, all three letters so every message starts in the
+// same column without the level needing a fixed width column of its own.
+const LEVEL_LABELS: Record<LogLevel, string> = {
+  debug: "DBG",
+  info: "INF",
+  warn: "WRN",
+  error: "ERR",
+};
+
 const LEVEL_ORDER: Record<LogLevel, number> = {
   debug: 0,
   info: 1,
@@ -129,9 +138,25 @@ export function formatLogLine(entry: LogEntry): string {
   return `${new Date(entry.time).toISOString()}\t${entry.level}\t${escapeMessage(entry.message)}`;
 }
 
+// formatTime renders a timestamp for the log view as "YY/MM/DD HH:MM:SS" in local time; every part
+// is fixed width, so rows line up and the clock, the part actually read, stays short.
+export function formatTime(time: number): string {
+  const at = new Date(time);
+  const year = pad2(at.getFullYear() % 100);
+  const date = `${year}/${pad2(at.getMonth() + 1)}/${pad2(at.getDate())}`;
+  const clock = `${pad2(at.getHours())}:${pad2(at.getMinutes())}:${pad2(at.getSeconds())}`;
+
+  return `${date} ${clock}`;
+}
+
 // levelEnabled reports whether a message at level should be logged when the minimum is minLevel.
 export function levelEnabled(level: LogLevel, minLevel: LogLevel): boolean {
   return LEVEL_ORDER[level] >= LEVEL_ORDER[minLevel];
+}
+
+// levelLabel returns the tag the log view shows for level.
+export function levelLabel(level: LogLevel): string {
+  return LEVEL_LABELS[level];
 }
 
 // parseLogLine reverses formatLogLine. A malformed line (a corrupt or truncated file) is dropped
@@ -235,4 +260,9 @@ function notify(listener: LogListener | undefined, entry: LogEntry): void {
   } catch (err) {
     console.error(`geode: log listener failed: ${err}`);
   }
+}
+
+// pad2 renders a date or clock part as two digits, so every timestamp is the same width.
+function pad2(value: number): string {
+  return String(value).padStart(2, "0");
 }

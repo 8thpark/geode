@@ -58,6 +58,16 @@ perfectly ordinary idle poll comes to look like a hang.
 
 A pane rendering the persisted log, most recent first, updating live as entries arrive.
 
+Every row is a fixed width local timestamp, a three letter level, then the message:
+
+```
+26/08/18 08:21:36 ERR connection test failed
+26/08/18 08:21:36 INF testing connection
+```
+
+Both leading parts are the same width on every row, so the messages line up as a column and the
+level reads as colour and shape long before it is read as a word.
+
 It is always a straight render of what the sink holds: every change re-reads and redraws rather than
 mutating the DOM in place. Read only, with no way to write entries, only to display what the sink
 recorded.

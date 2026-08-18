@@ -5,8 +5,11 @@ import {
   createLogger,
   createMemorySink,
   formatLogLine,
+  formatTime,
   type LogEntry,
+  type LogLevel,
   levelEnabled,
+  levelLabel,
   parseLogLine,
   trimLogLines,
 } from "./log.ts";
@@ -166,6 +169,46 @@ const levelEnabledCases: {
 for (const { level, minLevel, want } of levelEnabledCases) {
   test(`levelEnabled: ${level} at minimum ${minLevel}`, () => {
     assert.equal(levelEnabled(level, minLevel), want);
+  });
+}
+
+// Local time in, local time out: the cases build their Date from parts rather than an ISO string,
+// so they assert the same thing in every timezone the tests run in.
+const formatTimeCases: { name: string; at: Date; want: string }[] = [
+  {
+    name: "two digit parts are rendered as typed",
+    at: new Date(2026, 7, 18, 18, 21, 36),
+    want: "26/08/18 18:21:36",
+  },
+  {
+    name: "single digit parts are padded",
+    at: new Date(2026, 0, 2, 3, 4, 5),
+    want: "26/01/02 03:04:05",
+  },
+  {
+    name: "a year ending in a single digit keeps its leading zero",
+    at: new Date(2005, 10, 30, 23, 59, 59),
+    want: "05/11/30 23:59:59",
+  },
+];
+
+for (const { name, at, want } of formatTimeCases) {
+  test(`formatTime: ${name}`, () => {
+    assert.equal(formatTime(at.getTime()), want);
+  });
+}
+
+const levelLabelCases: { level: LogLevel; want: string }[] = [
+  { level: "debug", want: "DBG" },
+  { level: "info", want: "INF" },
+  { level: "warn", want: "WRN" },
+  { level: "error", want: "ERR" },
+];
+
+for (const { level, want } of levelLabelCases) {
+  test(`levelLabel: ${level}`, () => {
+    assert.equal(levelLabel(level), want);
+    assert.equal(want.length, 3);
   });
 }
 

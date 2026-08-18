@@ -1,5 +1,5 @@
 import { ItemView, type WorkspaceLeaf } from "obsidian";
-import type { LogBus, LogEntry, LogSink } from "./log.ts";
+import { formatTime, type LogBus, type LogEntry, type LogSink, levelLabel } from "./log.ts";
 import { nextRender, selectionOverlaps } from "./selection.ts";
 
 // LOG_VIEW_TYPE identifies geode's log pane to Obsidian's workspace leaf API.
@@ -24,8 +24,8 @@ function renderLogView(containerEl: HTMLElement, entries: LogEntry[]): void {
 // renderRow draws one entry into list, colour coded by level via a geode-log-row.is-<level> class.
 function renderRow(list: HTMLElement, entry: LogEntry): void {
   const row = list.createDiv({ cls: `geode-log-row is-${entry.level}` });
-  row.createSpan({ cls: "geode-log-time", text: new Date(entry.time).toLocaleString() });
-  row.createSpan({ cls: "geode-log-level", text: entry.level.toUpperCase() });
+  row.createSpan({ cls: "geode-log-time", text: formatTime(entry.time) });
+  row.createSpan({ cls: "geode-log-level", text: levelLabel(entry.level) });
   row.createSpan({ cls: "geode-log-message", text: entry.message });
 }
 
