@@ -77,6 +77,7 @@ export function createObsidianReader(vault: Vault, ignorePatterns: string[]): Re
           });
         }
       }
+
       return files;
     },
     readFile: async (path) => {
@@ -96,6 +97,7 @@ export function createObsidianReader(vault: Vault, ignorePatterns: string[]): Re
       if (file === null) {
         return { present: false, size: 0, mtime: 0 };
       }
+
       return { present: true, size: file.stat.size, mtime: file.stat.mtime };
     },
   };
@@ -170,7 +172,10 @@ async function ensureParentDir(adapter: DataAdapter, path: string): Promise<void
   const dir = path.slice(0, lastSlash);
   let current = "";
   for (const segment of dir.split("/")) {
-    current = current === "" ? segment : `${current}/${segment}`;
+    if (current !== "") {
+      current += "/";
+    }
+    current += segment;
     const exists = await adapter.exists(current);
     if (!exists) {
       await adapter.mkdir(current);
@@ -184,28 +189,6 @@ function hiddenSiblingPath(path: string, suffix: string): string {
   const lastSlash = path.lastIndexOf("/");
 
   return `${path.slice(0, lastSlash + 1)}.${path.slice(lastSlash + 1)}${suffix}`;
-}
-
-// replaceViaAside installs a staged file where rename refuses to overwrite, never deleting the
-// destination's bytes while a restore is still possible.
-async function replaceViaAside(
-  adapter: DataAdapter,
-  tempPath: string,
-  path: string,
-): Promise<void> {
-  const asidePath = hiddenSiblingPath(path, ".geode-old");
-  const leftover = await adapter.exists(asidePath);
-  if (leftover) {
-    await adapter.remove(asidePath);
-  }
-  await adapter.rename(path, asidePath);
-  try {
-    await adapter.rename(tempPath, path);
-  } catch (err) {
-    await adapter.rename(asidePath, path);
-    throw err;
-  }
-  await adapter.remove(asidePath);
 }
 
 // installStaged renames a staged file onto its destination, so a crash leaves that destination
@@ -235,4 +218,26 @@ async function installStaged(
     }
     await replaceViaAside(adapter, tempPath, path);
   }
+}
+
+// replaceViaAside installs a staged file where rename refuses to overwrite, never deleting the
+// destination's bytes while a restore is still possible.
+async function replaceViaAside(
+  adapter: DataAdapter,
+  tempPath: string,
+  path: string,
+): Promise<void> {
+  const asidePath = hiddenSiblingPath(path, ".geode-old");
+  const leftover = await adapter.exists(asidePath);
+  if (leftover) {
+    await adapter.remove(asidePath);
+  }
+  await adapter.rename(path, asidePath);
+  try {
+    await adapter.rename(tempPath, path);
+  } catch (err) {
+    await adapter.rename(asidePath, path);
+    throw err;
+  }
+  await adapter.remove(asidePath);
 }

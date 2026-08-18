@@ -2,7 +2,7 @@
 main.js
 /dist/
 
-# Dev vault (created by `make create-dev-vault`)
+# Dev vault (created by `npm run create-dev-vault`)
 /dev-vault/
 /data.json
 /state.json

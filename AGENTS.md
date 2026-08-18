@@ -58,7 +58,7 @@ via relevent simple diagrams.
 Less is always more, simple is always better, boring is best, avoid the magic! Whilst still meeting
 requirements, being secure, and delivering value to our users.
 
-## Code Style
+## Code Style & Implementation
 
 The `typescript-as-go` skill (`.agents/skills/typescript-as-go/SKILL.md`) is the source of truth for
 how TypeScript is written here, comments included. Abide by every rule in it, no exceptions, and
@@ -72,3 +72,7 @@ Additional rules for the project:
    class; the plugin class is the one default export Obsidian requires
 3. Framework code stays thin glue; logic lives in pure modules that never import `obsidian`
 4. `erasableSyntaxOnly` in tsconfig enforces strippable syntax
+
+Also adhere to the `ponytail` skill (`.agents/skills/ponytail/SKILL.md`) when writing code and
+planning/making changes, to ensure that this is a codebase without bloat. The rules in this skill
+come second to the ones above and in the `typescript-as-go` skill.

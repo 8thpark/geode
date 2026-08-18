@@ -7,9 +7,9 @@ import {
   SecretComponent,
   Setting,
 } from "obsidian";
-import type GeodePlugin from "../main";
-import { obsidianTransport } from "../storage/obsidian";
-import { testConnection } from "../storage/storage";
+import type GeodePlugin from "../main.ts";
+import { obsidianTransport } from "../storage/obsidian.ts";
+import { testConnection } from "../storage/storage.ts";
 import {
   type ConnectionStatus,
   canSave,
@@ -22,7 +22,7 @@ import {
   providerOr,
   saveDraft,
   settingsEqual,
-} from "./settings";
+} from "./settings.ts";
 
 // DEBUG_LABEL_WIDTH is the column width debug info labels are padded to, so values line up.
 const DEBUG_LABEL_WIDTH = 12;
@@ -47,6 +47,7 @@ function connectionMessageFor(tab: GeodeSettingTab): string {
   if (tab.connectionStatus === "error") {
     return tab.connectionMessage;
   }
+
   return "Not tested yet";
 }
 
@@ -59,6 +60,7 @@ function connectionSummary(tab: GeodeSettingTab): string {
   if (tab.connectionStatus === "unknown") {
     return "";
   }
+
   return tab.connectionStatus;
 }
 
@@ -116,6 +118,7 @@ function platformLabel(): string {
   if (Platform.isAndroidApp) {
     return "Android";
   }
+
   return "Unknown";
 }
 
@@ -300,6 +303,7 @@ function renderSecretRow(tab: GeodeSettingTab, containerEl: HTMLElement): void {
       if (button !== null) {
         button.textContent = "Add secret";
       }
+
       return component;
     });
 }

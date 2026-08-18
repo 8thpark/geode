@@ -15,9 +15,6 @@ export const DEFAULT_SETTINGS: GeodeSettings = {
 // ConnectionStatus is the current in-memory state of a Test Connection check.
 export type ConnectionStatus = "unknown" | "checking" | "ok" | "error";
 
-// Provider identifies a supported S3 compatible storage configuration.
-export type Provider = "r2" | "s3" | "custom" | "minio";
-
 // GeodeSettings is the persisted shape of a Geode plugin's user configuration; see
 // docs/technical_settings.md for why each field is normalized where it is used rather than saved.
 export type GeodeSettings = {
@@ -38,6 +35,9 @@ export type GeodeSettings = {
   // The built-in local_ prefix convention is always applied regardless of this list.
   ignorePatterns: string[];
 };
+
+// Provider identifies a supported S3 compatible storage configuration.
+export type Provider = "r2" | "s3" | "custom" | "minio";
 
 // SaveTarget is the narrow persistence surface needed to save a settings draft.
 export type SaveTarget = {
@@ -85,30 +85,8 @@ export function draftForDisplay(
   if (auto) {
     return { ...savedSettings };
   }
+
   return currentDraft;
-}
-
-// normalizeEndpoint ensures the endpoint has an explicit scheme and no trailing slash.
-export function normalizeEndpoint(endpoint: string): string {
-  let normalized = endpoint.trim();
-  if (!normalized) {
-    return "";
-  }
-
-  // Require an explicit scheme to prevent generic network errors
-  const hasScheme =
-    normalized.toLowerCase().startsWith("http://") ||
-    normalized.toLowerCase().startsWith("https://");
-  if (!hasScheme) {
-    normalized = `https://${normalized}`;
-  }
-
-  // Strip trailing slashes to prevent double-slash SigV4 canonical path issues
-  while (normalized.endsWith("/")) {
-    normalized = normalized.slice(0, -1);
-  }
-
-  return normalized;
 }
 
 // endpointFor returns the storage endpoint URL for settings, or "" when none can be derived; an
@@ -140,6 +118,7 @@ export function hasConnectionConfig(settings: GeodeSettings): boolean {
   if (settings.provider === "s3") {
     return isAwsRegion(regionFor(settings));
   }
+
   // MinIO and a custom provider both take their endpoint as typed, with a region for signing.
   return normalizeEndpoint(settings.endpoint) !== "" && regionFor(settings) !== "";
 }
@@ -162,6 +141,29 @@ export function isCurrentConnectionResult(
   }
 
   return settingsEqual(testedSettings, currentSettings);
+}
+
+// normalizeEndpoint ensures the endpoint has an explicit scheme and no trailing slash.
+export function normalizeEndpoint(endpoint: string): string {
+  let normalized = endpoint.trim();
+  if (normalized === "") {
+    return "";
+  }
+
+  // Require an explicit scheme to prevent generic network errors
+  const hasScheme =
+    normalized.toLowerCase().startsWith("http://") ||
+    normalized.toLowerCase().startsWith("https://");
+  if (!hasScheme) {
+    normalized = `https://${normalized}`;
+  }
+
+  // Strip trailing slashes to prevent double-slash SigV4 canonical path issues
+  while (normalized.endsWith("/")) {
+    normalized = normalized.slice(0, -1);
+  }
+
+  return normalized;
 }
 
 // normalizePrefix returns the canonical bucket key prefix: whitespace trimmed and empty segments
@@ -243,6 +245,7 @@ export function providerOr(v: unknown): Provider {
   if (v === "s3" || v === "custom" || v === "minio") {
     return v;
   }
+
   return "r2";
 }
 
@@ -320,6 +323,7 @@ function stringOr(v: unknown, fallback: string): string {
   if (typeof v === "string") {
     return v;
   }
+
   return fallback;
 }
 
