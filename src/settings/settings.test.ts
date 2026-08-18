@@ -547,19 +547,25 @@ for (const { name, input, want } of prefixErrorCases) {
 
 test("providerOptions: production excludes the custom provider", () => {
   assert.deepStrictEqual(providerOptions(false), {
+    minio: "MinIO",
     r2: "Cloudflare R2",
     s3: "Amazon S3",
-    minio: "MinIO",
   });
 });
 
 test("providerOptions: local development includes the custom provider", () => {
   assert.deepStrictEqual(providerOptions(true), {
+    minio: "MinIO",
     r2: "Cloudflare R2",
     s3: "Amazon S3",
-    minio: "MinIO",
     custom: "Custom",
   });
+});
+
+// The dropdown renders in insertion order, so the order itself is part of the contract.
+test("providerOptions: lists providers in the order they are offered", () => {
+  assert.deepStrictEqual(Object.keys(providerOptions(false)), ["minio", "r2", "s3"]);
+  assert.deepStrictEqual(Object.keys(providerOptions(true)), ["minio", "r2", "s3", "custom"]);
 });
 
 const settingsEqualCases: { name: string; a: GeodeSettings; b: GeodeSettings; want: boolean }[] = [

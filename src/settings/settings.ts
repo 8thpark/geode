@@ -225,14 +225,14 @@ export function prefixError(raw: string): string {
 export function providerOptions(localDev: boolean): Record<string, string> {
   if (localDev) {
     return {
+      minio: "MinIO",
       r2: "Cloudflare R2",
       s3: "Amazon S3",
-      minio: "MinIO",
       custom: "Custom",
     };
   }
 
-  return { r2: "Cloudflare R2", s3: "Amazon S3", minio: "MinIO" };
+  return { minio: "MinIO", r2: "Cloudflare R2", s3: "Amazon S3" };
 }
 
 // providerOr returns a known provider, defaulting unknown values to "r2".
