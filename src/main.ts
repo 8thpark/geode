@@ -340,7 +340,10 @@ export default class GeodePlugin extends Plugin {
   private onboardingActions(): Actions {
     return {
       localPaths: async () => {
-        const files = await createObsidianReader(this.app.vault).listFiles();
+        const files = await createObsidianReader(
+          this.app.vault,
+          this.settings.ignorePatterns,
+        ).listFiles();
         const paths: string[] = [];
         for (const file of files) {
           paths.push(file.path);
@@ -574,7 +577,7 @@ export default class GeodePlugin extends Plugin {
       `${dir}/state.json`,
       this.settings,
     );
-    const reader = createObsidianReader(this.app.vault);
+    const reader = createObsidianReader(this.app.vault, this.settings.ignorePatterns);
     const localWriter = createObsidianLocalWriter(this.app.vault.adapter);
 
     // Flush every open editor to disk right before the snapshot below reads the vault, so a file

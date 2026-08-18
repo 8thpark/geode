@@ -57,7 +57,7 @@ function newDevice(settings: GeodeSettings = liveSettings): Device {
   const { vault, adapter } = nodeVault(root);
   return {
     root,
-    reader: createObsidianReader(vault),
+    reader: createObsidianReader(vault, liveSettings.ignorePatterns),
     writer: createObsidianLocalWriter(adapter),
     stateStore: createObsidianStore(adapter, STATE_PATH, settings),
   };

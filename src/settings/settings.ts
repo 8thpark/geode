@@ -9,6 +9,7 @@ export const DEFAULT_SETTINGS: GeodeSettings = {
   prefix: "",
   accessKeyId: "",
   secretId: "",
+  ignorePatterns: [],
 };
 
 // ConnectionStatus is the current in-memory state of a Test Connection check.
@@ -30,6 +31,9 @@ export type GeodeSettings = {
   // secretId is a SecretStorage reference name, not the secret value itself; Obsidian's picker
   // won't force a new entry onto a fixed ID, so we remember whichever name was picked.
   secretId: string;
+  // ignorePatterns is a list of glob patterns for vault paths that should be excluded from sync.
+  // The built-in local_ prefix convention is always applied regardless of this list.
+  ignorePatterns: string[];
 };
 
 // Provider identifies a supported S3 compatible storage configuration.
@@ -195,6 +199,7 @@ export function normalizeSettings(raw: unknown): GeodeSettings {
     prefix: stringOr(source.prefix, DEFAULT_SETTINGS.prefix),
     accessKeyId: stringOr(source.accessKeyId, DEFAULT_SETTINGS.accessKeyId),
     secretId: stringOr(source.secretId, DEFAULT_SETTINGS.secretId),
+    ignorePatterns: stringArrayOr(source.ignorePatterns, DEFAULT_SETTINGS.ignorePatterns),
   };
 }
 
@@ -254,6 +259,18 @@ export function regionFor(settings: GeodeSettings): string {
   return settings.region.trim();
 }
 
+// arraysEqual reports whether two string arrays have the same length and elements in order.
+function arraysEqual(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) {
+      return false;
+    }
+  }
+  return true;
+}
 // saveDraft persists a copy of draft when the current connection state allows it.
 export async function saveDraft(
   target: SaveTarget,
@@ -280,7 +297,8 @@ export function settingsEqual(a: GeodeSettings, b: GeodeSettings): boolean {
     a.bucket === b.bucket &&
     a.prefix === b.prefix &&
     a.accessKeyId === b.accessKeyId &&
-    a.secretId === b.secretId
+    a.secretId === b.secretId &&
+    arraysEqual(a.ignorePatterns, b.ignorePatterns)
   );
 }
 
@@ -306,5 +324,13 @@ function stringOr(v: unknown, fallback: string): string {
     return v;
   }
 
+  return fallback;
+}
+
+// stringArrayOr returns v if it is a string array, otherwise fallback.
+function stringArrayOr(v: unknown, fallback: string[]): string[] {
+  if (Array.isArray(v) && v.every((item) => typeof item === "string")) {
+    return v;
+  }
   return fallback;
 }

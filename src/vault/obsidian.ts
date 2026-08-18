@@ -1,4 +1,5 @@
 import type { DataAdapter, Vault, Workspace } from "obsidian";
+import { shouldIgnore } from "../ignore.ts";
 import type { GeodeSettings } from "../settings/settings.ts";
 import { DRIFT_MESSAGE, type LocalWriter, type WriteMode } from "../sync/execute.ts";
 import {
@@ -59,19 +60,22 @@ export function createObsidianLocalWriter(adapter: DataAdapter): LocalWriter {
   };
 }
 
-// createObsidianReader returns a Reader backed by the real vault's file tree, relying on Obsidian
-// already excluding .obsidian/** from Vault.getFiles() so the plugin's own state file never shows
-// up as a vault file to snapshot.
-export function createObsidianReader(vault: Vault): Reader {
+// createObsidianReader returns a Reader backed by the real vault's file tree. Obsidian
+// already excludes .obsidian/** from Vault.getFiles(), so the plugin's own state file (which
+// lives inside .obsidian/plugins/geode/) never shows up as a vault file to snapshot.
+export function createObsidianReader(vault: Vault, ignorePatterns: string[]): Reader {
   return {
     listFiles: async () => {
       const files: FileInfo[] = [];
       for (const file of vault.getFiles()) {
-        files.push({
-          path: normalizePath(file.path),
-          size: file.stat.size,
-          mtime: file.stat.mtime,
-        });
+        const normalized = normalizePath(file.path);
+        if (!shouldIgnore(normalized, ignorePatterns)) {
+          files.push({
+            path: normalized,
+            size: file.stat.size,
+            mtime: file.stat.mtime,
+          });
+        }
       }
 
       return files;
