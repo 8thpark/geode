@@ -23,7 +23,7 @@
     "aws4fetch": "1.x.x"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.5",
+    "@biomejs/biome": "2.6.3",
     "@secretlint/secretlint-rule-preset-recommend": "13.x.x",
     "@types/node": "24.x.x",
     "concurrently": "10.x.x",
